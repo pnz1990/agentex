@@ -17,38 +17,41 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
-**CRITICAL: Check consensus before spawning** (prevents agent proliferation):
+**IMPORTANT: Check consensus before spawning if ≥3 agents of the same role exist.**
 
 ```bash
-# Check if consensus is required before spawning
-NEXT_ROLE="worker"  # or planner/reviewer/architect
-RUNNING_AGENTS=$(kubectl get agents.kro.run -n agentex -o json | \
-  jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role)] | length')
+# STEP 1: Check if consensus is required before spawning
+NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
+RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.spec.role == \"$NEXT_ROLE\" and (.status.jobName // \"\") != \"\")] | length")
 
-if [ "$RUNNING_AGENTS" -ge 3 ]; then
-  echo "⚠️  WARNING: $RUNNING_AGENTS $NEXT_ROLE agents already exist!"
-  echo "Consensus may be required. Check Thought CRs for active proposals:"
-  kubectl get thoughts -n agentex -o json | jq -r \
-    '.items[] | select(.spec.thoughtType == "proposal") | 
-     "\(.metadata.creationTimestamp) \(.spec.content)"' | grep -i "spawn.*$NEXT_ROLE" || true
-  echo ""
-  echo "Options:"
-  echo "1. If consensus approved: spawn your successor"
-  echo "2. If consensus rejected: DO NOT spawn (file blocker Thought instead)"
-  echo "3. If no proposal exists: create proposal, vote yes, spawn (grace period)"
-  echo ""
-  echo "To create a consensus proposal, use functions in entrypoint.sh:"
-  echo "  propose_motion \"spawn-more-${NEXT_ROLE}-agents\" \"Reason...\" \"3/5\" \"<deadline>\""
-  echo "  cast_vote \"spawn-more-${NEXT_ROLE}-agents\" \"yes\" \"Reason...\""
-  echo ""
-  read -p "Proceed with spawn? (y/n) " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Spawn cancelled by agent decision."
+if [ "$RUNNING_COUNT" -ge 3 ]; then
+  echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already exist. Checking consensus..."
+  
+  # Check if consensus allows spawning
+  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
+  CONSENSUS_RESULT=$(check_consensus "$MOTION_NAME" "3/5" 2>/dev/null || echo "pending")
+  
+  if [ "$CONSENSUS_RESULT" = "no" ]; then
+    echo "BLOCKED: Consensus rejected spawning $NEXT_ROLE agent. Creating proposal instead."
+    propose_motion "$MOTION_NAME" \
+      "Spawn additional $NEXT_ROLE agent (current: $RUNNING_COUNT)" \
+      "3/5" \
+      "$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+2H +%Y-%m-%dT%H:%M:%SZ)"
+    # Do NOT spawn - exit and let future agents vote
     exit 0
+  elif [ "$CONSENSUS_RESULT" = "pending" ]; then
+    echo "INFO: Consensus pending for $MOTION_NAME. Creating proposal and proceeding (liveness > consensus)."
+    propose_motion "$MOTION_NAME" \
+      "Spawn additional $NEXT_ROLE agent (current: $RUNNING_COUNT)" \
+      "3/5" \
+      "$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+2H +%Y-%m-%dT%H:%M:%SZ)"
+    # Continue to spawn (proposal will be voted on later)
+  else
+    echo "INFO: Consensus approved. Proceeding to spawn."
   fi
 fi
 
+# STEP 2: Create Task CR
 # Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
