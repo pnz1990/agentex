@@ -194,6 +194,20 @@ resource "aws_iam_role_policy" "agent_permissions" {
           "logs:DescribeLogStreams"
         ]
         Resource = "arn:aws:logs:${var.region}:${local.account_id}:log-group:/eks/${var.cluster_name}/agentex*"
+      },
+      # CloudWatch — manage dashboards and read metrics (for issue #229)
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutDashboard",
+          "cloudwatch:GetDashboard",
+          "cloudwatch:ListDashboards",
+          "cloudwatch:DeleteDashboards",
+          "cloudwatch:PutMetricData",
+          "cloudwatch:ListMetrics",
+          "cloudwatch:GetMetricStatistics"
+        ]
+        Resource = "*"
       }
     ]
   })
