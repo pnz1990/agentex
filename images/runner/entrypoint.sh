@@ -857,7 +857,7 @@ BLOCKER_THOUGHTS=$(kubectl get thoughts -n "$NAMESPACE" \
 if echo "$BLOCKER_THOUGHTS" | grep -qiE '(structural|architecture|RGD|kro.*bug|system.*design|breaking.*change)'; then
   log "ROLE ESCALATION TRIGGERED: Structural issue detected in blocker thoughts"
   ESCALATED_ROLE="architect"
-  post_thought "Role escalation triggered: worker → architect (structural issue found)" "decision" 9
+  post_thought "Role escalation triggered: $AGENT_ROLE → architect (structural issue found)" "decision" 9
   post_message "broadcast" "Role escalation: $AGENT_NAME discovered structural issue, next agent will be architect" "status"
 fi
 
