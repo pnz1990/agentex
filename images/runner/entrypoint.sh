@@ -918,6 +918,7 @@ if [ -n "$SWARM_REF" ]; then
   CURRENT_TASKS=$(echo "$SWARM_STATE" | jq -r '.data.tasksCompleted // "0"')
   CURRENT_PHASE=$(echo "$SWARM_STATE" | jq -r '.data.phase // "Forming"')
   CURRENT_MEMBERS=$(echo "$SWARM_STATE" | jq -r '.data.memberAgents // ""')
+  CURRENT_TIMESTAMP=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
   
   # Add this agent to member list if not already present
   if ! echo "$CURRENT_MEMBERS" | grep -q "$AGENT_NAME"; then
@@ -933,8 +934,32 @@ if [ -n "$SWARM_REF" ]; then
   # Increment tasks completed
   NEW_TASKS=$(( CURRENT_TASKS + 1 ))
   
-  # Update last activity timestamp
-  TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Check task completion status BEFORE updating timestamp
+  # This prevents resetting the idle timer when all tasks are already done
+  SWARM_TASKS=$(kubectl get tasks -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
+  TOTAL_TASKS=$(echo "$SWARM_TASKS" | jq '.items | length')
+  DONE_TASKS=$(echo "$SWARM_TASKS" | jq '[.items[] | select(.status.phase == "Done")] | length')
+  PENDING_TASKS=$(( TOTAL_TASKS - DONE_TASKS ))
+  
+  log "Swarm $SWARM_REF: $DONE_TASKS/$TOTAL_TASKS tasks done, $PENDING_TASKS pending"
+  
+  # Only update timestamp if there are pending tasks
+  # If all tasks are done, preserve the existing timestamp so idle timer can accumulate
+  if [ "$PENDING_TASKS" -gt 0 ]; then
+    TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    log "Swarm still has pending tasks - updating activity timestamp"
+  else
+    # All tasks done - preserve timestamp to allow dissolution
+    if [ -z "$CURRENT_TIMESTAMP" ]; then
+      # First time all tasks are done - set timestamp to mark completion
+      TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      log "All swarm tasks complete - setting final activity timestamp"
+    else
+      # Keep existing timestamp so idle counter accumulates
+      TIMESTAMP="$CURRENT_TIMESTAMP"
+      log "All tasks already complete - preserving timestamp for dissolution check"
+    fi
+  fi
   
   # Patch swarm state
   kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
@@ -943,19 +968,10 @@ if [ -n "$SWARM_REF" ]; then
   
   # Check for dissolution condition (only if not already disbanded)
   if [ "$CURRENT_PHASE" != "Disbanded" ]; then
-    # Get all tasks associated with this swarm
-    SWARM_TASKS=$(kubectl get tasks -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
-    TOTAL_TASKS=$(echo "$SWARM_TASKS" | jq '.items | length')
-    DONE_TASKS=$(echo "$SWARM_TASKS" | jq '[.items[] | select(.status.phase == "Done")] | length')
-    PENDING_TASKS=$(( TOTAL_TASKS - DONE_TASKS ))
-    
-    log "Swarm $SWARM_REF: $DONE_TASKS/$TOTAL_TASKS tasks done, $PENDING_TASKS pending"
-    
     # Dissolution condition: all tasks done AND no activity for 5 minutes
     if [ "$PENDING_TASKS" -eq 0 ] && [ "$TOTAL_TASKS" -gt 0 ]; then
-      LAST_ACTIVITY=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
-      if [ -n "$LAST_ACTIVITY" ]; then
-        LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null || echo 0)
+      if [ -n "$TIMESTAMP" ]; then
+        LAST_EPOCH=$(date -d "$TIMESTAMP" +%s 2>/dev/null || echo 0)
         NOW_EPOCH=$(date +%s)
         IDLE_SECONDS=$(( NOW_EPOCH - LAST_EPOCH ))
         
@@ -972,6 +988,8 @@ if [ -n "$SWARM_REF" ]; then
           
           # Post thought about dissolution
           post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed." "insight" 9
+        else
+          log "All tasks complete but only ${IDLE_SECONDS}s idle (need 300s for dissolution)"
         fi
       fi
     fi
