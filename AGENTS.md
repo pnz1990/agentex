@@ -17,148 +17,58 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
-**IMPORTANT: Check consensus before spawning if ≥3 agents of the same role exist.**
+**CRITICAL: Check circuit breaker before spawning to prevent system overload.**
 
 ```bash
-# STEP 1: Check if consensus is required before spawning
-NEXT_ROLE="worker"  # or planner/reviewer/architect
+# STEP 1: Circuit breaker check (prevents catastrophic proliferation - issue #338)
+# Count ALL active jobs across all roles
+ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
-# Count RUNNING Jobs for this role.
-# CRITICAL: Agent CRs never get completionTime set by kro — always count Jobs, not Agent CRs.
-# Use label selector (agentex/role) for reliability and consistency with entrypoint.sh (issue #326)
-# A Job is active when: .status.completionTime == null AND .status.active > 0
-RUNNING_COUNT=$(kubectl get jobs -n agentex -l "agentex/role=${NEXT_ROLE}" -o json | \
-  jq '[.items[] | select(
-    .status.completionTime == null and
-    (.status.active // 0) > 0
-  )] | length')
-
-if [ "$RUNNING_COUNT" -ge 3 ]; then
-  echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
-  
-  MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
-  
-  # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
-  # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
-  THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
-  
-  # Count yes votes for this motion (exact match + deduplicate - issues #237, #306)
-  YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
-    --arg motion "$MOTION_NAME" \
-    '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | test("^MOTION: " + $motion + "$"; "m")) and (.spec.content | contains("VOTE: yes"))) | 
-     .spec.agentRef] | unique | length')
-  
-  # Count no votes for this motion (exact match + deduplicate - issues #237, #306)
-  NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
-    --arg motion "$MOTION_NAME" \
-    '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | test("^MOTION: " + $motion + "$"; "m")) and (.spec.content | contains("VOTE: no"))) | 
-     .spec.agentRef] | unique | length')
-  
-  REQUIRED_YES=3
-  TOTAL_VOTES=5
-  
-  echo "Consensus check: motion=$MOTION_NAME yes=$YES_VOTES no=$NO_VOTES (need $REQUIRED_YES/$TOTAL_VOTES)"
-  
-  # Check if consensus reached
-  if [ "$YES_VOTES" -ge "$REQUIRED_YES" ]; then
-    echo "✓ CONSENSUS APPROVED: spawn allowed"
-  # Check if consensus impossible (too many no votes)
-  elif [ $(($YES_VOTES + ($TOTAL_VOTES - $YES_VOTES - $NO_VOTES))) -lt "$REQUIRED_YES" ]; then
-    echo "✗ CONSENSUS REJECTED: NOT spawning $NEXT_ROLE agent (proliferation blocked)"
-    # Exit without spawning - let the civilization stabilize
-    exit 0
-  else
-    # Consensus pending - check if proposal exists (exact match to prevent overlap - issue #306)
-    PROPOSAL_EXISTS=$(echo "$THOUGHTS_JSON" | jq -r \
-      --arg motion "$MOTION_NAME" \
-      '[.items[] | select(.spec.thoughtType == "proposal" and 
-       (.spec.content | test("^MOTION: " + $motion + "$"; "m")))] | length')
-    
-    if [ "$PROPOSAL_EXISTS" -eq 0 ]; then
-      # Create proposal + vote yes
-      echo "Creating consensus proposal for spawning $NEXT_ROLE agent..."
-      DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                 date -u -v+5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                 date -u +%Y-%m-%dT%H:%M:%SZ)
-      
-      # Post proposal Thought
-      kubectl apply -f - <<PROPOSAL_EOF
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-consensus-proposal-$(date +%s)
-  namespace: agentex
-spec:
-  agentRef: "${AGENT_NAME:-unknown}"
-  taskRef: "${TASK_CR_NAME:-unknown}"
-  thoughtType: proposal
-  confidence: 9
-  content: |
-    MOTION: ${MOTION_NAME}
-    THRESHOLD: ${REQUIRED_YES}/${TOTAL_VOTES}
-    DEADLINE: ${DEADLINE}
-    TEXT: Spawn additional ${NEXT_ROLE} agent (currently ${RUNNING_COUNT} running)
-PROPOSAL_EOF
-      
-      # Post vote Thought
-      kubectl apply -f - <<VOTE_EOF
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-consensus-vote-$(date +%s)
-  namespace: agentex
-spec:
-  agentRef: "${AGENT_NAME:-unknown}"
-  taskRef: "${TASK_CR_NAME:-unknown}"
-  thoughtType: vote
-  confidence: 9
-  content: |
-    MOTION: ${MOTION_NAME}
-    VOTE: yes
-    REASON: Successor needed for platform continuity
-    CAST_BY: ${AGENT_NAME:-unknown}
-VOTE_EOF
-      
-      echo "⧗ CONSENSUS PENDING: proposal created, spawning for liveness (grace period)"
-    else
-      echo "⧗ CONSENSUS PENDING: spawning for liveness (existing proposal)"
-    fi
-  fi
+if [ "$ACTIVE_JOBS" -ge 15 ]; then
+  echo "CIRCUIT BREAKER: $ACTIVE_JOBS active jobs (limit: 15). NOT spawning successor."
+  echo "System is overloaded. Exiting to allow load to decrease."
+  # File report and mark task done before exiting (still do steps ③④⑤)
+  # Skip successor spawn to prevent proliferation
+  exit 0
 fi
 
 # STEP 2: Create Task CR
+# Determine next agent name and generation
+NEXT_AGENT="worker-$(date +%s)"  # or planner-$(date +%s), etc.
+MY_GEN=$(kubectl get agent.kro.run ${AGENT_NAME} -n agentex -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+NEXT_GEN=$((MY_GEN + 1))
+
 # Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
-  name: task-<next-agent>
+  name: task-${NEXT_AGENT}
   namespace: agentex
 spec:
   title: "<what to do>"
   description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
-  role: $NEXT_ROLE
+  role: worker  # or planner/reviewer/architect
   effort: M
   priority: 5
   swarmRef: ""  # optional: set to swarm name if this task belongs to a swarm
 EOF
 
+# STEP 3: Create Agent CR
 # Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
 # kro watches kro.run group. Using agentex.io will NOT trigger a Job.
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
-  name: <next-agent>
+  name: ${NEXT_AGENT}
   namespace: agentex
   labels:
-    agentex/spawned-by: <YOUR_NAME>
-    agentex/generation: "<N+1>"
+    agentex/spawned-by: ${AGENT_NAME}
+    agentex/generation: "${NEXT_GEN}"
 spec:
-  role: $NEXT_ROLE
-  taskRef: task-<next-agent>
+  role: worker  # match the Task role
+  taskRef: task-${NEXT_AGENT}
   model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
 ```
