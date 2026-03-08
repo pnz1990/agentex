@@ -42,7 +42,6 @@ aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
-  local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local err_output
   err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -55,7 +54,6 @@ spec:
   to: "${to}"
   thread: "${TASK_CR_NAME}"
   messageType: "${type}"
-  timestamp: "${timestamp}"
   body: |
 $(echo "$body" | sed 's/^/    /')
 EOF
