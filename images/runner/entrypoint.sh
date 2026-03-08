@@ -345,6 +345,37 @@ TALLIED_AT: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   return 0
 }
 
+# Check how old a consensus proposal is (in seconds since creation).
+# Usage: check_proposal_age "motion-name"
+# Returns: number of seconds since proposal was created, or "0" if not found
+check_proposal_age() {
+  local motion_name="$1"
+  
+  # Get all proposal Thoughts for this motion
+  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  
+  # Find the proposal and get its creation timestamp
+  local proposal_timestamp=$(echo "$thoughts_json" | jq -r \
+    --arg motion "$motion_name" \
+    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | contains("MOTION: " + $motion))) | 
+     .metadata.creationTimestamp' | head -1)
+  
+  if [ -z "$proposal_timestamp" ]; then
+    echo "0"
+    return 0
+  fi
+  
+  # Convert timestamps to epoch seconds
+  local proposal_epoch=$(date -d "$proposal_timestamp" +%s 2>/dev/null || echo "0")
+  local now_epoch=$(date +%s)
+  
+  # Calculate age in seconds
+  local age_seconds=$((now_epoch - proposal_epoch))
+  
+  echo "$age_seconds"
+  return 0
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
@@ -902,18 +933,34 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
       # Don't spawn - consensus rejected it
       NEEDS_EMERGENCY_SPAWN=false
     else
-      # Consensus pending - create proposal and vote yes (this agent believes it's necessary)
-      log "Consensus PENDING: creating proposal for spawning $NEXT_ROLE agent"
-      DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-      propose_motion "$MOTION_NAME" \
-        "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
-        "3/5" \
-        "$DEADLINE"
-      cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+      # Consensus pending - check proposal age to balance liveness vs consensus
+      log "Consensus PENDING: checking proposal age for spawning $NEXT_ROLE agent"
       
-      log "Consensus proposal created. Spawning anyway (urgent: maintain liveness)."
-      # Note: We spawn anyway in this case because maintaining liveness is critical.
-      # Other agents can vote and future spawns will see the consensus result.
+      # Check if proposal already exists
+      PROPOSAL_AGE=$(check_proposal_age "$MOTION_NAME")
+      
+      if [ "$PROPOSAL_AGE" -eq 0 ]; then
+        # No proposal exists yet - create one and vote yes
+        log "No consensus proposal exists - creating one"
+        DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+        propose_motion "$MOTION_NAME" \
+          "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
+          "3/5" \
+          "$DEADLINE"
+        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        
+        # Spawn immediately when creating proposal (liveness critical on first detection)
+        log "Consensus proposal created. Spawning immediately (liveness critical)."
+      elif [ "$PROPOSAL_AGE" -lt 300 ]; then
+        # Proposal is recent (< 5 minutes) - spawn for liveness
+        log "Consensus proposal is ${PROPOSAL_AGE}s old (< 5min grace period) - spawning for liveness"
+        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+      else
+        # Proposal is stale (>= 5 minutes) - block spawn, consensus has had time
+        log "Consensus proposal is ${PROPOSAL_AGE}s old (>= 5min) - BLOCKING spawn until consensus reached"
+        post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion $MOTION_NAME. $RUNNING_AGENTS $NEXT_ROLE agents running." "blocker" 6
+        NEEDS_EMERGENCY_SPAWN=false
+      fi
     fi
   fi
 
