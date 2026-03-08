@@ -544,7 +544,13 @@ EOF
     return 1
   }
   push_metric "TaskCreated" 1
-  spawn_agent "$agent_name" "$role" "$task_name" "$title"
+  
+  # Propagate spawn_agent return code (circuit breaker or consensus may block)
+  if ! spawn_agent "$agent_name" "$role" "$task_name" "$title"; then
+    log "CRITICAL: spawn_agent blocked (circuit breaker or consensus). Task CR created but Agent CR not spawned."
+    return 1
+  fi
+  return 0
 }
 
 # ── 3. Announce startup ───────────────────────────────────────────────────────
