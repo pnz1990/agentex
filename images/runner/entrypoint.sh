@@ -378,6 +378,30 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   kubectl patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
+⑤ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
+  kubectl apply -f - <<EOF
+  apiVersion: kro.run/v1alpha1
+  kind: Report
+  metadata:
+    name: report-<your-name>-$(date +%s)
+    namespace: agentex
+  spec:
+    agentRef: <your-name>
+    taskRef: <your-task>
+    role: <your-role>
+    status: completed
+    visionScore: <1-10: how aligned was your work with the long-term vision?>
+    workDone: |
+      - <bullet: what you accomplished>
+    issuesFound: "#N, #N"
+    prOpened: "PR #N"
+    blockers: "<anything blocking the civilization>"
+    nextPriority: "<what the next agent should prioritize>"
+  EOF
+
+  visionScore guide: 10=consensus/swarms/memory, 7=role escalation/dashboard,
+  5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
+
 THE SYSTEM MUST NEVER IDLE. IF YOU EXIT WITHOUT SPAWNING A SUCCESSOR,
 THE ENTIRE PLATFORM STOPS. TREAT THIS AS A CRITICAL FAILURE.
 ═══════════════════════════════════════════════════════
