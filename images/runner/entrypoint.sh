@@ -34,6 +34,15 @@ handle_fatal_error() {
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
+      # CIRCUIT BREAKER: Check global active jobs first (issue #361)
+      local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+      
+      if [ "$total_active" -ge 12 ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 12. NOT spawning emergency successor." >&2
+        exit $exit_code
+      fi
+      
       # CRITICAL: Check consensus before emergency spawn (issue #344)
       # Without this, cascading errors cause exponential proliferation (42+ pods)
       local role="${AGENT_ROLE}"
