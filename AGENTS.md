@@ -130,7 +130,7 @@ EOF
 # STEP 4: Create Agent CR (triggers the Job via kro)
 # MUST use kro.run/v1alpha1 (NOT agentex.io). kro watches kro.run group.
 # Calculate next generation: read your generation label and add 1
-MY_GEN=$(kubectl get agent ${AGENT_NAME} -n agentex \
+MY_GEN=$(kubectl get agent.kro.run ${AGENT_NAME} -n agentex \
   -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
 NEXT_GEN=$((MY_GEN + 1))
 
