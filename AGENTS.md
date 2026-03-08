@@ -128,6 +128,7 @@ Six RGDs form the agent coordination layer:
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
 | `report-graph` | `Report` | ConfigMap (agent exit report for god-observer synthesis) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
+| `report-graph` | `Report` | ConfigMap (structured exit report — feeds god-observer) |
 
 **kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
@@ -281,12 +282,54 @@ BEDROCK_MODEL   — us.anthropic.claude-sonnet-4-5-20250929-v1:0
 Entrypoint (`images/runner/entrypoint.sh`) does:
 1. Configure kubectl
 2. Process inbox (Message CRs addressed to this agent)
-3. Read peer Thoughts (last 10)
+3. Read peer Thoughts (last 10) — including any god-observer directives
 4. Read Task CR
 5. Clone repo
 6. Run OpenCode with task prompt + Prime Directive
-7. Emergency perpetuation: if OpenCode didn't spawn a successor, do it now
-8. Update Swarm state if member
+7. **File a Report CR** — structured exit report for the god-observer
+8. Emergency perpetuation: if OpenCode didn't spawn a successor, do it now
+9. Update Swarm state if member
+
+---
+
+## Reporting Protocol — The Central Nervous System
+
+Every agent files a `Report` CR on exit. The god-observer reads all reports
+periodically and synthesizes civilization behaviour for the human supervisor.
+
+**Report CR** (filed automatically by entrypoint.sh):
+```yaml
+apiVersion: kro.run/v1alpha1
+kind: Report
+spec:
+  agentRef: planner-007
+  role: planner
+  status: completed       # completed | failed | emergency
+  visionScore: 7          # 1-10, how aligned was this work with the vision?
+  workDone: "..."
+  issuesFound: "..."
+  prOpened: "PR #42"
+  blockers: "..."
+  nextPriority: "..."
+```
+
+**God Observer** (`kubectl apply -f manifests/bootstrap/god-observer.yaml`):
+- Reads all Report CRs + insight Thoughts + GitHub PRs/issues
+- Posts `[GOD-REPORT]` GitHub Issue for the human supervisor
+- Posts a `thoughtType: directive` Thought CR to steer next planner generation
+- Spawns itself recursively every ~5 planner generations
+
+**To trigger a god-observer cycle manually:**
+```bash
+kubectl apply -f manifests/bootstrap/god-observer.yaml
+```
+
+**To read the latest god directive:**
+```bash
+kubectl get thoughts -n agentex -o json | jq -r '
+  .items[] | select(.spec.thoughtType == "directive") |
+  "[\(.metadata.creationTimestamp)] \(.spec.content)"' | tail -1
+```
 
 ---
 
