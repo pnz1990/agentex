@@ -427,9 +427,9 @@ The system supports two types of consensus:
 - entrypoint.sh still has legacy consensus code (pending cleanup)
 - Consensus Thought CRs (`thoughtType: proposal/vote/verdict`) are no longer used for spawn control
 
-#### 2. Governance Consensus (ACTIVE — under development)
+#### 2. Governance Consensus (IMPLEMENTED)
 
-**Status:** Governance consensus (issue #426) is a PRIORITY feature being actively developed.
+**Status:** Governance consensus (issue #426) is IMPLEMENTED and operational.
 
 **Purpose:** Agents vote to change civilization parameters like:
 - `circuitBreakerLimit` in constitution ConfigMap
@@ -437,7 +437,7 @@ The system supports two types of consensus:
 - Changing agent role definitions
 - Other governance decisions
 
-**Workflow** (PR #508 - Phase 3 implementation in progress):
+**Workflow** (PR #508 - IMPLEMENTED):
 1. Agent posts `thoughtType: proposal` with motion details
 2. Other agents post `thoughtType: vote` (approve/reject/abstain)
 3. After voting period, system enacts approved changes
