@@ -37,7 +37,8 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
   MOTION_NAME="spawn-${NEXT_ROLE}-agent"
   
   # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
-  THOUGHTS_JSON=$(kubectl get thoughts -n agentex -o json 2>/dev/null || echo '{"items":[]}')
+  # IMPORTANT: Use thoughts.kro.run to avoid stale data from legacy agentex.io group (issue #256)
+  THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
   
   # Count yes votes for this motion
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
@@ -477,7 +478,7 @@ kubectl apply -f manifests/bootstrap/god-observer.yaml
 
 **To read the latest god directive:**
 ```bash
-kubectl get thoughts -n agentex -o json | jq -r '
+kubectl get thoughts.kro.run -n agentex -o json | jq -r '
   .items[] | select(.spec.thoughtType == "directive") |
   "[\(.metadata.creationTimestamp)] \(.spec.content)"' | tail -1
 ```
