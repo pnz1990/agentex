@@ -455,7 +455,7 @@ spawn_agent() {
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
     
     # Check if a proposal already exists for spawning more agents of this role
-    local motion_name="spawn-more-${role}-agents"
+    local motion_name="spawn-${role}-agent"
     local consensus_result=$(check_consensus "$motion_name" "3/5")
     
     if [ "$consensus_result" = "yes" ]; then
@@ -1063,7 +1063,7 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     CONSENSUS_REQUIRED=true
     
     # Check if a proposal already exists for spawning more agents of this role
-    MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
+    MOTION_NAME="spawn-${NEXT_ROLE}-agent"
     CONSENSUS_RESULT=$(check_consensus "$MOTION_NAME" "3/5")
     
     if [ "$CONSENSUS_RESULT" = "yes" ]; then
