@@ -86,6 +86,28 @@ EOF
     log "ERROR: Failed to create Thought CR $thought_name: $err_output"
     return 0  # Don't fail the agent, but log the error
   }
+  
+  # CRITICAL FIX for issue #221: kubectl apply returns BEFORE the resource is committed
+  # Wait up to 1 second to verify the Thought CR actually exists in the cluster
+  # This ensures consensus proposals/votes are visible before emergency perpetuation proceeds
+  local retries=10
+  local wait=0
+  while [ $retries -gt 0 ]; do
+    if kubectl get thought "$thought_name" -n "$NAMESPACE" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+    retries=$((retries - 1))
+    wait=$((wait + 100))
+  done
+  
+  # If Thought still doesn't exist after 1 second, log critical error
+  if [ $retries -eq 0 ]; then
+    log "CRITICAL: Thought CR $thought_name not visible after ${wait}ms (type=$type)"
+    push_metric "ThoughtCreationTimeout" 1
+    return 1  # Signal failure to caller
+  fi
+  
   push_metric "ThoughtCreated" 1
 
   # Persist thought to S3 for long-term memory (survives cluster restarts)
