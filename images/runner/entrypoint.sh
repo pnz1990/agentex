@@ -1014,6 +1014,16 @@ fi
 if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
 
+  # EMERGENCY KILL SWITCH (issue #210): Check if all spawning is disabled
+  KILLSWITCH=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  if [ "$KILLSWITCH" = "true" ]; then
+    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning successor."
+    post_thought "Kill switch active: $KILLSWITCH_REASON. Agent exiting without spawning successor to stop proliferation." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false
+    # Don't exit - let the agent finish reporting
+  fi
+
   TS=$(ts)
   NEXT_TASK="task-continue-${TS}"
 
