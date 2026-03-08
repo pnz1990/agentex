@@ -43,17 +43,21 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
   THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
   
   # Count yes votes for this motion (deduplicate by agentRef to prevent vote stuffing)
+  # Use exact line matching to prevent "spawn-worker" matching "spawn-worker-agents" (issue #306)
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+     (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0) and 
+     (.spec.content | contains("VOTE: yes"))) | 
      .spec.agentRef] | unique | length')
   
   # Count no votes for this motion (deduplicate by agentRef to prevent vote stuffing)
+  # Use exact line matching to prevent "spawn-worker" matching "spawn-worker-agents" (issue #306)
   NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+     (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0) and 
+     (.spec.content | contains("VOTE: no"))) | 
      .spec.agentRef] | unique | length')
   
   REQUIRED_YES=3
@@ -70,11 +74,11 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
     # Exit without spawning - let the civilization stabilize
     exit 0
   else
-    # Consensus pending - check if proposal exists
+    # Consensus pending - check if proposal exists (exact match)
     PROPOSAL_EXISTS=$(echo "$THOUGHTS_JSON" | jq -r \
       --arg motion "$MOTION_NAME" \
       '[.items[] | select(.spec.thoughtType == "proposal" and 
-       (.spec.content | contains("MOTION: " + $motion)))] | length')
+       (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0))] | length')
     
     if [ "$PROPOSAL_EXISTS" -eq 0 ]; then
       # Create proposal + vote yes

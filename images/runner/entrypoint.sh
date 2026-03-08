@@ -289,10 +289,10 @@ check_consensus() {
   # Get all proposal and vote Thoughts for this motion
   local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
-  # Find the proposal
+  # Find the proposal (exact match to prevent "spawn-worker" matching "spawn-worker-agents")
   local proposal=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | contains("MOTION: " + $motion))) | 
+    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0)) | 
      .metadata.name' | head -1)
   
   if [ -z "$proposal" ]; then
@@ -302,24 +302,29 @@ check_consensus() {
   fi
   
   # Count yes and no votes (deduplicate by agentRef to prevent vote stuffing)
+  # Use exact line matching to prevent "spawn-worker" matching "spawn-worker-agents" (issue #306)
   local yes_votes=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '[.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+    '[.items[] | select(.spec.thoughtType == "vote" and 
+     (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0) and 
+     (.spec.content | contains("VOTE: yes"))) | 
      .spec.agentRef] | unique | length')
   
   local no_votes=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '[.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+    '[.items[] | select(.spec.thoughtType == "vote" and 
+     (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0) and 
+     (.spec.content | contains("VOTE: no"))) | 
      .spec.agentRef] | unique | length')
   
   log "Consensus check: motion=$motion_name yes=$yes_votes no=$no_votes threshold=$threshold"
   
   # Check if consensus threshold is met
   if [ "$yes_votes" -ge "$required_yes" ]; then
-    # Post verdict Thought if not already posted
+    # Post verdict Thought if not already posted (exact match)
     local existing_verdict=$(echo "$thoughts_json" | jq -r \
       --arg motion "$motion_name" \
-      '.items[] | select(.spec.thoughtType == "verdict" and (.spec.content | contains("MOTION: " + $motion))) | 
+      '.items[] | select(.spec.thoughtType == "verdict" and (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0)) | 
        .metadata.name' | head -1)
     
     if [ -z "$existing_verdict" ]; then
@@ -342,10 +347,10 @@ TALLIED_AT: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local max_possible_yes=$((yes_votes + remaining_voters))
   
   if [ "$max_possible_yes" -lt "$required_yes" ]; then
-    # Post rejection verdict if not already posted
+    # Post rejection verdict if not already posted (exact match)
     local existing_verdict=$(echo "$thoughts_json" | jq -r \
       --arg motion "$motion_name" \
-      '.items[] | select(.spec.thoughtType == "verdict" and (.spec.content | contains("MOTION: " + $motion))) | 
+      '.items[] | select(.spec.thoughtType == "verdict" and (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0)) | 
        .metadata.name' | head -1)
     
     if [ -z "$existing_verdict" ]; then
@@ -376,10 +381,10 @@ check_proposal_age() {
   # Get all proposal Thoughts for this motion
   local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
-  # Find the proposal and extract its creation timestamp
+  # Find the proposal and extract its creation timestamp (exact match)
   local proposal_time=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | contains("MOTION: " + $motion))) | 
+    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | split("\n") | map(select(. == ("MOTION: " + $motion))) | length > 0)) | 
      .metadata.creationTimestamp' | head -1)
   
   if [ -z "$proposal_time" ]; then
