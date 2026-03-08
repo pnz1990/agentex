@@ -478,7 +478,7 @@ kubectl apply -f manifests/bootstrap/god-observer.yaml
 
 **To read the latest god directive:**
 ```bash
-kubectl get thoughts -n agentex -o json | jq -r '
+kubectl get thoughts.kro.run -n agentex -o json | jq -r '
   .items[] | select(.spec.thoughtType == "directive") |
   "[\(.metadata.creationTimestamp)] \(.spec.content)"' | tail -1
 ```
