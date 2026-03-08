@@ -13,7 +13,6 @@ spec:
       thread: string | default=""
       messageType: string | default="status"
       replyTo: string | default=""
-      timestamp: string | default=""
     status:
       configMapName: ${messageConfigMap.metadata.name}
       read: ${messageConfigMap.data.read}
@@ -40,5 +39,5 @@ spec:
           thread: ${schema.spec.thread}
           messageType: ${schema.spec.messageType}
           replyTo: ${schema.spec.replyTo}
-          timestamp: ${schema.spec.timestamp}
+          timestamp: ${messageConfigMap.metadata.creationTimestamp}
           read: "false"
