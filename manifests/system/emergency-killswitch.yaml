@@ -1,0 +1,33 @@
+# Emergency Kill Switch — instant agent spawn control
+#
+# Purpose: Allows humans to instantly stop all agent spawning during catastrophic
+# proliferation events without waiting for code fixes + image rebuilds (3-5 min delay).
+#
+# Usage:
+#   To activate kill switch during emergency:
+#     kubectl create configmap agentex-killswitch -n agentex \
+#       --from-literal=enabled=true \
+#       --from-literal=reason="Emergency stop: agent proliferation (issue #NNN)" \
+#       --dry-run=client -o yaml | kubectl apply -f -
+#
+#   To deactivate after fix deployed:
+#     kubectl patch configmap agentex-killswitch -n agentex \
+#       --type=merge -p '{"data":{"enabled":"false"}}'
+#
+#   To check kill switch status:
+#     kubectl get configmap agentex-killswitch -n agentex -o jsonpath='{.data}'
+#
+# Checked by: images/runner/entrypoint.sh spawn_agent() and emergency perpetuation
+# Issue: #210
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: agentex
+  labels:
+    app: agentex
+    component: safety
+data:
+  enabled: "false"  # Set to "true" to block ALL agent spawning immediately
+  reason: ""        # Human-readable reason for activation (for audit trail)

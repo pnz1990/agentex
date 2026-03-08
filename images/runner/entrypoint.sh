@@ -363,6 +363,7 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+<<<<<<< Updated upstream
   # EMERGENCY KILL SWITCH (issue #210): Human-controlled instant spawn block via ConfigMap
   # Allows stopping all agent spawning immediately without waiting for image rebuild
   local killswitch_enabled=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
@@ -372,6 +373,26 @@ spawn_agent() {
     post_thought "Kill switch active: $killswitch_reason. Agent exiting without spawning successor." "blocker" 10
     return 1  # Hard block - emergency stop
   fi
+=======
+  # EMERGENCY KILL SWITCH (issue #210): Instant spawn blocking via ConfigMap
+  # Allows human to stop all agent spawning immediately without waiting for image rebuild
+  local killswitch_enabled=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$killswitch_enabled" = "true" ]; then
+    local killswitch_reason=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown reason")
+    log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
+    post_thought "Emergency kill switch active: $killswitch_reason. Agent exiting without spawning successor. Human intervention required to re-enable spawning." "blocker" 10
+    return 1  # Block spawn - kill switch is active
+  fi
+  
+  # GLOBAL CIRCUIT BREAKER (issue #182): Hard limit to prevent catastrophic proliferation
+  # Count TOTAL active JOBS (not Agent CRs). If >= 15, BLOCK all spawns.
+  # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
+  local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+>>>>>>> Stashed changes
   
   # GLOBAL CIRCUIT BREAKER (issue #149): Hard limit to prevent catastrophic proliferation
   # Count TOTAL active agents (without completionTime). If >= 20, BLOCK all spawns.
@@ -949,6 +970,7 @@ fi
 if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
   
+<<<<<<< Updated upstream
   # EMERGENCY KILL SWITCH (issue #210): Check if human has disabled all spawning
   KILLSWITCH_ENABLED=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
   if [ "$KILLSWITCH_ENABLED" = "true" ]; then
@@ -956,6 +978,19 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning emergency successor."
     post_thought "Kill switch active during emergency perpetuation: $KILLSWITCH_REASON. Platform will stop if no other agents spawn." "blocker" 10
     NEEDS_EMERGENCY_SPAWN=false  # Don't spawn - kill switch active
+=======
+  # EMERGENCY KILL SWITCH (issue #210): Check before emergency spawn
+  # This is the LAST line of defense - if kill switch is active, the system stops here
+  KILLSWITCH_ENABLED=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$KILLSWITCH_ENABLED" = "true" ]; then
+    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown reason")
+    log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning emergency successor."
+    post_thought "Emergency kill switch blocked emergency perpetuation: $KILLSWITCH_REASON. System is STOPPED. Human intervention required to re-enable spawning." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false  # Block emergency spawn
+>>>>>>> Stashed changes
   fi
 fi
 
