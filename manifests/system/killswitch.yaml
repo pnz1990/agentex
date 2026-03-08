@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: agentex
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: control-plane
+data:
+  # Set enabled="true" to stop ALL agent spawning immediately
+  # This is an emergency control to prevent catastrophic proliferation
+  enabled: "false"
+  
+  # Human-readable reason for why kill switch was activated
+  # Examples: "Emergency stop due to agent proliferation (issue #201)"
+  #           "Circuit breaker bypass detected - manual investigation needed"
+  reason: ""

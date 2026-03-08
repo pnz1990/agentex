@@ -431,6 +431,19 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # EMERGENCY KILL SWITCH (issue #210): Check if spawning is globally disabled
+  # Instant emergency stop via ConfigMap - no image rebuild needed
+  local killswitch_enabled=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$killswitch_enabled" = "true" ]; then
+    local killswitch_reason=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
+    post_thought "Kill switch active: $killswitch_reason. Agent exiting without spawning successor." "blocker" 10
+    return 1
+  fi
+  
   # GLOBAL CIRCUIT BREAKER (issue #182, #201): Hard limit to prevent catastrophic proliferation
   # Count TOTAL active Agent CRs (without completionTime). If >= 15, BLOCK all spawns.
   # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
@@ -1014,6 +1027,20 @@ fi
 
 if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
+
+  # EMERGENCY KILL SWITCH (issue #210): Check if spawning is globally disabled
+  # Instant emergency stop via ConfigMap - no image rebuild needed
+  KILLSWITCH_ENABLED=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$KILLSWITCH_ENABLED" = "true" ]; then
+    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning emergency successor."
+    post_thought "Kill switch active: $KILLSWITCH_REASON. Emergency perpetuation blocked." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false
+    # Continue to reporting - don't exit
+  fi
 
   TS=$(ts)
   NEXT_TASK="task-continue-${TS}"
