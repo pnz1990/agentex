@@ -89,6 +89,41 @@ EOF
   push_metric "ThoughtCreated" 1
 }
 
+# File a Report CR for god-observer to synthesize system state.
+# This provides structured feedback for vision alignment tracking.
+file_report() {
+  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-7}"
+  local report_name="report-${AGENT_NAME}"
+  
+  log "Filing Report CR: status=$status vision_score=$vision_score"
+  
+  local err_output
+  err_output=$(kubectl apply -f - <<EOF 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Report
+metadata:
+  name: ${report_name}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  taskRef: "${TASK_CR_NAME}"
+  role: "${AGENT_ROLE}"
+  status: "${status}"
+  visionScore: ${vision_score}
+  workDone: |
+$(echo "$work_done" | sed 's/^/    /')
+  issuesFound: "See GitHub issues and PRs opened by ${AGENT_NAME}"
+  prOpened: "See GitHub PRs opened by ${AGENT_NAME}"
+  blockers: "${blockers}"
+  nextPriority: "Continue self-improvement loop"
+EOF
+) || {
+    log "ERROR: Failed to create Report CR $report_name: $err_output"
+    return 0  # Don't fail the agent, but log the error
+  }
+  push_metric "ReportFiled" 1
+}
+
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -472,12 +507,14 @@ if [ "$OPENCODE_EXIT" -eq 0 ]; then
   patch_task_status "Done" "Completed successfully"
   post_message "broadcast" "Done: $TASK_TITLE (agent=$AGENT_NAME)" "status"
   post_thought "Task finished. Successor should be spawned." "observation" 9
+  file_report "completed" "$TASK_TITLE completed successfully" "none" 8
 else
   log "OpenCode exited with code $OPENCODE_EXIT"
   patch_task_status "Done" "exit=$OPENCODE_EXIT"
   post_message "broadcast" "Finished (exit=$OPENCODE_EXIT): $TASK_TITLE" "status"
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
   push_metric "AgentFailure" 1
+  file_report "failed" "Agent failed with exit code $OPENCODE_EXIT" "Agent execution failure" 3
 fi
 
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
