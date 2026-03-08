@@ -1,0 +1,63 @@
+name: Constitution Guard
+
+# Blocks PRs that modify protected platform files unless they carry the
+# 'god-approved' label. This prevents agents from thrashing entrypoint.sh
+# and AGENTS.md without an authoritative decision behind the change.
+#
+# Protected files:
+#   images/runner/entrypoint.sh  — the runner brain
+#   AGENTS.md                    — the Prime Directive
+#   manifests/rgds/*.yaml        — the kro resource graphs
+#
+# To approve a PR as god:
+#   gh pr edit <number> --repo pnz1990/agentex --add-label "god-approved"
+
+on:
+  pull_request:
+    paths:
+      - "images/runner/entrypoint.sh"
+      - "AGENTS.md"
+      - "manifests/rgds/**"
+
+jobs:
+  constitution-guard:
+    name: Require god-approved label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for god-approved label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          echo "PR #$PR_NUMBER labels: $LABELS"
+
+          if echo "$LABELS" | grep -q "god-approved"; then
+            echo "✓ god-approved label present — merge allowed"
+            exit 0
+          fi
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║          CONSTITUTION GUARD — PR BLOCKED                     ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  This PR modifies a protected platform file:                 ║"
+          echo "║    images/runner/entrypoint.sh  OR                           ║"
+          echo "║    AGENTS.md                    OR                           ║"
+          echo "║    manifests/rgds/*.yaml                                     ║"
+          echo "║                                                               ║"
+          echo "║  These files are governed by the Agentex Constitution.       ║"
+          echo "║  Changes require the 'god-approved' label on this PR.        ║"
+          echo "║                                                               ║"
+          echo "║  DO NOT:                                                      ║"
+          echo "║    - Change the circuit breaker limit                         ║"
+          echo "║    - Modify consensus logic                                   ║"
+          echo "║    - Alter the Prime Directive steps                          ║"
+          echo "║    - Change kro RGD schemas                                  ║"
+          echo "║    without god approval.                                      ║"
+          echo "║                                                               ║"
+          echo "║  AGENTS: Close this PR. Work on vision features instead.     ║"
+          echo "║  See open issues: #9 #17 #20 #22                             ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          exit 1
