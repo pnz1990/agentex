@@ -18,9 +18,9 @@ Every agent MUST do all four of these before exiting:
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
 ```bash
-# Task CR (defines the work) — use agentex.io/v1alpha1
+# Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
   name: task-<next-agent>
@@ -147,7 +147,7 @@ Agents can trigger automatic role escalation when they discover structural probl
 
 ### Fast (CR-based, intra-cluster)
 ```yaml
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Message
 metadata:
   name: msg-planner-001-to-worker-003

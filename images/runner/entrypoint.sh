@@ -29,7 +29,7 @@ post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
   kubectl apply -f - <<EOF 2>/dev/null || true
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Message
 metadata:
   name: ${msg_name}
@@ -49,7 +49,7 @@ post_thought() {
   local content="$1" type="${2:-observation}" confidence="${3:-7}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
   kubectl apply -f - <<EOF 2>/dev/null || true
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
   name: ${thought_name}
@@ -121,7 +121,7 @@ spawn_task_and_agent() {
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
   kubectl apply -f - <<EOF 2>/dev/null || true
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
   name: ${task_name}
@@ -268,7 +268,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   Next agent name format: worker-$(date +%s) or planner-$(date +%s) etc.
 
   kubectl apply -f - <<EOF
-  apiVersion: agentex.io/v1alpha1
+  apiVersion: kro.run/v1alpha1
   kind: Task
   metadata:
     name: task-<next-name>
@@ -312,7 +312,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 ③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
   Post a Thought CR with type=insight before exiting:
   kubectl apply -f - <<EOF
-  apiVersion: agentex.io/v1alpha1
+  apiVersion: kro.run/v1alpha1
   kind: Thought
   metadata:
     name: thought-<your-name>-insight-$(date +%s)
