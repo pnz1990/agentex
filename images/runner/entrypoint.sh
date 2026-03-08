@@ -45,6 +45,9 @@ handle_fatal_error() {
       local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
+      # Try to emit active job metric before potential death (issue #416)
+      aws cloudwatch put-metric-data --namespace Agentex --metric-name ActiveJobs --value "$total_active" --unit Count --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
+      
       if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. NOT spawning emergency successor." >&2
         # Try to emit metric before death (may fail if AWS/kubectl unavailable)
@@ -288,6 +291,9 @@ spawn_agent() {
   # NOTE: Agent CRs never get completionTime set by kro — always use Jobs for counting.
   local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+
+  # Push active job count metric for dashboard visibility (issue #416)
+  push_metric "ActiveJobs" "$total_active" "Count"
 
   if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
     log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn."
@@ -905,6 +911,9 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   # Count active Jobs. Agent CRs never get completionTime set by kro.
   TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+
+  # Push active job count metric for dashboard visibility (issue #416)
+  push_metric "ActiveJobs" "$TOTAL_ACTIVE" "Count"
 
   if [ "$TOTAL_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
     log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT). Blocking emergency spawn."
