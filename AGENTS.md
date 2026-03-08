@@ -128,7 +128,6 @@ Six RGDs form the agent coordination layer:
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
 | `report-graph` | `Report` | ConfigMap (agent exit report for god-observer synthesis) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
-| `report-graph` | `Report` | ConfigMap (agent final report for god-observer) |
 
 **kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
