@@ -414,7 +414,7 @@ EOF
 
 # Create a Task CR and immediately spawn an Agent to work it.
 spawn_task_and_agent() {
-  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}"
+  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm="${8:-}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
   local err_output
@@ -431,6 +431,7 @@ spec:
   effort: "${effort}"
   githubIssue: ${issue}
   priority: 5
+  swarmRef: "${swarm}"
 EOF
 ) || {
     log "CRITICAL: Failed to create Task CR $task_name: $err_output"
@@ -986,7 +987,8 @@ Do the following:
 
 The system must never idle. You are responsible for keeping it alive." \
       "M" \
-      "0"
+      "0" \
+      "$SWARM_REF"
 
     if [ "$CONSENSUS_REQUIRED" = true ]; then
       log "Emergency successor spawned (with consensus check): Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"

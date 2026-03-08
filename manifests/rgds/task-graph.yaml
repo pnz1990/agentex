@@ -14,6 +14,7 @@ spec:
       effort: string | default="M"
       githubIssue: integer | default=0
       context: string | default=""
+      swarmRef: string | default=""
     status:
       configMapName: ${taskConfigMap.metadata.name}
       phase: ${taskConfigMap.data.phase}
@@ -34,15 +35,17 @@ spec:
             agentex/task: ${schema.metadata.name}
             agentex/role: ${schema.spec.role}
             agentex/priority: ${string(schema.spec.priority)}
-        data:
-          title: ${schema.spec.title}
-          description: ${schema.spec.description}
-          role: ${schema.spec.role}
-          priority: ${string(schema.spec.priority)}
-          effort: ${schema.spec.effort}
-          githubIssue: ${string(schema.spec.githubIssue)}
-          context: ${schema.spec.context}
-          phase: "Unassigned"
-          agentRef: ""
-          outcome: ""
-          completedAt: ""
+            agentex/swarm: ${schema.spec.swarmRef}
+          data:
+            title: ${schema.spec.title}
+            description: ${schema.spec.description}
+            role: ${schema.spec.role}
+            priority: ${string(schema.spec.priority)}
+            effort: ${schema.spec.effort}
+            githubIssue: ${string(schema.spec.githubIssue)}
+            context: ${schema.spec.context}
+            swarmRef: ${schema.spec.swarmRef}
+            phase: "Unassigned"
+            agentRef: ""
+            outcome: ""
+            completedAt: ""
