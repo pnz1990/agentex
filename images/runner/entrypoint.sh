@@ -368,8 +368,10 @@ spec:
   priority: 5
 EOF
 ) || {
-    log "ERROR: Failed to create Task CR $task_name: $err_output"
-    log "ERROR: Will still attempt to spawn Agent (may fail without Task)"
+    log "CRITICAL: Failed to create Task CR $task_name: $err_output"
+    log "CRITICAL: Cannot spawn Agent without Task. Perpetuation chain broken."
+    push_metric "AgentFailure" 1
+    return 1
   }
   push_metric "TaskCreated" 1
   spawn_agent "$agent_name" "$role" "$task_name" "$title"
