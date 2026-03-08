@@ -336,6 +336,28 @@ check_proposal_age() {
   return 0
 }
 
+# Check if spawning an agent of a given role is safe (issue #177)
+# Returns: 0 if safe to spawn, 1 if should check consensus first
+# Usage: if should_spawn_agent "worker"; then spawn_agent ...; fi
+should_spawn_agent() {
+  local role="$1"
+  
+  # Count ACTIVE agents of the same role (without completionTime)
+  # This prevents false positives from completed/failed agents (issue #154)
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$running_agents" -ge 3 ]; then
+    log "should_spawn_agent: $running_agents agents with role=$role exist (threshold: 3)"
+    echo "$running_agents"
+    return 1  # Consensus required
+  else
+    log "should_spawn_agent: $running_agents agents with role=$role exist (safe to spawn)"
+    echo "$running_agents"
+    return 0  # Safe to spawn
+  fi
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
