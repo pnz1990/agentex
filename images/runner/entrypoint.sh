@@ -1051,9 +1051,9 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$TOTAL_ACTIVE" -ge 20 ]; then
-    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 20). Blocking emergency spawn."
-    post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= 20." "blocker" 10
+  if [ "$TOTAL_ACTIVE" -ge 10 ]; then
+    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 10). Blocking emergency spawn."
+    post_thought "Emergency spawn blocked by circuit breaker: $TOTAL_ACTIVE active jobs exceed safety limit (10). Civilization will pause until load decreases. Manual intervention may be needed to clean up stuck agents." "blocker" 10
     NEEDS_EMERGENCY_SPAWN=false
   fi
 
