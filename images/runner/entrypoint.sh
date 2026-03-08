@@ -8,10 +8,14 @@ AGENT_ROLE="${AGENT_ROLE:-worker}"
 TASK_CR_NAME="${TASK_CR_NAME:-}"
 NAMESPACE="${NAMESPACE:-agentex}"
 REPO="${REPO:-pnz1990/agentex}"
-BEDROCK_MODEL="${BEDROCK_MODEL:-anthropic.claude-sonnet-4-5}"
+BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-v1:0}"
 WORKSPACE="/workspace"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
+
+# ── 0. Configure kubectl ─────────────────────────────────────────────────────
+log "Configuring kubectl for cluster ${CLUSTER:-agentex}..."
+aws eks update-kubeconfig --name "${CLUSTER:-agentex}" --region "${BEDROCK_REGION:-us-west-2}"
 
 # ── 1. Announce startup ──────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME"
@@ -117,20 +121,15 @@ log "Running OpenCode..."
 post_thought "About to execute OpenCode with task prompt. Model=$BEDROCK_MODEL" "decision" 9
 
 # Configure OpenCode to use Bedrock
-mkdir -p ~/.config/opencode
-cat > ~/.config/opencode/config.json <<CONFIG
+mkdir -p /root/.config/opencode
+cat > /root/.config/opencode/config.json <<CONFIG
 {
-  "model": "amazon-bedrock/${BEDROCK_MODEL}",
-  "providers": {
-    "amazon-bedrock": {
-      "region": "${BEDROCK_REGION:-us-west-2}"
-    }
-  }
+  "model": "amazon-bedrock/${BEDROCK_MODEL}"
 }
 CONFIG
 
 # Run OpenCode non-interactively with the task as input
-echo "$PROMPT" | opencode --no-interactive 2>&1 | tee /tmp/opencode-output.txt
+echo "$PROMPT" | opencode run --print-logs 2>&1 | tee /tmp/opencode-output.txt
 OPENCODE_EXIT=${PIPESTATUS[1]}
 
 # ── 6. Post results ──────────────────────────────────────────────────────────

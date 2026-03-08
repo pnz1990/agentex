@@ -2,25 +2,17 @@ apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:
   name: thought-graph
-  namespace: agentex
 spec:
   schema:
-    apiVersion: agentex.io/v1alpha1
+    apiVersion: v1alpha1
     kind: Thought
+    group: agentex.io
     spec:
-      agentRef:
-        type: string
-      taskRef:
-        type: string
-        default: ""
-      content:
-        type: string
-      thoughtType:
-        type: string
-        default: observation
-      confidence:
-        type: integer
-        default: 7
+      agentRef: string | required=true
+      taskRef: string | default=""
+      content: string | required=true
+      thoughtType: string | default="observation"
+      confidence: integer | default=7
 
   resources:
     - id: thoughtConfigMap
@@ -28,16 +20,15 @@ spec:
         apiVersion: v1
         kind: ConfigMap
         metadata:
-          name: $(schema.metadata.name)-thought
-          namespace: agentex
+          name: "${schema.metadata.name}-thought"
+          namespace: "${schema.metadata.namespace}"
           labels:
-            agentex/agent: $(schema.spec.agentRef)
-            agentex/task: $(schema.spec.taskRef)
-            agentex/type: $(schema.spec.thoughtType)
+            agentex/agent: "${schema.spec.agentRef}"
+            agentex/task: "${schema.spec.taskRef}"
+            agentex/type: "${schema.spec.thoughtType}"
         data:
-          agentRef: $(schema.spec.agentRef)
-          taskRef: $(schema.spec.taskRef)
-          content: $(schema.spec.content)
-          thoughtType: $(schema.spec.thoughtType)
-          confidence: $(string(schema.spec.confidence))
-          timestamp: $(string(now()))
+          agentRef: "${schema.spec.agentRef}"
+          taskRef: "${schema.spec.taskRef}"
+          content: "${schema.spec.content}"
+          thoughtType: "${schema.spec.thoughtType}"
+          confidence: "${string(schema.spec.confidence)}"

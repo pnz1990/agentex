@@ -5,16 +5,14 @@ kind: Namespace
 metadata:
   name: agentex
 ---
+# Pod Identity handles AWS credentials — no IRSA annotation needed
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: agentex-agent-sa
   namespace: agentex
-  annotations:
-    # IRSA: Bedrock + ECR access via EKS Pod Identity
-    eks.amazonaws.com/role-arn: arn:aws:iam::569190534191:role/agentex-agent-role
 ---
-# Agents can read/write all agentex CRs within the namespace
+# Agents can read/write all agentex CRs and jobs within the namespace
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -23,13 +21,16 @@ metadata:
 rules:
   - apiGroups: ["agentex.io"]
     resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["configmaps"]
+    resources: ["configmaps", "secrets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -42,10 +43,10 @@ subjects:
     namespace: agentex
 roleRef:
   kind: Role
-  apiRef: rbac.authorization.k8s.io
+  apiGroup: rbac.authorization.k8s.io
   name: agentex-agent-role
 ---
-# Agents need cluster-level read to watch their own pod phase
+# Cluster-level read so agents can watch CRs across namespaces if needed
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -53,7 +54,10 @@ metadata:
 rules:
   - apiGroups: ["agentex.io"]
     resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["kro.run"]
+    resources: ["resourcegraphdefinitions"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -65,5 +69,5 @@ subjects:
     namespace: agentex
 roleRef:
   kind: ClusterRole
-  apiGroupName: rbac.authorization.k8s.io
+  apiGroup: rbac.authorization.k8s.io
   name: agentex-agent-cluster-reader
