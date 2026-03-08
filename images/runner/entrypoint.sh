@@ -500,6 +500,7 @@ PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
   2>/dev/null || true)
 
 # Mark thoughts as read by this agent (patch ConfigMap backing the Thought CR)
+# Note: We already fetched limited thoughts above, so this loop processes max 50 items
 for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
   '.items[-10:] | .[] | 
