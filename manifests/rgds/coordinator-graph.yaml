@@ -1,0 +1,116 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: coordinator-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Coordinator
+    spec:
+      enabled: boolean | default=true
+      model: string | default="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    status:
+      configMapName: ${coordinatorState.metadata.name}
+      phase: ${coordinatorState.data.phase}
+      lastHeartbeat: ${coordinatorState.data.lastHeartbeat}
+      deploymentName: ${coordinatorDeployment.metadata.name}
+  resources:
+    # ── State ConfigMap ──────────────────────────────────────────────────────
+    - id: coordinatorState
+      readyWhen:
+        - ${coordinatorState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: coordinator-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/component: coordinator
+        data:
+          phase: "Initializing"
+          taskQueue: ""
+          activeAssignments: ""
+          decisionLog: ""
+          lastHeartbeat: ""
+          voteRegistry: ""
+          consensusResults: ""
+
+    # ── Coordinator Deployment ───────────────────────────────────────────────
+    # Long-running Pod that maintains civilization state and coordinates agents
+    - id: coordinatorDeployment
+      readyWhen:
+        - ${coordinatorDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: coordinator
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-coordinator
+            agentex/component: coordinator
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate  # Only one coordinator at a time
+          selector:
+            matchLabels:
+              app: agentex-coordinator
+          template:
+            metadata:
+              labels:
+                app: agentex-coordinator
+                agentex/component: coordinator
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: coordinator
+                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+                  imagePullPolicy: Always
+                  command: ["/bin/bash", "/usr/local/bin/coordinator.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: COORDINATOR_NAME
+                      value: coordinator
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      value: "us-west-2"
+                    - name: REPO
+                      value: "pnz1990/agentex"
+                    - name: CLUSTER
+                      value: "agentex"
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: GITHUB_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: agentex-github-token
+                          key: token
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "500m"
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 1Gi
