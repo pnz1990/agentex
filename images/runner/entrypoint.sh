@@ -59,6 +59,14 @@ handle_fatal_error() {
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
+      # Calculate next generation (issue #431) - same pattern as spawn_agent()
+      local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+        -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+      if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
+        my_generation=0
+      fi
+      local next_generation=$((my_generation + 1))
+      
       # Inline emergency spawn (don't call functions that might fail)
       # Use || true to prevent trap recursion if kubectl fails
       kubectl apply -f - <<EOF 2>/dev/null || true
@@ -83,7 +91,7 @@ metadata:
   labels:
     agentex/spawned-by: ${AGENT_NAME}
     agentex/emergency-spawn: "true"
-    agentex/generation: "1"
+    agentex/generation: "${next_generation}"
 spec:
   role: ${AGENT_ROLE}
   taskRef: $next_task
