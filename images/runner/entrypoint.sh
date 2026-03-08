@@ -373,8 +373,73 @@ check_proposal_age() {
   return 0
 }
 
+# Check if spawning an agent with the given role is allowed by consensus.
+# Usage: should_spawn_agent "planner"
+# Returns: "yes" (ok to spawn), "no" (blocked by consensus), "pending" (proposal pending)
+# This function should be called BEFORE spawn_agent() to prevent proliferation.
+should_spawn_agent() {
+  local role="$1"
+  
+  # Count running agents of the same role
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role)] | length' 2>/dev/null || echo "0")
+  
+  # If fewer than 3 agents of this role exist, spawning is always allowed
+  if [ "$running_agents" -lt 3 ]; then
+    log "Consensus check: $running_agents agents with role=$role exist (< 3). Spawning allowed."
+    echo "yes"
+    return 0
+  fi
+  
+  # 3+ agents exist - consensus required
+  log "Consensus check: $running_agents agents with role=$role exist (>= 3). Checking consensus..."
+  
+  local motion_name="spawn-more-${role}-agents"
+  local consensus_result=$(check_consensus "$motion_name" "3/5")
+  
+  if [ "$consensus_result" = "yes" ]; then
+    log "Consensus APPROVED: spawn additional $role agent"
+    echo "yes"
+    return 0
+  elif [ "$consensus_result" = "no" ]; then
+    log "Consensus REJECTED: NOT spawning additional $role agent (proliferation prevented)"
+    echo "no"
+    return 0
+  else
+    # Consensus pending - check proposal age
+    local proposal_age=$(check_proposal_age "$motion_name")
+    
+    if [ "$proposal_age" -ge 9999 ]; then
+      # No proposal exists yet - create one
+      log "Consensus PENDING: creating NEW proposal for spawning $role agent"
+      local deadline=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+      propose_motion "$motion_name" \
+        "Spawn additional $role agent. Currently $running_agents agents exist with this role. Requesting consensus before spawning more." \
+        "3/5" \
+        "$deadline"
+      cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) believes spawning is necessary for platform progress."
+      
+      log "Consensus proposal created. Allowing spawn (grace period: proposal is fresh)."
+      echo "yes"  # Allow spawn because proposal is brand new
+      return 0
+    elif [ "$proposal_age" -lt 300 ]; then
+      # Proposal exists and is < 5 minutes old - allow spawn (grace period for voting)
+      log "Consensus PENDING but recent (age=${proposal_age}s < 300s). Allowing spawn for liveness."
+      cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) supports spawning to maintain platform progress."
+      echo "yes"
+      return 0
+    else
+      # Proposal is stale (≥ 5 minutes old) - block spawn
+      log "Consensus PENDING and STALE (age=${proposal_age}s ≥ 300s). BLOCKING spawn to prevent proliferation."
+      echo "no"
+      return 0
+    fi
+  fi
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
+# IMPORTANT: Call should_spawn_agent() BEFORE this to check consensus.
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
@@ -413,8 +478,18 @@ EOF
 }
 
 # Create a Task CR and immediately spawn an Agent to work it.
+# Checks consensus before spawning (if 3+ agents of the role exist).
 spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}"
+  
+  # Check consensus BEFORE creating Task or Agent
+  local consensus_result=$(should_spawn_agent "$role")
+  if [ "$consensus_result" = "no" ]; then
+    log "CONSENSUS BLOCKED: NOT spawning Agent $agent_name (role=$role). Proliferation prevented."
+    post_thought "Spawn blocked by consensus: agent $agent_name (role=$role) not created. Consensus rejected spawning more $role agents." "blocker" 5
+    return 0  # Return success but don't spawn (consensus is working as intended)
+  fi
+  
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
   local err_output

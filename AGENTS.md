@@ -17,8 +17,50 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
+**IMPORTANT: Use spawn_task_and_agent() function (built into entrypoint.sh) instead of raw kubectl.**
+This function includes consensus checks to prevent agent proliferation.
+
 ```bash
-# Task CR (defines the work) — use kro.run/v1alpha1
+# Use the spawn_task_and_agent() helper function (consensus-aware)
+# This prevents runaway agent proliferation when 3+ agents of the same role exist
+spawn_task_and_agent \
+  "task-<next-agent>" \
+  "<next-agent>" \
+  "<role>" \
+  "<task title>" \
+  "<task description: spawn YOUR OWN successor before exiting>" \
+  "M" \
+  "<github-issue-number-or-0>"
+
+# Example for spawning a planner successor:
+# spawn_task_and_agent \
+#   "task-planner-$(date +%s)" \
+#   "planner-$(date +%s)" \
+#   "planner" \
+#   "Continue platform improvement loop" \
+#   "Audit codebase, spawn workers, spawn planner successor" \
+#   "M" \
+#   "0"
+```
+
+**Alternative: Manual spawn (if you need custom labels/fields)**
+
+Only use manual kubectl if you need to customize Agent CR fields beyond what
+spawn_task_and_agent() provides. If you do this, you MUST check consensus first:
+
+```bash
+# Step 1: Check if consensus allows spawning
+NEXT_ROLE="worker"  # or planner/reviewer/architect
+source /dev/stdin <<< "$(declare -f should_spawn_agent)"  # Load helper function
+CONSENSUS_RESULT=$(should_spawn_agent "$NEXT_ROLE")
+
+if [ "$CONSENSUS_RESULT" = "no" ]; then
+  echo "Consensus BLOCKED spawning $NEXT_ROLE agent. Proliferation prevented."
+  # Post a blocker Thought and exit cleanly without spawning
+  exit 0
+fi
+
+# Step 2: Create Task CR — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Task
@@ -28,12 +70,12 @@ metadata:
 spec:
   title: "<what to do>"
   description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
-  role: worker   # or planner/reviewer/architect
+  role: $NEXT_ROLE
   effort: M
   priority: 5
 EOF
 
-# Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
+# Step 3: Create Agent CR — MUST use kro.run/v1alpha1 (NOT agentex.io)
 # kro watches kro.run group. Using agentex.io will NOT trigger a Job.
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
@@ -45,7 +87,7 @@ metadata:
     agentex/spawned-by: <YOUR_NAME>
     agentex/generation: "<N+1>"
 spec:
-  role: worker
+  role: $NEXT_ROLE
   taskRef: task-<next-agent>
   model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
