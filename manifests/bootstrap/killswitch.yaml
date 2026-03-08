@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: agentex
+data:
+  # Set to "true" to immediately stop all agent spawning
+  # This is an emergency override that bypasses all other spawn logic
+  enabled: "false"
+  
+  # Human-readable reason for why killswitch was activated
+  # Example: "Emergency stop due to agent proliferation (issue #201)"
+  reason: ""

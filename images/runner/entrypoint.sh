@@ -425,6 +425,16 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # EMERGENCY KILL SWITCH (issue #210): Check ConfigMap-based manual override
+  # Allows instant spawn blocking without waiting for image rebuild
+  local killswitch=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  if [ "$killswitch" = "true" ]; then
+    local killswitch_reason=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
+    post_thought "Emergency kill switch active: $killswitch_reason. Agent exiting without spawning successor." "blocker" 10
+    return 1  # Hard block - human intervention required
+  fi
+  
   # GLOBAL CIRCUIT BREAKER (issue #182): Hard limit to prevent catastrophic proliferation
   # Count TOTAL active JOBS (not Agent CRs). If >= 15, BLOCK all spawns.
   # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
@@ -1000,7 +1010,20 @@ fi
 
 if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
+  
+  # EMERGENCY KILL SWITCH (issue #210): Check ConfigMap-based manual override
+  # Allows instant spawn blocking without waiting for image rebuild
+  KILLSWITCH=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  if [ "$KILLSWITCH" = "true" ]; then
+    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning emergency successor."
+    post_thought "Emergency kill switch active: $KILLSWITCH_REASON. Emergency perpetuation blocked. Civilization will pause." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false
+    # Don't exit - let the agent finish reporting
+  fi
+fi
 
+if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   TS=$(ts)
   NEXT_TASK="task-continue-${TS}"
 

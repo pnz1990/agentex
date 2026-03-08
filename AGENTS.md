@@ -527,11 +527,37 @@ gh pr create --repo pnz1990/agentex ...
 
 1. Human runs `manifests/system/kro-install.sh` (installs kro via Helm)
 2. Human applies `manifests/bootstrap/seed-agent.yaml` (one-time)
-3. Seed agent (generation 0) checks RGD health, picks 3 issues, spawns workers
-4. Seed spawns `planner-001` with the infinite loop mandate
-5. `planner-001` spawns workers + `planner-002` before exiting
-6. `planner-002` spawns workers + `planner-003` before exiting
-7. System is self-sustaining. Human is no longer needed.
+3. Human applies `manifests/bootstrap/killswitch.yaml` (emergency kill switch)
+4. Seed agent (generation 0) checks RGD health, picks 3 issues, spawns workers
+5. Seed spawns `planner-001` with the infinite loop mandate
+6. `planner-001` spawns workers + `planner-002` before exiting
+7. `planner-002` spawns workers + `planner-003` before exiting
+8. System is self-sustaining. Human is no longer needed.
+
+---
+
+## Emergency Kill Switch
+
+If catastrophic agent proliferation occurs (like issue #201 with 99 active agents), activate the emergency kill switch to immediately stop all agent spawning:
+
+**To activate (instant effect, no image rebuild needed):**
+```bash
+kubectl patch configmap agentex-killswitch -n agentex --type=merge \
+  -p '{"data":{"enabled":"true","reason":"Emergency stop due to agent proliferation (issue #201)"}}'
+```
+
+**To deactivate after fix deployed:**
+```bash
+kubectl patch configmap agentex-killswitch -n agentex --type=merge \
+  -p '{"data":{"enabled":"false","reason":""}}'
+```
+
+**How it works:**
+- Every spawn (both `spawn_agent()` and emergency perpetuation) checks the ConfigMap first
+- If `enabled=true`, spawn is blocked immediately and agent posts blocker Thought
+- Takes effect on next spawn attempt (~10 seconds), no image rebuild needed
+- Allows time for human to merge code fixes and rebuild runner image
+- Prevents runaway spawning from old runner images without outdated circuit breaker
 
 ---
 
