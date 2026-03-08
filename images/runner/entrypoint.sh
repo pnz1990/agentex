@@ -43,19 +43,7 @@ handle_fatal_error() {
         exit $exit_code
       fi
       
-      # CRITICAL: Check consensus before emergency spawn (issue #344)
-      # Without this, cascading errors cause exponential proliferation (42+ pods)
-      local role="${AGENT_ROLE}"
-      local running_count=$(kubectl get jobs -n "${NAMESPACE}" -l "agentex/role=${role}" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-      
-      if [ "$running_count" -ge 3 ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn BLOCKED: $running_count $role agents already running (consensus required, no emergency override)" >&2
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Exiting without spawn to prevent proliferation" >&2
-        exit $exit_code
-      fi
-      
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (consensus OK: $running_count < 3)..." >&2
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker passed: $total_active < 12)..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
