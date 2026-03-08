@@ -23,7 +23,7 @@ ts() { date +%s; }
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
 # Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
 # The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
-# CRITICAL (issue #344): Must respect consensus to prevent proliferation from cascading errors.
+# CRITICAL (issue #344): Must respect circuit breaker to prevent proliferation from cascading errors.
 handle_fatal_error() {
   local exit_code=$1 line_num=$2
   
@@ -366,9 +366,9 @@ EOF
   }
   push_metric "TaskCreated" 1
   
-  # Propagate spawn_agent return code (circuit breaker or consensus may block)
+  # Propagate spawn_agent return code (circuit breaker may block)
   if ! spawn_agent "$agent_name" "$role" "$task_name" "$title"; then
-    log "CRITICAL: spawn_agent blocked (circuit breaker or consensus). Task CR created but Agent CR not spawned."
+    log "CRITICAL: spawn_agent blocked by circuit breaker. Task CR created but Agent CR not spawned."
     return 1
   fi
   return 0
@@ -672,7 +672,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     exitCode: 0
   EOF
 
-  visionScore guide: 10=consensus/swarms/memory, 7=role escalation/dashboard,
+  visionScore guide: 10=swarms/memory/circuit-breaker, 7=role escalation/dashboard,
   5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
 THE SYSTEM MUST NEVER IDLE. IF YOU EXIT WITHOUT SPAWNING A SUCCESSOR,
@@ -909,11 +909,7 @@ The system must never idle. You are responsible for keeping it alive." \
       "0" \
       "$SWARM_REF"
 
-    if [ "$CONSENSUS_REQUIRED" = true ]; then
-      log "Emergency successor spawned (with consensus check): Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"
-    else
-      log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
-    fi
+    log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
   fi
 fi
 
