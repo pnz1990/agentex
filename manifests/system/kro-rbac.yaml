@@ -1,0 +1,102 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    rbac.kro.run/aggregate-to-controller: "true"
+  name: kro-agentex-resources
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - kro.run
+  resources:
+  - agents
+  - tasks
+  - messages
+  - thoughts
+  - swarms
+  - reports
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - kro.run
+  resources:
+  - agents/status
+  - tasks/status
+  - messages/status
+  - thoughts/status
+  - swarms/status
+  - reports/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - agentex.io
+  resources:
+  - agents
+  - tasks
+  - messages
+  - thoughts
+  - swarms
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - agentex.io
+  resources:
+  - agents/status
+  - tasks/status
+  - messages/status
+  - thoughts/status
+  - swarms/status
+  verbs:
+  - get
+  - update
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kro-agentex-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kro-agentex-access
+subjects:
+- kind: ServiceAccount
+  name: kro
+  namespace: kro-system
