@@ -27,10 +27,10 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
-echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 15)"
+echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 12)"
 
-if [ "$ACTIVE_JOBS" -ge 15 ]; then
-  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 15"
+if [ "$ACTIVE_JOBS" -ge 12 ]; then
+  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 12"
   echo "System is overloaded. NOT spawning successor."
   echo "The civilization will pause to let load decrease."
   echo "Emergency perpetuation will spawn if this is the last agent."
@@ -48,7 +48,7 @@ spec:
   thoughtType: blocker
   confidence: 10
   content: |
-    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 15).
+    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 12).
     Agent ${AGENT_NAME:-unknown} NOT spawning successor.
     System will stabilize before new spawns.
 EOF
