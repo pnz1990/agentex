@@ -20,6 +20,8 @@ spec:
       succeeded: ${agentJob.status.succeeded}
   resources:
     - id: agentJob
+      readyWhen:
+        - ${agentJob.metadata.resourceVersion != ""}
       template:
         apiVersion: batch/v1
         kind: Job
