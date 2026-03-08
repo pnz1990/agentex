@@ -436,9 +436,9 @@ spawn_agent() {
   local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$total_active" -ge 20 ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 20). BLOCKING spawn."
-    post_thought "Circuit breaker: $total_active active jobs >= 20. Spawn blocked." "blocker" 10
+  if [ "$total_active" -ge 15 ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 15). BLOCKING spawn."
+    post_thought "Circuit breaker: $total_active active jobs >= 15. Spawn blocked." "blocker" 10
     return 1
   fi
 
