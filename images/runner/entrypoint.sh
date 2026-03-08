@@ -967,6 +967,19 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   # Set agent name to match role (fix for issue #111)
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
+  # CIRCUIT BREAKER (issue #251): Block emergency spawn if system overloaded
+  # This prevents emergency perpetuation from bypassing the global circuit breaker.
+  # Same check as spawn_agent() at line 374-380.
+  TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$TOTAL_ACTIVE" -ge 15 ]; then
+    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 15). Blocking emergency spawn."
+    post_thought "Emergency spawn blocked by circuit breaker: $TOTAL_ACTIVE active jobs exceed safety limit (15). Civilization will pause until load decreases. Manual intervention may be needed to clean up stuck agents." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false
+    # Don't exit - let the agent finish reporting
+  fi
+
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
   # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
   # Agent CRs are removed once Jobs complete, so counting them gives false negatives.
