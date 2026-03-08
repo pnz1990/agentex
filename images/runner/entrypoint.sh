@@ -116,6 +116,16 @@ log "Environment validated: agent=$AGENT_NAME task=$TASK_CR_NAME role=$AGENT_ROL
 log "Configuring kubectl for cluster $CLUSTER ..."
 aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 
+# ── 1.5. Initialize agent identity (issue #415) ───────────────────────────────
+# Source identity.sh to claim persistent agent identity
+# This MUST run after kubectl config and before any CR creation
+if [ -f "/agent/identity.sh" ]; then
+  source /agent/identity.sh
+else
+  log "WARNING: /agent/identity.sh not found, identity system disabled"
+  AGENT_DISPLAY_NAME="$AGENT_NAME"
+fi
+
 # ── 2. Helper functions ───────────────────────────────────────────────────────
 post_message() {
   local to="$1" body="$2" type="${3:-status}"
@@ -178,6 +188,7 @@ EOF
 {
   "name": "${thought_name}",
   "agentRef": "${AGENT_NAME}",
+  "displayName": "${AGENT_DISPLAY_NAME:-$AGENT_NAME}",
   "taskRef": "${TASK_CR_NAME}",
   "thoughtType": "${type}",
   "confidence": ${confidence},
@@ -187,6 +198,11 @@ EOF
 JSON
 ); then
       log "WARNING: Failed to persist thought to S3 (key=${s3_key}): ${s3_output}"
+    fi
+    
+    # Update identity stats (if identity system is active)
+    if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+      update_identity_stats "thoughtsPosted" 1
     fi
   fi
 }
@@ -219,6 +235,7 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   agentRef: "${AGENT_NAME}"
+  displayName: "${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
   taskRef: "${TASK_CR_NAME}"
   role: "${AGENT_ROLE}"
   status: "${status}"
@@ -238,6 +255,11 @@ EOF
   }
   push_metric "ReportCreated" 1
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
+  
+  # Update identity stats (if identity system is active)
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+    update_identity_stats "tasksCompleted" 1
+  fi
 }
 
 patch_task_status() {
@@ -311,7 +333,14 @@ spawn_agent() {
   fi
   local next_generation=$((my_generation + 1))
   
+  # Get identity signature for logging (if identity system is active)
+  local identity_sig="${AGENT_NAME}"
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && [ "$AGENT_DISPLAY_NAME" != "$AGENT_NAME" ]; then
+    identity_sig="$AGENT_DISPLAY_NAME ($AGENT_NAME)"
+  fi
+  
   log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
+  log "Identity: $identity_sig → $name (gen $my_generation → $next_generation)"
   local err_output
   err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1

@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-name-registry
+  namespace: agentex
+data:
+  # Pool of memorable, role-appropriate names for agents
+  # Format: name:role:status (available|claimed)
+  # Agents claim names atomically via kubectl patch
+  
+  # Workers (implementers, builders)
+  ada: "worker:available"
+  turing: "worker:available"
+  hopper: "worker:available"
+  knuth: "worker:available"
+  dijkstra: "worker:available"
+  liskov: "worker:available"
+  lamport: "worker:available"
+  codd: "worker:available"
+  ritchie: "worker:available"
+  kernighan: "worker:available"
+  thompson: "worker:available"
+  torvalds: "worker:available"
+  
+  # Planners (strategists, coordinators)
+  aristotle: "planner:available"
+  plato: "planner:available"
+  socrates: "planner:available"
+  bacon: "planner:available"
+  descartes: "planner:available"
+  kant: "planner:available"
+  hume: "planner:available"
+  locke: "planner:available"
+  spinoza: "planner:available"
+  nietzsche: "planner:available"
+  
+  # Architects (system designers, deep thinkers)
+  vitruvius: "architect:available"
+  wren: "architect:available"
+  gaudi: "architect:available"
+  gehry: "architect:available"
+  zaha: "architect:available"
+  piano: "architect:available"
+  foster: "architect:available"
+  kahn: "architect:available"
+  wright: "architect:available"
+  corbusier: "architect:available"
+  
+  # Reviewers (critics, quality guardians)
+  voltaire: "reviewer:available"
+  montaigne: "reviewer:available"
+  orwell: "reviewer:available"
+  popper: "reviewer:available"
+  kuhn: "reviewer:available"
+  lakatos: "reviewer:available"
+  feyerabend: "reviewer:available"
+  russell: "reviewer:available"
+  wittgenstein: "reviewer:available"
+  
+  # Critics (regression hunters, bug finders)
+  hitchens: "critic:available"
+  chomsky: "critic:available"
+  sagan: "critic:available"
+  
+  # God delegates (civilization stewards)
+  athena: "god-delegate:available"
+  odin: "god-delegate:available"
+  thoth: "god-delegate:available"
+  
+  # Seed agents (bootstrap only)
+  prometheus: "seed:available"
+  
+  # Adjectives for generated names (when pool exhausted)
+  adjectives: "swift,bold,wise,keen,bright,calm,quick,deep,sharp,clear"
+  
+  # Nouns for generated names (computer science themed)
+  nouns: "lambda,binary,cipher,kernel,daemon,parser,vector,matrix,tensor,graph"
