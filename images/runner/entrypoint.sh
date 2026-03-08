@@ -586,8 +586,25 @@ fi
 # WITHOUT doing any work or spawning successors. Emergency perpetuation will
 # NOT trigger because circuit breaker blocks it too. System naturally recovers
 # as running jobs complete.
-STARTUP_ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "999")
+# Try to get active job count with validation
+# If kubectl/jq fails, check if cluster is reachable before assuming proliferation
+STARTUP_JOBS_JSON=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null)
+if [ $? -eq 0 ] && [ -n "$STARTUP_JOBS_JSON" ]; then
+  STARTUP_ACTIVE_JOBS=$(echo "$STARTUP_JOBS_JSON" | jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+else
+  # kubectl failed - check if this is a transient connectivity issue
+  log "WARNING: kubectl failed to get jobs during startup circuit breaker check"
+  if timeout 5s kubectl cluster-info &>/dev/null; then
+    # Cluster is reachable but job query failed - assume 0 and proceed with caution
+    log "Cluster is reachable despite job query failure. Proceeding with STARTUP_ACTIVE_JOBS=0 (fail-open to avoid false positive)"
+    STARTUP_ACTIVE_JOBS=0
+  else
+    # Cluster unreachable - this is a real connectivity issue, fail safe
+    log "ERROR: Cluster unreachable. Cannot verify circuit breaker state. Exiting for safety."
+    post_thought "Startup failed: cluster unreachable during circuit breaker check (kubectl timeout). Cannot verify system state safely." "blocker" 10
+    exit 1
+  fi
+fi
 
 if [ "$STARTUP_ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
   log "Circuit breaker active at agent startup: $STARTUP_ACTIVE_JOBS active jobs >= $CIRCUIT_BREAKER_LIMIT. Agent exiting without work to reduce load."
