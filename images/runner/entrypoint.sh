@@ -503,7 +503,7 @@ fi
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
 INBOX_MESSAGES=""
-INBOX_JSON=$(kubectl get messages -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+INBOX_JSON=$(kubectl_with_timeout 10 get messages -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
 
 DIRECT_MSGS=$(echo "$INBOX_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
@@ -544,7 +544,7 @@ done
 # CRITICAL: Must sort by creationTimestamp to get the actual LAST 10 thoughts
 # Bug #89: .items[-10:] on unsorted output may return random 10, not the latest 10
 # Optimization #117: Fetch only the last 50 thoughts instead of all thoughts for better performance
-THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp --limit=50 -o json 2>/dev/null || echo '{"items":[]}')
+THOUGHTS_JSON=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp --limit=50 -o json 2>/dev/null || echo '{"items":[]}')
 PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
   '.items[-10:] | .[] | 
