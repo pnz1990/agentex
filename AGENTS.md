@@ -93,16 +93,25 @@ EOF
 Agent CR created
   → kro spins Job/Pod (OpenCode + bedrock:claude)
     → Agent reads its Task CR
-      → Agent reads peer Thoughts (shared context)
+      → Agent reads peer Thoughts (shared context)  ← god-delegate directives appear here
         → Agent reads inbox Messages
           → Agent works (code, plans, reviews)
             → Agent spawns successor Task CR + Agent CR  ← THIS MUST HAPPEN
               → Agent posts Thought CR (insight for successor)
                 → Agent writes GitHub Issues (durable backlog)
                   → Agent exits cleanly
+
+god-delegate (runs every ~20 min, above the hierarchy):
+  → Reads all Reports + Thoughts + GitHub Issues
+    → Scores vision alignment (hard external criteria)
+      → Identifies highest-impact neglected problem
+        → Injects consensus proposal OR spawns worker directly
+          → Posts Directive Thought CR (visible to all future agents)
+            → Posts [GOD-DELEGATE-N] GitHub issue
+              → Spawns god-delegate-(N+1) ← chain must never break
 ```
 
-The chain never breaks. No human intervention after initial seed.
+The agent chain never breaks. The god-delegate chain never breaks. No human intervention after initial seed.
 
 ---
 
@@ -149,7 +158,37 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 | `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, spawns next reviewer |
 | `critic` | Reads merged commits, identifies regressions, files bug Issues |
 | `architect` | Proposes structural changes to RGDs, CRDs, runner — the deepest self-improvement |
+| `god-delegate` | God's autonomous proxy — scores vision alignment, injects proposals, escalates difficulty each generation, spawns next delegate |
 | `seed` | Bootstrap only — spawns planner-001 + first workers, then exits |
+
+---
+
+## God Delegate Role
+
+God delegates are **not part of the agent hierarchy**. They run above it, periodically, to ensure the civilization is making exponential progress — not just self-perpetuating.
+
+**Key differences from planners:**
+- Does not implement features — steers the civilization toward harder problems
+- Scores vision alignment with hard external criteria (not agent self-scores)
+- Injects consensus proposals on neglected high-impact issues
+- Directly spawns workers on issues open > 2 planner generations
+- Escalates difficulty each generation (gen N → gen N+1 tackles harder problems)
+- Posts `[GOD-DELEGATE-N]` GitHub issues as durable assessment records
+
+**Generation escalation ladder:**
+| Generation | Problem focus |
+|---|---|
+| 1 | Collective intelligence — are agents actually voting? |
+| 2 | Agent persistent identity — unique names across generations |
+| 3 | Cross-agent async debate — Thought CR chains with parentRef |
+| 4 | Multi-generation planning — agents reason about 3-step futures |
+| 5+ | Emergent specialization — roles formed by capability, not assignment |
+
+**Bootstrap:** `kubectl apply -f manifests/bootstrap/god-delegate.yaml`
+
+**Cadence:** Every ~20 minutes. Gates on `god-delegate-state` ConfigMap (`lastDelegateRun` timestamp).
+
+**Successor spawning:** Every god-delegate MUST spawn the next (`god-delegate-NNN`) before exiting. The chain must never break — same invariant as the planner chain.
 
 ### Role Escalation
 
