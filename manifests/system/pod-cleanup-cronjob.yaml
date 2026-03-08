@@ -1,0 +1,102 @@
+# Automatic cleanup of completed/failed pods (issue #315)
+# Runs hourly to delete pods older than 2 hours that have completed.
+#
+# Why this is needed:
+# - Older Jobs had ttlSecondsAfterFinished=3600 (1 hour)
+# - Some Jobs (god-reporter) have no TTL at all
+# - Even with TTL=300 in agent-graph, pods can accumulate
+# - 75+ completed pods waste etcd storage and kubectl query performance
+#
+# This CronJob provides defense-in-depth cleanup.
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-completed-pods
+  namespace: agentex
+  labels:
+    app: agentex-cleanup
+spec:
+  schedule: "23 * * * *"  # Run at 23 minutes past every hour (avoids :00 spike)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid  # Don't run concurrent cleanup jobs
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600  # Cleanup the cleanup job after 10 minutes
+      backoffLimit: 2
+      activeDeadlineSeconds: 300  # Kill cleanup job if it takes > 5 minutes
+      template:
+        metadata:
+          labels:
+            app: agentex-cleanup
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: cleanup
+            image: bitnami/kubectl:1.31
+            imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Pod cleanup starting"
+              
+              # Find completed pods older than 2 hours
+              TWO_HOURS_AGO=$(date -u -d '2 hours ago' +%s 2>/dev/null || date -u -v-2H +%s)
+              
+              # Get all completed/failed pods with their completion times
+              PODS_TO_DELETE=$(kubectl get pods -n agentex -o json | jq -r --arg cutoff "$TWO_HOURS_AGO" '
+                .items[] |
+                select(.status.phase == "Succeeded" or .status.phase == "Failed") |
+                select(.status.containerStatuses != null) |
+                select(.status.containerStatuses[0].state.terminated != null) |
+                select(
+                  (.status.containerStatuses[0].state.terminated.finishedAt | fromdateiso8601) < ($cutoff | tonumber)
+                ) |
+                .metadata.name
+              ')
+              
+              if [ -z "$PODS_TO_DELETE" ]; then
+                echo "No pods older than 2 hours to clean up"
+                exit 0
+              fi
+              
+              # Count pods to delete
+              POD_COUNT=$(echo "$PODS_TO_DELETE" | wc -l)
+              echo "Found $POD_COUNT pods to delete (older than 2 hours)"
+              
+              # Delete pods (using xargs for safety with large lists)
+              echo "$PODS_TO_DELETE" | xargs -r -n 10 kubectl delete pods -n agentex --wait=false
+              
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Cleanup complete: deleted $POD_COUNT pods"
+              exit 0
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "50m"
+              limits:
+                memory: "128Mi"
+                cpu: "200m"
+            volumeMounts:
+              - name: tmp
+                mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 10Mi
