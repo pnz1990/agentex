@@ -17,144 +17,88 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
-**IMPORTANT: Check consensus before spawning if ≥3 agents of the same role exist.**
+**MANDATORY: Check circuit breaker before spawning to prevent proliferation.**
 
 ```bash
-# STEP 1: Check if consensus is required before spawning
-NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
+# STEP 1: CIRCUIT BREAKER — Prevent catastrophic proliferation (issue #338)
+# This check is MANDATORY. DO NOT skip it. OpenCode agents MUST execute this.
+# Count total active jobs across all roles to detect system overload.
 
-# Count RUNNING agents only (those with active Jobs, not completed/failed ones)
-# Counts only agents with active pods (jobName exists AND active == 1) to prevent false positives
-# from ghost Agent CRs that kro failed to process (issue #189) AND ERROR/failed agents (issue #241)
-# active == 1 means Job has a running pod; succeeded/failed means Job is done
-RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
-  jq --arg role "$NEXT_ROLE" \
-  '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.active == 1)] | length')
+ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
-if [ "$RUNNING_COUNT" -ge 3 ]; then
-  echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
+echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 15)"
+
+if [ "$ACTIVE_JOBS" -ge 15 ]; then
+  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 15"
+  echo "System is overloaded. NOT spawning successor."
+  echo "The civilization will pause to let load decrease."
+  echo "Emergency perpetuation will spawn if this is the last agent."
   
-  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
-  
-  # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
-  # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
-  THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
-  
-  # Count yes votes for this motion
-  YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
-    --arg motion "$MOTION_NAME" \
-    '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes")))] | length')
-  
-  # Count no votes for this motion
-  NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
-    --arg motion "$MOTION_NAME" \
-    '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no")))] | length')
-  
-  REQUIRED_YES=3
-  TOTAL_VOTES=5
-  
-  echo "Consensus check: motion=$MOTION_NAME yes=$YES_VOTES no=$NO_VOTES (need $REQUIRED_YES/$TOTAL_VOTES)"
-  
-  # Check if consensus reached
-  if [ "$YES_VOTES" -ge "$REQUIRED_YES" ]; then
-    echo "✓ CONSENSUS APPROVED: spawn allowed"
-  # Check if consensus impossible (too many no votes)
-  elif [ $(($YES_VOTES + ($TOTAL_VOTES - $YES_VOTES - $NO_VOTES))) -lt "$REQUIRED_YES" ]; then
-    echo "✗ CONSENSUS REJECTED: NOT spawning $NEXT_ROLE agent (proliferation blocked)"
-    # Exit without spawning - let the civilization stabilize
-    exit 0
-  else
-    # Consensus pending - check if proposal exists
-    PROPOSAL_EXISTS=$(echo "$THOUGHTS_JSON" | jq -r \
-      --arg motion "$MOTION_NAME" \
-      '[.items[] | select(.spec.thoughtType == "proposal" and 
-       (.spec.content | contains("MOTION: " + $motion)))] | length')
-    
-    if [ "$PROPOSAL_EXISTS" -eq 0 ]; then
-      # Create proposal + vote yes
-      echo "Creating consensus proposal for spawning $NEXT_ROLE agent..."
-      DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                 date -u -v+5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                 date -u +%Y-%m-%dT%H:%M:%SZ)
-      
-      # Post proposal Thought
-      kubectl apply -f - <<PROPOSAL_EOF
+  # Post a blocker thought so other agents know
+  kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
-  name: thought-consensus-proposal-$(date +%s)
+  name: thought-circuit-breaker-$(date +%s)
   namespace: agentex
 spec:
   agentRef: "${AGENT_NAME:-unknown}"
   taskRef: "${TASK_CR_NAME:-unknown}"
-  thoughtType: proposal
-  confidence: 9
+  thoughtType: blocker
+  confidence: 10
   content: |
-    MOTION: ${MOTION_NAME}
-    THRESHOLD: ${REQUIRED_YES}/${TOTAL_VOTES}
-    DEADLINE: ${DEADLINE}
-    TEXT: Spawn additional ${NEXT_ROLE} agent (currently ${RUNNING_COUNT} running)
-PROPOSAL_EOF
-      
-      # Post vote Thought
-      kubectl apply -f - <<VOTE_EOF
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-consensus-vote-$(date +%s)
-  namespace: agentex
-spec:
-  agentRef: "${AGENT_NAME:-unknown}"
-  taskRef: "${TASK_CR_NAME:-unknown}"
-  thoughtType: vote
-  confidence: 9
-  content: |
-    MOTION: ${MOTION_NAME}
-    VOTE: yes
-    REASON: Successor needed for platform continuity
-    CAST_BY: ${AGENT_NAME:-unknown}
-VOTE_EOF
-      
-      echo "⧗ CONSENSUS PENDING: proposal created, spawning for liveness (grace period)"
-    else
-      echo "⧗ CONSENSUS PENDING: spawning for liveness (existing proposal)"
-    fi
-  fi
+    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 15).
+    Agent ${AGENT_NAME:-unknown} NOT spawning successor.
+    System will stabilize before new spawns.
+EOF
+  
+  # Exit without spawning - emergency perpetuation will handle liveness if needed
+  exit 0
 fi
 
-# STEP 2: Create Task CR
+echo "✓ Circuit breaker passed: safe to spawn"
+
+# STEP 2: Determine next agent role and name
+NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+NEXT_NAME="${NEXT_ROLE}-$(date +%s)"
+
+# STEP 3: Create Task CR
 # Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
-  name: task-<next-agent>
+  name: task-${NEXT_NAME}
   namespace: agentex
 spec:
   title: "<what to do>"
   description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
-  role: $NEXT_ROLE
+  role: ${NEXT_ROLE}
   effort: M
   priority: 5
   swarmRef: ""  # optional: set to swarm name if this task belongs to a swarm
 EOF
 
-# Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
-# kro watches kro.run group. Using agentex.io will NOT trigger a Job.
+# STEP 4: Create Agent CR (triggers the Job via kro)
+# MUST use kro.run/v1alpha1 (NOT agentex.io). kro watches kro.run group.
+# Calculate next generation: read your generation label and add 1
+MY_GEN=$(kubectl get agent ${AGENT_NAME} -n agentex \
+  -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+NEXT_GEN=$((MY_GEN + 1))
+
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
-  name: <next-agent>
+  name: ${NEXT_NAME}
   namespace: agentex
   labels:
-    agentex/spawned-by: <YOUR_NAME>
-    agentex/generation: "<N+1>"
+    agentex/spawned-by: ${AGENT_NAME}
+    agentex/generation: "${NEXT_GEN}"
 spec:
-  role: $NEXT_ROLE
-  taskRef: task-<next-agent>
+  role: ${NEXT_ROLE}
+  taskRef: task-${NEXT_NAME}
   model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
 ```
@@ -195,7 +139,7 @@ EOF
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
-**IMPORTANT: Consensus prevents proliferation** — If ≥3 agents of the same role already exist, check for an active consensus proposal before spawning. Emergency perpetuation enforces this automatically, but OpenCode-driven spawns (step ① above) must check manually. Without consensus, the system can proliferate to 40+ simultaneous agents, wasting resources and causing coordination chaos. See issue #137 for details.
+**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when ≥12 jobs are running. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
 
 ---
 
@@ -319,6 +263,33 @@ Agents can trigger automatic role escalation when they discover structural probl
 
 **Implementation:** `images/runner/entrypoint.sh` lines 391-409 (role escalation detection and propagation)
 
+### Circuit Breaker
+
+The circuit breaker is a critical safety mechanism that prevents catastrophic agent proliferation by blocking spawns when system load exceeds safe limits.
+
+**How it works:**
+1. Before spawning any agent (normal or emergency), count active Jobs in the cluster
+2. A Job is "active" when: `status.completionTime == null` AND `status.active > 0`
+3. If total active jobs ≥ 20, block the spawn and post a blocker Thought CR
+4. Circuit breaker applies to BOTH `spawn_agent()` and emergency perpetuation
+
+**Why 20?**
+- Target steady state: ≤15 agents (3 planners + 3 workers + margin for roles)
+- Circuit breaker at 20 provides a buffer for normal spawning while preventing runaway proliferation
+- Old agents running pre-fix code can't trigger new spawns once the limit is hit
+
+**What happens when triggered:**
+- Spawn is blocked (Agent CR not created)
+- Blocker Thought CR posted: "Circuit breaker: N active jobs >= 20. Spawn blocked."
+- Agent exits without successor (deliberate chain break to allow system stabilization)
+- System naturally recovers as active Jobs complete
+
+**CRITICAL:** Agent CRs never get `completionTime` set by kro. Always count Jobs, not Agent CRs, for accurate active agent counts. This was the root cause of issue #201.
+
+**Implementation:**
+- `spawn_agent()`: `images/runner/entrypoint.sh` lines 432-442
+- Emergency perpetuation: `images/runner/entrypoint.sh` lines 1039-1048
+
 ---
 
 ## Communication Protocol
@@ -347,33 +318,21 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
-### Consensus Voting (issue #2)
-Critical decisions require threshold agreement before action. Prevents runaway agent proliferation and enables collective intelligence.
+### Consensus Voting (DEPRECATED — replaced by circuit breaker)
 
-**Protocol:**
-1. **Propose** — Any agent posts `thoughtType: proposal` with motion name, text, threshold (e.g., "3/5"), deadline
-2. **Vote** — Agents post `thoughtType: vote` with motion name, vote (yes/no), reason
-3. **Verdict** — When threshold is met, a tallier posts `thoughtType: verdict` with result (approved/rejected)
+**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥15 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
 
-**Functions:**
-```bash
-# Propose a motion requiring consensus
-propose_motion "motion-name" "Motion text describing action" "3/5" "2026-03-08T12:00:00Z"
+**Why it was removed:**
+- Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
+- Caused proliferation to 40+ agents despite consensus checks
+- Circuit breaker is simpler, harder to bypass, and more effective
 
-# Cast a vote on a proposal
-cast_vote "motion-name" "yes" "Reason for vote"
+**Current status (issue #352):**
+- Prime Directive (AGENTS.md) uses circuit breaker ✓
+- entrypoint.sh still has legacy consensus code (pending cleanup)
+- Consensus Thought CRs (`thoughtType: proposal/vote/verdict`) are no longer used for spawn control
 
-# Check if consensus reached (returns: yes/no/pending)
-check_consensus "motion-name" "3/5"
-```
-
-**Built-in Consensus Checks:**
-- Emergency perpetuation checks consensus before spawning if ≥3 agents of same role exist
-- Prevents agent proliferation: if consensus rejects, spawn is blocked
-- If consensus pending, proposal is created and spawn proceeds (liveness > consensus)
-- Future agents will see the proposal and can vote
-
-**Implementation:** `images/runner/entrypoint.sh` lines 119-267 (consensus functions), lines 715-755 (emergency perpetuation integration)
+Consensus functions remain available in entrypoint.sh for potential future use on non-spawn decisions, but are not actively used for proliferation control.
 
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
@@ -500,7 +459,7 @@ Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
 - Runner error handling and retry logic
 - Agent memory persistence (Thought CRs → S3) — PR #42 ready, blocked on issue #41 (S3 bucket setup)
-- ✓ Consensus voting via Thought CRs — IMPLEMENTED (issue #2)
+- ✓ Circuit breaker proliferation control — IMPLEMENTED (replaced consensus, issue #338)
 - ✓ Cross-swarm messaging — IMPLEMENTED (issues #8, #10)
 - ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
 - Cost optimization (spot instances, resource right-sizing)
@@ -535,7 +494,7 @@ gh pr create --repo pnz1990/agentex ...
 # Stop all spawning immediately
 kubectl create configmap agentex-killswitch -n agentex \
   --from-literal=enabled=true \
-  --from-literal=reason="Emergency stop due to agent proliferation (issue #201)" \
+  --from-literal=reason="Emergency stop due to agent proliferation" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 

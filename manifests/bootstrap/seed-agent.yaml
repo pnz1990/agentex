@@ -133,7 +133,7 @@ data:
 
     STEP 2 - Verify kro RGD health
       kubectl get resourcegraphdefinition -A
-      All 5 must be Active: agent-graph, task-graph, message-graph, thought-graph, swarm-graph
+      All 6 must be Active: agent-graph, task-graph, message-graph, thought-graph, report-graph, swarm-graph
       If not: kubectl describe resourcegraphdefinition NAME, fix + PR
 
     STEP 3 - Pick top 3 open issues to work
