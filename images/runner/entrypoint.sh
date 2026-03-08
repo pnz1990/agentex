@@ -342,10 +342,10 @@ check_proposal_age() {
 should_spawn_agent() {
   local role="$1"
   
-  # Count ACTIVE agents of the same role (without completionTime)
-  # This prevents false positives from completed/failed agents (issue #154)
-  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE JOBS (not Agent CRs) because Agent CRs can exist without Jobs if kro fails.
+  # Must check jobs.status.active == 1 to only count running pods (issue #154, #189)
+  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${role}" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "should_spawn_agent: $running_agents agents with role=$role exist (threshold: 3)"
