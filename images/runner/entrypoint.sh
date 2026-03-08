@@ -400,7 +400,7 @@ ESCALATED_ROLE=""
 
 # Check all Thought CRs posted by THIS agent during this run for structural blockers
 BLOCKER_THOUGHTS=$(kubectl get thoughts -n "$NAMESPACE" \
-  -l "agentex.io/agent=$AGENT_NAME" \
+  -l "agentex/agent=$AGENT_NAME" \
   -o json 2>/dev/null | jq -r \
   --arg name "$AGENT_NAME" \
   '.items[] | 
