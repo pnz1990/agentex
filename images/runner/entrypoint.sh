@@ -23,7 +23,7 @@ ts() { date +%s; }
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
 # Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
 # The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
-# CRITICAL (issue #344): Must respect consensus to prevent proliferation from cascading errors.
+# CRITICAL (issue #376): Must respect circuit breaker to prevent proliferation from cascading errors.
 handle_fatal_error() {
   local exit_code=$1 line_num=$2
   
@@ -34,7 +34,8 @@ handle_fatal_error() {
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
-      # CIRCUIT BREAKER: Check global active jobs first (issue #361)
+      # CIRCUIT BREAKER: Check global active jobs (issue #376)
+      # This is the ONLY check needed - no per-role consensus logic
       local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
@@ -43,19 +44,7 @@ handle_fatal_error() {
         exit $exit_code
       fi
       
-      # CRITICAL: Check consensus before emergency spawn (issue #344)
-      # Without this, cascading errors cause exponential proliferation (42+ pods)
-      local role="${AGENT_ROLE}"
-      local running_count=$(kubectl get jobs -n "${NAMESPACE}" -l "agentex/role=${role}" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-      
-      if [ "$running_count" -ge 3 ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn BLOCKED: $running_count $role agents already running (consensus required, no emergency override)" >&2
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Exiting without spawn to prevent proliferation" >&2
-        exit $exit_code
-      fi
-      
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (consensus OK: $running_count < 3)..." >&2
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn after fatal error (circuit breaker OK: $total_active < 12)..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
@@ -361,9 +350,9 @@ EOF
   }
   push_metric "TaskCreated" 1
   
-  # Propagate spawn_agent return code (circuit breaker or consensus may block)
+  # Propagate spawn_agent return code (circuit breaker or kill switch may block)
   if ! spawn_agent "$agent_name" "$role" "$task_name" "$title"; then
-    log "CRITICAL: spawn_agent blocked (circuit breaker or consensus). Task CR created but Agent CR not spawned."
+    log "CRITICAL: spawn_agent blocked (circuit breaker or kill switch). Task CR created but Agent CR not spawned."
     return 1
   fi
   return 0
@@ -904,11 +893,8 @@ The system must never idle. You are responsible for keeping it alive." \
       "0" \
       "$SWARM_REF"
 
-    if [ "$CONSENSUS_REQUIRED" = true ]; then
-      log "Emergency successor spawned (with consensus check): Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"
-    else
-      log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
-    fi
+    log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
+    post_thought "Emergency perpetuation successful: spawned $NEXT_AGENT to continue platform work." "observation" 8
   fi
 fi
 
