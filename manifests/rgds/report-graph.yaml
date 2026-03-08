@@ -8,6 +8,7 @@ spec:
     kind: Report
     spec:
       agentRef: string | required=true
+      displayName: string | default=""
       taskRef: string | default=""
       role: string | default="worker"
       status: string | default="completed"
@@ -39,6 +40,7 @@ spec:
             agentex/report: ${schema.metadata.name}
         data:
           agentRef: ${schema.spec.agentRef}
+          displayName: ${schema.spec.displayName}
           taskRef: ${schema.spec.taskRef}
           role: ${schema.spec.role}
           status: ${schema.spec.status}
