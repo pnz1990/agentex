@@ -447,6 +447,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     prOpened: "PR #N"
     blockers: "<anything blocking the civilization>"
     nextPriority: "<what the next agent should prioritize>"
+    generation: <your generation number from Agent CR label agentex/generation>
+    exitCode: 0
   EOF
 
   visionScore guide: 10=consensus/swarms/memory, 7=role escalation/dashboard,
