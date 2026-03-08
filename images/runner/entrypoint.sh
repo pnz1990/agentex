@@ -162,6 +162,44 @@ if ! timeout 10 kubectl cluster-info &>/dev/null; then
 fi
 log "Cluster connectivity verified ✓"
 
+# ── 1.2. EARLY CIRCUIT BREAKER CHECK (issue #502) ─────────────────────────────
+# CRITICAL: Check circuit breaker IMMEDIATELY after cluster connectivity verification.
+# If system is overloaded, exit BEFORE consuming resources (identity init, inbox, git clone, etc.)
+# This prevents TOCTOU proliferation: 40+ agents racing through steps 1-9 before circuit breaker at 9.5
+EARLY_ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+
+log "Early circuit breaker check: $EARLY_ACTIVE_JOBS active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
+
+if [ "$EARLY_ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+  log "EARLY CIRCUIT BREAKER TRIGGERED: System overloaded ($EARLY_ACTIVE_JOBS >= $CIRCUIT_BREAKER_LIMIT)"
+  log "Exiting immediately BEFORE resource allocation (identity, inbox, git clone, etc.)"
+  log "This prevents TOCTOU proliferation where many agents race through startup steps."
+  
+  # Post minimal thought without full identity system (identity.sh not yet sourced)
+  kubectl apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-${AGENT_NAME}-early-breaker-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  taskRef: "${TASK_CR_NAME}"
+  thoughtType: blocker
+  confidence: 10
+  content: |
+    Early circuit breaker triggered at startup: $EARLY_ACTIVE_JOBS active jobs >= $CIRCUIT_BREAKER_LIMIT.
+    Agent ${AGENT_NAME} exiting immediately BEFORE resource allocation.
+    This is the fix for issue #502 - prevents TOCTOU proliferation.
+EOF
+  
+  # Exit cleanly - emergency perpetuation respects circuit breaker
+  exit 0
+fi
+
+log "Early circuit breaker passed: safe to proceed with startup"
+
 # ── 1.5. Initialize agent identity (issue #415) ───────────────────────────────
 # Source identity.sh to claim persistent agent identity
 # This MUST run after kubectl config and before any CR creation
@@ -958,10 +996,11 @@ NOW BEGIN. Do the task. Then do ①②③④ above. In that order.
 PROMPT
 )
 
-# ── 9.5. PRE-EXECUTION CIRCUIT BREAKER ────────────────────────────────────────
-# CRITICAL (issue #465): Check circuit breaker BEFORE running OpenCode.
-# If system is overloaded, agent should exit gracefully WITHOUT executing work.
-# This prevents "thundering herd" where 31+ agents all try to spawn successors.
+# ── 9.5. PRE-EXECUTION CIRCUIT BREAKER (SECONDARY CHECK) ─────────────────────
+# NOTE: Primary circuit breaker check is at step 1.2 (early startup check).
+# This is a SECONDARY check before OpenCode execution to catch load spikes.
+# Issue #502: Early check at step 1.2 prevents most TOCTOU proliferation.
+# This check catches edge cases where load increased after agent startup.
 PRE_EXEC_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
