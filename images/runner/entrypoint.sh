@@ -524,7 +524,7 @@ if [ -n "$RESTART_SIGNAL" ] && [ "$RESTART_SIGNAL" -gt "$AGENT_START_TIME" ]; th
   exit 0  # Emergency perpetuation will spawn replacement with new image
 fi
 
-# ── 3.6. Circuit breaker startup check (issue #??? - CRITICAL) ────────────────
+# ── 3.6. Circuit breaker startup check (issue #502 - CRITICAL) ────────────────
 # EARLY EXIT if circuit breaker limit already exceeded when agent starts.
 # This prevents the TOCTOU race where agents spawn successors, those agents
 # start running, and by the time they check the circuit breaker they're
