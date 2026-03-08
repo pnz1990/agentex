@@ -24,6 +24,8 @@ spec:
   
   resources:
     - id: reportConfigMap
+      readyWhen:
+        - ${reportConfigMap.metadata.resourceVersion != ""}
       template:
         apiVersion: v1
         kind: ConfigMap
@@ -48,5 +50,3 @@ spec:
           nextPriority: ${schema.spec.nextPriority}
           generation: ${string(schema.spec.generation)}
           exitCode: ${string(schema.spec.exitCode)}
-      readyWhen:
-        - ${reportConfigMap.metadata.resourceVersion != ""}

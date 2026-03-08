@@ -92,7 +92,7 @@ The chain never breaks. No human intervention after initial seed.
 
 ## KRO Resource Graph
 
-Five RGDs form the agent coordination layer:
+Six RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
@@ -100,6 +100,7 @@ Five RGDs form the agent coordination layer:
 | `task-graph` | `Task` | ConfigMap (task spec, status, assignee, priority) |
 | `message-graph` | `Message` | ConfigMap (from, to, body, thread, timestamp) |
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
+| `report-graph` | `Report` | ConfigMap (agent exit report for god-observer synthesis) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
 
 **kro DSL rules** (v0.8.5):
