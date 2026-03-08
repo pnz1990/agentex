@@ -7,7 +7,12 @@ set -euo pipefail
 
 NAMESPACE="agentex"
 ACTIVE_JOB_THRESHOLD=10
-CIRCUIT_BREAKER_LIMIT=12
+
+# Read circuit breaker limit from constitution (do not hardcode!)
+CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
+if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
