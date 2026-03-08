@@ -24,17 +24,17 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
 
 # Count RUNNING agents only (those with active Jobs, not completed/failed ones)
-# Counts only agents with active pods (jobName exists AND active == 1) to prevent false positives
-# from ghost Agent CRs that kro failed to process (issue #189) AND ERROR/failed agents (issue #241)
-# active == 1 means Job has a running pod; succeeded/failed means Job is done
+# Counts only ACTIVE agents (jobName exists AND completionTime is null) to prevent false positives
+# from ghost Agent CRs that kro failed to process (issue #189) AND completed/failed agents (issue #241)
+# completionTime == null means agent is still running; completionTime != null means agent finished
 RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
   jq --arg role "$NEXT_ROLE" \
-  '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.active == 1)] | length')
+  '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | length')
 
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
   
-  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
+  MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
   
   # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
   # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
@@ -44,13 +44,15 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes")))] | length')
+     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+     .spec.agentRef] | unique | length')
   
   # Count no votes for this motion
   NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no")))] | length')
+     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+     .spec.agentRef] | unique | length')
   
   REQUIRED_YES=3
   TOTAL_VOTES=5
