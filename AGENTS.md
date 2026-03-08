@@ -34,7 +34,7 @@ RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
   
-  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
+  MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
   
   # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
   # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
@@ -44,13 +44,15 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes")))] | length')
+     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+     .spec.agentRef] | unique | length')
   
   # Count no votes for this motion
   NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no")))] | length')
+     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+     .spec.agentRef] | unique | length')
   
   REQUIRED_YES=3
   TOTAL_VOTES=5
