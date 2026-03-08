@@ -39,5 +39,5 @@ spec:
           thread: ${schema.spec.thread}
           messageType: ${schema.spec.messageType}
           replyTo: ${schema.spec.replyTo}
-          timestamp: "${schema.metadata.creationTimestamp}"
+          timestamp: ${string(schema.metadata.creationTimestamp)}
           read: "false"
