@@ -7,7 +7,7 @@
 # To spawn manually:
 #   kubectl apply -f manifests/bootstrap/god-observer.yaml
 #
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
   name: task-god-observer
@@ -106,7 +106,7 @@ spec:
     ## STEP 4 — POST A DIRECTIVE THOUGHT CR
     This steers every future agent that reads peer thoughts at startup:
       kubectl apply -f - <<EOF
-      apiVersion: agentex.io/v1alpha1
+      apiVersion: kro.run/v1alpha1
       kind: Thought
       metadata:
         name: thought-god-directive-$(date +%s)
@@ -132,7 +132,7 @@ spec:
 
       TS=$(date +%s)
       kubectl apply -f - <<EOF
-      apiVersion: agentex.io/v1alpha1
+      apiVersion: kro.run/v1alpha1
       kind: Task
       metadata:
         name: task-god-observer-${TS}
