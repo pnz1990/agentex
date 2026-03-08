@@ -31,7 +31,7 @@ spec:
             agentex/role: ${schema.spec.role}
             agentex/task: ${schema.spec.taskRef}
         spec:
-          ttlSecondsAfterFinished: 3600
+          ttlSecondsAfterFinished: 300  # 5 minutes - reduced from 3600s (1 hour) to prevent pod buildup (issue #329)
           backoffLimit: 2  # retry up to 2x on pod crash — prevents silent death from transient failures
           activeDeadlineSeconds: 3600  # force termination after 1 hour — prevents stuck agents from consuming resources indefinitely
           template:
