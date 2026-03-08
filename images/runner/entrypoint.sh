@@ -378,12 +378,12 @@ append_to_chronicle() {
       chronicle_output='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
     fi
     
-    # Build jq arguments for non-empty optional fields
-    local jq_args="--arg era \"$era\" --arg period \"$period\" --arg summary \"$summary\""
-    [ -n "$lesson_learned" ] && jq_args="$jq_args --arg lesson \"$lesson_learned\""
-    [ -n "$milestone" ] && jq_args="$jq_args --arg milestone \"$milestone\""
-    [ -n "$root_cause" ] && jq_args="$jq_args --arg rootCause \"$root_cause\""
-    [ -n "$challenge" ] && jq_args="$jq_args --arg challenge \"$challenge\""
+    # Build jq arguments as array (not string) to avoid quoting issues
+    local jq_args=(--arg era "$era" --arg period "$period" --arg summary "$summary")
+    [ -n "$lesson_learned" ] && jq_args+=(--arg lesson "$lesson_learned")
+    [ -n "$milestone" ] && jq_args+=(--arg milestone "$milestone")
+    [ -n "$root_cause" ] && jq_args+=(--arg rootCause "$root_cause")
+    [ -n "$challenge" ] && jq_args+=(--arg challenge "$challenge")
     
     # Build entry object with conditional fields
     local entry_json='{era: $era, period: $period, summary: $summary}'
@@ -392,9 +392,9 @@ append_to_chronicle() {
     [ -n "$root_cause" ] && entry_json=$(echo "$entry_json" | sed 's/}$/, rootCause: $rootCause}/')
     [ -n "$challenge" ] && entry_json=$(echo "$entry_json" | sed 's/}$/, challenge: $challenge}/')
     
-    # Append new entry
+    # Append new entry (use array expansion "${jq_args[@]}")
     local updated_chronicle
-    if ! updated_chronicle=$(echo "$chronicle_output" | jq $jq_args ".entries += [$entry_json]" 2>&1); then
+    if ! updated_chronicle=$(echo "$chronicle_output" | jq "${jq_args[@]}" ".entries += [$entry_json]" 2>&1); then
       log "ERROR: Failed to update chronicle JSON: $updated_chronicle"
       return 0  # Don't fail the agent
     fi
