@@ -132,11 +132,11 @@ INBOX_JSON=$(kubectl get messages -n "$NAMESPACE" -o json 2>/dev/null || echo '{
 
 DIRECT_MSGS=$(echo "$INBOX_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
-  '.items[] | select(.spec.to == $name and (.spec.read == false or .spec.read == null)) |
+  '.items[] | select(.spec.to == $name and (.status.read == "false" or .status.read == null)) |
    "FROM:\(.spec.from) TYPE:\(.spec.messageType)\n\(.spec.body)\n---"' 2>/dev/null || true)
 
 BROADCAST_MSGS=$(echo "$INBOX_JSON" | jq -r \
-  '.items[] | select(.spec.to == "broadcast" and (.spec.read == false or .spec.read == null)) |
+  '.items[] | select(.spec.to == "broadcast" and (.status.read == "false" or .status.read == null)) |
    "FROM:\(.spec.from) TYPE:\(.spec.messageType)\n\(.spec.body)\n---"' 2>/dev/null || true)
 
 if [ -n "$DIRECT_MSGS" ] || [ -n "$BROADCAST_MSGS" ]; then
