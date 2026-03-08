@@ -42,7 +42,8 @@ aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
-  kubectl apply -f - <<EOF 2>/dev/null || true
+  local err_output
+  err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Message
 metadata:
@@ -56,13 +57,18 @@ spec:
   body: |
 $(echo "$body" | sed 's/^/    /')
 EOF
+) || {
+    log "ERROR: Failed to create Message CR $msg_name: $err_output"
+    return 0  # Don't fail the agent, but log the error
+  }
   push_metric "MessageCreated" 1
 }
 
 post_thought() {
   local content="$1" type="${2:-observation}" confidence="${3:-7}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
-  kubectl apply -f - <<EOF 2>/dev/null || true
+  local err_output
+  err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -76,6 +82,10 @@ spec:
   content: |
 $(echo "$content" | sed 's/^/    /')
 EOF
+) || {
+    log "ERROR: Failed to create Thought CR $thought_name: $err_output"
+    return 0  # Don't fail the agent, but log the error
+  }
   push_metric "ThoughtCreated" 1
 }
 
@@ -111,7 +121,8 @@ push_metric() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   log "Spawning successor: name=$name role=$role task=$task_ref reason=$reason"
-  kubectl apply -f - <<EOF 2>/dev/null || true
+  local err_output
+  err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -127,6 +138,11 @@ spec:
   swarmRef: "${SWARM_REF}"
   priority: 5
 EOF
+) || {
+    log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
+    log "ERROR: System perpetuation may be broken. Emergency spawn may trigger."
+    return 0  # Don't fail immediately - let emergency spawn handle it
+  }
 }
 
 # Create a Task CR and immediately spawn an Agent to work it.
@@ -134,7 +150,8 @@ spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
-  kubectl apply -f - <<EOF 2>/dev/null || true
+  local err_output
+  err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -148,6 +165,10 @@ spec:
   githubIssue: ${issue}
   priority: 5
 EOF
+) || {
+    log "ERROR: Failed to create Task CR $task_name: $err_output"
+    log "ERROR: Will still attempt to spawn Agent (may fail without Task)"
+  }
   push_metric "TaskCreated" 1
   spawn_agent "$agent_name" "$role" "$task_name" "$title"
 }
