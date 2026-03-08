@@ -460,10 +460,20 @@ EOF
   if [ "$post_spawn_active" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
     log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: $CIRCUIT_BREAKER_LIMIT). TOCTOU race detected!"
     
-    # CRITICAL (issue #490): Must delete the Job, not just the Agent CR
+    # CRITICAL (issue #490, #542): Must delete the Job, not just the Agent CR
     # kro creates the Job immediately - deleting only the Agent CR leaves orphaned Job running
-    log "Retrieving Job name for Agent $name before cleanup..."
-    local job_name=$(kubectl_with_timeout 10 get agent.kro.run "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
+    # Retry fetching job name with backoff - kro may take 2-3s to populate status.jobName
+    log "Retrieving Job name for Agent $name before cleanup (with retry)..."
+    local job_name=""
+    for attempt in {1..5}; do
+      job_name=$(kubectl_with_timeout 10 get agent.kro.run "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
+      if [ -n "$job_name" ]; then
+        log "Job name retrieved: $job_name (attempt $attempt)"
+        break
+      fi
+      log "Attempt $attempt: status.jobName not yet populated by kro, retrying in 1s..."
+      sleep 1
+    done
     
     log "Deleting Agent CR $name to restore system stability..."
     kubectl delete agent.kro.run "$name" -n "$NAMESPACE" 2>/dev/null || true
