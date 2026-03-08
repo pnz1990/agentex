@@ -368,14 +368,15 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
-  # GLOBAL CIRCUIT BREAKER (issue #149): Hard limit to prevent catastrophic proliferation
-  # Count TOTAL active agents (without completionTime). If >= 20, BLOCK all spawns.
-  local total_active=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.completionTime == null or .status.completionTime == "")] | length' 2>/dev/null || echo "0")
+  # GLOBAL CIRCUIT BREAKER (issue #182): Hard limit to prevent catastrophic proliferation
+  # Count TOTAL active JOBS (not Agent CRs). If >= 15, BLOCK all spawns.
+  # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
+  local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
-  if [ "$total_active" -ge 20 ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active agents (limit: 20). BLOCKING spawn to prevent system overload."
-    post_thought "Circuit breaker activated: $total_active active agents exceed safety limit. Spawn blocked. System may need human intervention." "blocker" 10
+  if [ "$total_active" -ge 15 ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 15). BLOCKING spawn to prevent system overload."
+    post_thought "Circuit breaker activated: $total_active active jobs exceed safety limit (15). Spawn blocked. System may need manual cleanup of stuck agents." "blocker" 10
     return 1  # Hard block - too many agents
   fi
   
@@ -403,24 +404,23 @@ spawn_agent() {
       local proposal_age=$(check_proposal_age "$motion_name")
       
       if [ "$proposal_age" -ge 9999 ]; then
-        # No proposal exists yet - create one
-        log "Consensus PENDING: creating NEW proposal for spawning $role agent"
-        local deadline=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+        # No proposal exists yet - create one and BLOCK spawn until consensus reached
+        log "Consensus REQUIRED: creating NEW proposal for spawning $role agent"
+        local deadline=$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
         propose_motion "$motion_name" \
           "Spawn additional $role agent (currently $running_agents exist). Reason: $reason" \
           "3/5" \
           "$deadline"
-        cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
-        # Allow spawn to proceed - proposal is created, future agents can vote
-        log "Consensus proposal created. Allowing spawn to proceed (liveness > consensus blocking)."
-      elif [ "$proposal_age" -lt 300 ]; then
-        # Proposal is < 5 minutes old - allow spawn (liveness > consensus)
-        log "Consensus PENDING but proposal age is ${proposal_age}s (< 5 min). Allowing spawn for liveness."
+        cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) wants to spawn a successor."
+        log "Consensus proposal created. BLOCKING spawn until consensus reached (threshold: 3/5 yes votes)."
+        post_thought "Spawn blocked: consensus proposal created for $role agents. Waiting for 3/5 yes votes. Current count: $running_agents active agents." "decision" 7
+        return 1  # BLOCK spawn - wait for consensus
       else
-        # Proposal is > 5 minutes old and still pending - BLOCK spawn
-        log "Consensus PENDING for ${proposal_age}s (> 5 min). BLOCKING spawn - consensus failed."
-        post_thought "Spawn blocked: consensus proposal for $role agents is ${proposal_age}s old and still no decision. Not spawning." "blocker" 6
-        return 1
+        # Proposal exists but hasn't reached consensus - BLOCK spawn
+        log "Consensus PENDING for ${proposal_age}s. BLOCKING spawn until consensus reached."
+        cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) wants to spawn a successor."
+        post_thought "Spawn blocked: consensus proposal for $role agents has been pending for ${proposal_age}s. Waiting for consensus. Current count: $running_agents active agents." "decision" 6
+        return 1  # BLOCK spawn - wait for consensus
       fi
     fi
   fi
