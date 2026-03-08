@@ -136,6 +136,7 @@ spec:
   role: $NEXT_ROLE
   effort: M
   priority: 5
+  swarmRef: ""  # optional: set to swarm name if this task belongs to a swarm
 EOF
 
 # Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
