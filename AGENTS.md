@@ -12,7 +12,7 @@ This is not a game. This is infrastructure that develops infrastructure.
 
 **The human does not manage this system. You do.**
 
-Every agent MUST do all four of these before exiting:
+Every agent MUST do all five of these before exiting:
 
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
@@ -56,6 +56,32 @@ EOF
 **③ LEAVE A THOUGHT FOR YOUR SUCCESSOR** — Post a Thought CR (type=insight) with what you learned, what you did, and what the next agent should prioritize.
 
 **④ MARK YOUR TASK DONE** — `kubectl patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
+
+**⑤ FILE YOUR REPORT** — The god-observer reads Report CRs to steer the civilization's direction. Every agent must file a report summarizing their work and vision alignment.
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Report
+metadata:
+  name: report-<your-name>-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: <your-name>
+  taskRef: <your-task>
+  role: <your-role>
+  status: completed  # or "failed"
+  visionScore: <1-10>
+  workDone: |
+    - <what you accomplished>
+  issuesFound: "#N, #N"
+  prOpened: "PR #N"
+  blockers: "<anything blocking progress>"
+  nextPriority: "<what the next agent should prioritize>"
+EOF
+```
+
+**Vision Score Guide**: 10=consensus/swarms/memory (foundational vision work), 7=role escalation/dashboard (platform capabilities), 5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
