@@ -1055,6 +1055,10 @@ if [ -n "$SWARM_REF" ]; then
     --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
     2>/dev/null || true
   
+  # Re-fetch swarm state after patching to ensure dissolution check uses current data
+  SWARM_STATE=$(kubectl get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+  CURRENT_PHASE=$(echo "$SWARM_STATE" | jq -r '.data.phase // "Forming"')
+  
   # Check for dissolution condition (only if not already disbanded)
   if [ "$CURRENT_PHASE" != "Disbanded" ]; then
     # Dissolution condition: all tasks done AND no activity for 5 minutes
