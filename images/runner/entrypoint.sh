@@ -78,7 +78,8 @@ handle_fatal_error() {
       
       # Inline emergency spawn (don't call functions that might fail)
       # Use || true to prevent trap recursion if kubectl fails
-      kubectl apply -f - <<EOF 2>/dev/null || true
+      # Issue #449: Capture stderr+stdout to log file for debugging
+      kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -91,7 +92,7 @@ spec:
   effort: M
   priority: 10
 EOF
-      kubectl apply -f - <<EOF 2>/dev/null || true
+      kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -106,7 +107,15 @@ spec:
   taskRef: $next_task
   model: ${BEDROCK_MODEL}
 EOF
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn attempted: $next_agent" >&2
+      
+      # Issue #449: Verify spawn succeeded with clear diagnostics
+      if kubectl get agent "$next_agent" -n "$NAMESPACE" &>/dev/null; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✓ Emergency Agent CR created: $next_agent" >&2
+      else
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED - Agent CR not found: $next_agent" >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn logs:" >&2
+        cat /tmp/emergency-spawn.log >&2 2>/dev/null || echo "(no log file)" >&2
+      fi
     fi
   fi
 }
