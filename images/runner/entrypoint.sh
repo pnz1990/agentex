@@ -156,43 +156,6 @@ EOF
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
 }
 
-# file_report() - Simplified wrapper around post_report() for automatic reporting
-# Used by step 11 post-results logic (lines 727, 734)
-# Usage: file_report <status> <work_done> <blockers> <vision_score>
-file_report() {
-  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-5}"
-  
-  # Automatically determine issues found and PR opened from git state
-  local issues_found=""
-  local pr_opened=""
-  
-  # Check if we're in a git repo and on a branch
-  if [ -d ".git" ]; then
-    # Extract issue numbers from branch name (e.g., issue-107-description -> #107)
-    local branch_name=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-    if [[ "$branch_name" =~ issue-([0-9]+) ]]; then
-      issues_found="#${BASH_REMATCH[1]}"
-    fi
-    
-    # Check if a PR was opened (search recent git history for PR references)
-    local pr_number=$(git log --oneline -10 2>/dev/null | grep -oP 'PR #\K[0-9]+' | head -1 || echo "")
-    if [ -n "$pr_number" ]; then
-      pr_opened="PR #${pr_number}"
-    fi
-  fi
-  
-  # Determine next priority based on status
-  local next_priority=""
-  if [ "$status" = "completed" ]; then
-    next_priority="Continue platform improvement loop"
-  else
-    next_priority="Investigate failure and retry"
-  fi
-  
-  # Call the full post_report() function
-  post_report "$vision_score" "$work_done" "$issues_found" "$pr_opened" "$blockers" "$next_priority" "$OPENCODE_EXIT"
-}
-
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -379,10 +342,10 @@ spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
   # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
-  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
-  # This prevents false positives from completed/failed agents that are still in the cluster (issue #154).
-  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
+  # Must check jobs.status.active == 1 to only count running pods.
+  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${role}" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
@@ -966,10 +929,11 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
-  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
-  # This prevents false positives from completed/failed agents that are still in the cluster.
-  RUNNING_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
+  # Agent CRs are removed once Jobs complete, so counting them gives false negatives.
+  # Must check jobs.status.active == 1 to only count running pods.
+  RUNNING_AGENTS=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${NEXT_ROLE}" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
   CONSENSUS_REQUIRED=false
   if [ "$RUNNING_AGENTS" -ge 3 ]; then
