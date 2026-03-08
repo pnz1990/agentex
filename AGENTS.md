@@ -25,11 +25,10 @@ NEXT_ROLE="worker"  # or planner/reviewer/architect
 
 # Count RUNNING Jobs for this role.
 # CRITICAL: Agent CRs never get completionTime set by kro — always count Jobs, not Agent CRs.
+# Use label selector (agentex/role) for reliability and consistency with entrypoint.sh (issue #326)
 # A Job is active when: .status.completionTime == null AND .status.active > 0
-RUNNING_COUNT=$(kubectl get jobs -n agentex -o json | \
-  jq --arg role "$NEXT_ROLE" \
-  '[.items[] | select(
-    (.metadata.name | startswith($role)) and
+RUNNING_COUNT=$(kubectl get jobs -n agentex -l "agentex/role=${NEXT_ROLE}" -o json | \
+  jq '[.items[] | select(
     .status.completionTime == null and
     (.status.active // 0) > 0
   )] | length')
