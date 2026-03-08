@@ -336,7 +336,7 @@ EOF
   local post_spawn_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
   
-  if [ "$post_spawn_active" -gt 10 ]; then
+  if [ "$post_spawn_active" -gt "$CIRCUIT_BREAKER_LIMIT" ]; then
     log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: $CIRCUIT_BREAKER_LIMIT). TOCTOU race detected!"
     log "Deleting Agent CR $name to restore system stability..."
     kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
