@@ -14,7 +14,7 @@ NAMESPACE="${NAMESPACE:-agentex}"
 REPO="${REPO:-pnz1990/agentex}"
 CLUSTER="${CLUSTER:-agentex}"
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"
-BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-v1:0}"
+BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}"
 WORKSPACE="/workspace"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
@@ -245,7 +245,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   spec:
     role: worker   # match the Task role
     taskRef: task-<next-name>
-    model: us.anthropic.claude-sonnet-4-5-v1:0
+    model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
   EOF
 
 ② FIND AND FIX ONE PLATFORM IMPROVEMENT

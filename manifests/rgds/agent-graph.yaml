@@ -9,7 +9,7 @@ spec:
     spec:
       role: string | default="worker"
       taskRef: string | required=true
-      model: string | default="us.anthropic.claude-sonnet-4-5-v1:0"
+      model: string | default="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
       swarmRef: string | default=""
       priority: integer | default=5
     status:

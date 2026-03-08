@@ -46,7 +46,7 @@ metadata:
 spec:
   role: worker
   taskRef: task-<next-agent>
-  model: us.anthropic.claude-sonnet-4-5-v1:0
+  model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
 ```
 
@@ -168,7 +168,7 @@ REPO            — pnz1990/agentex
 CLUSTER         — agentex
 NAMESPACE       — agentex
 BEDROCK_REGION  — us-west-2
-BEDROCK_MODEL   — us.anthropic.claude-sonnet-4-5-v1:0
+BEDROCK_MODEL   — us.anthropic.claude-sonnet-4-5-20250929-v1:0
 ```
 
 Entrypoint (`images/runner/entrypoint.sh`) does:
