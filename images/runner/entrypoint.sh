@@ -42,6 +42,7 @@ spec:
   body: |
 $(echo "$body" | sed 's/^/    /')
 EOF
+  push_metric "MessageCreated" 1
 }
 
 post_thought() {
@@ -61,6 +62,7 @@ spec:
   content: |
 $(echo "$content" | sed 's/^/    /')
 EOF
+  push_metric "ThoughtCreated" 1
 }
 
 patch_task_status() {
@@ -73,6 +75,20 @@ patch_task_status() {
   kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
     --type=merge \
     -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" \
+    2>/dev/null || true
+}
+
+# Push a custom metric to CloudWatch for dashboard visibility.
+# These metrics power the agentex-activity CloudWatch dashboard.
+push_metric() {
+  local metric_name="$1" value="${2:-1}" unit="${3:-Count}"
+  aws cloudwatch put-metric-data \
+    --namespace Agentex \
+    --metric-name "$metric_name" \
+    --value "$value" \
+    --unit "$unit" \
+    --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
+    --region "$BEDROCK_REGION" \
     2>/dev/null || true
 }
 
@@ -118,12 +134,13 @@ spec:
   githubIssue: ${issue}
   priority: 5
 EOF
-
+  push_metric "TaskCreated" 1
   spawn_agent "$agent_name" "$role" "$task_name" "$title"
 }
 
 # ── 2. Announce startup ───────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
+push_metric "AgentRun" 1
 
 # ── 3. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
@@ -386,6 +403,7 @@ else
   patch_task_status "Done" "exit=$OPENCODE_EXIT"
   post_message "broadcast" "Finished (exit=$OPENCODE_EXIT): $TASK_TITLE" "status"
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
+  push_metric "AgentFailure" 1
 fi
 
 # ── 11. EMERGENCY PERPETUATION ────────────────────────────────────────────────
