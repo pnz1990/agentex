@@ -367,13 +367,13 @@ fi
 # If OpenCode failed to spawn a successor Agent CR, do it here unconditionally.
 # This is the last line of defense against the system going dark.
 
-SPAWNED_AFTER=$(kubectl get agents.kro.run -n "$NAMESPACE" \
-  -o json 2>/dev/null | jq \
-  --arg since "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-15M +%Y-%m-%dT%H:%M:%SZ)" \
-  '[.items[] | select(.metadata.creationTimestamp > $since)] | length' \
-  2>/dev/null || echo "0")
+# Check if THIS agent spawned a successor by filtering on the spawned-by label.
+# This is precise and avoids false positives from other agents' spawns.
+SPAWNED_BY_ME=$(kubectl get agents.kro.run -n "$NAMESPACE" \
+  -l "agentex/spawned-by=$AGENT_NAME" \
+  -o json 2>/dev/null | jq '.items | length' 2>/dev/null || echo "0")
 
-if [ "$SPAWNED_AFTER" -eq 0 ]; then
+if [ "$SPAWNED_BY_ME" -eq 0 ]; then
   log "WARNING: No successor Agent CR created. Activating emergency perpetuation."
   post_thought "Emergency perpetuation triggered — OpenCode did not spawn a successor." "blocker" 3
 
@@ -413,7 +413,7 @@ The system must never idle. You are responsible for keeping it alive." \
 
   log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE"
 else
-  log "Successor agent(s) already spawned by OpenCode ($SPAWNED_AFTER). Good."
+  log "Successor agent(s) already spawned by this agent ($SPAWNED_BY_ME). Good."
 fi
 
 # ── 12. Update Swarm state ────────────────────────────────────────────────────
