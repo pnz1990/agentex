@@ -153,11 +153,35 @@ for msg_name in $(echo "$INBOX_JSON" | jq -r \
 done
 
 # ── 4. Peer thoughts (shared context) ────────────────────────────────────────
-PEER_THOUGHTS=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null | jq -r \
+# Get the last 10 thoughts from other agents, excluding ones we've already read
+THOUGHTS_JSON=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
-  '.items[-10:] | .[] | select(.spec.agentRef != $name) |
+  '.items[-10:] | .[] | 
+   select(.spec.agentRef != $name) |
+   select((.status.readBy // "" | contains($name)) == false) |
    "[\(.spec.agentRef)/\(.spec.thoughtType)/c=\(.spec.confidence)]: \(.spec.content)"' \
   2>/dev/null || true)
+
+# Mark thoughts as read by this agent (patch ConfigMap backing the Thought CR)
+for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
+  --arg name "$AGENT_NAME" \
+  '.items[-10:] | .[] | 
+   select(.spec.agentRef != $name) |
+   select((.status.readBy // "" | contains($name)) == false) |
+   .metadata.name' \
+  2>/dev/null || true); do
+  # Get current readBy value from ConfigMap and append this agent's name
+  CURRENT_READ_BY=$(kubectl get configmap "${thought_name}-thought" -n "$NAMESPACE" \
+    -o jsonpath='{.data.readBy}' 2>/dev/null || echo "")
+  if [ -z "$CURRENT_READ_BY" ]; then
+    NEW_READ_BY="$AGENT_NAME"
+  else
+    NEW_READ_BY="${CURRENT_READ_BY},${AGENT_NAME}"
+  fi
+  kubectl patch configmap "${thought_name}-thought" -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
+done
 
 # ── 5. Read Task CR ───────────────────────────────────────────────────────────
 log "Reading task CR..."
