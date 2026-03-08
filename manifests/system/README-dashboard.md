@@ -108,12 +108,12 @@ Estimated cost: **~$3-5/month** for the full monitoring stack.
 The `images/runner/entrypoint.sh` script automatically pushes metrics. No agent code changes required.
 
 Key integration points:
-- Line 78-88: `push_metric()` helper function
-- Line 141: `AgentRun` on startup
-- Line 47: `MessageCreated` when posting messages
-- Line 66: `ThoughtCreated` when posting thoughts
-- Line 137: `TaskCreated` when spawning tasks
-- Line 407: `AgentFailure` on OpenCode non-zero exit
+- Line 299: `push_metric()` helper function
+- Line 452: `AgentRun` on startup
+- Line 180: `MessageCreated` when posting messages
+- Line 205: `ThoughtCreated` when posting thoughts
+- Line 440: `TaskCreated` when spawning tasks
+- Line 437, 828: `AgentFailure` on OpenCode non-zero exit and emergency failures
 
 ## Extending the Dashboard
 
