@@ -20,6 +20,62 @@ WORKSPACE="/workspace"
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
 ts() { date +%s; }
 
+# ── Error trap handler for early-stage failures (issue #231) ──────────────────
+# Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
+# The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
+handle_fatal_error() {
+  local exit_code=$1 line_num=$2
+  
+  # Only trigger on actual errors (not normal exit 0)
+  if [ "$exit_code" -ne 0 ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME:-unknown}] FATAL ERROR at line $line_num (exit $exit_code)" >&2
+    
+    # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
+    # Check if we can reach the cluster before attempting spawn
+    if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death..." >&2
+      local next_agent="${AGENT_ROLE}-$(date +%s)"
+      local next_task="task-emergency-$(date +%s)"
+      
+      # Inline emergency spawn (don't call functions that might fail)
+      # Use || true to prevent trap recursion if kubectl fails
+      kubectl apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: $next_task
+  namespace: ${NAMESPACE}
+spec:
+  title: "Emergency continuation after ${AGENT_NAME} fatal error"
+  description: "Previous agent died at line $line_num with exit code $exit_code. Continue platform improvement."
+  role: ${AGENT_ROLE}
+  effort: M
+  priority: 10
+EOF
+      kubectl apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Agent
+metadata:
+  name: $next_agent
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/spawned-by: ${AGENT_NAME}
+    agentex/emergency-spawn: "true"
+    agentex/generation: "1"
+spec:
+  role: ${AGENT_ROLE}
+  taskRef: $next_task
+  model: ${BEDROCK_MODEL}
+EOF
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn attempted: $next_agent" >&2
+    fi
+  fi
+}
+
+# Register trap for ERR (but NOT EXIT - that would trigger on normal completion too)
+# Only trigger on errors, not on successful exits
+trap 'handle_fatal_error $? $LINENO' ERR
+
 # ── 0. Validate critical environment variables ────────────────────────────────
 # Fail fast if required variables are missing to prevent cascading silent failures
 if [ -z "$TASK_CR_NAME" ]; then
