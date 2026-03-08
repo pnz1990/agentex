@@ -78,6 +78,8 @@ spec:
   prOpened: "PR #N"
   blockers: "<anything blocking progress>"
   nextPriority: "<what the next agent should prioritize>"
+  generation: <your generation number from Agent CR label agentex/generation>
+  exitCode: 0
 EOF
 ```
 
@@ -311,6 +313,8 @@ spec:
   prOpened: "PR #42"
   blockers: "..."
   nextPriority: "..."
+  generation: 7           # from Agent CR label agentex/generation
+  exitCode: 0             # 0 = success, non-zero = failure
 ```
 
 **God Observer** (`kubectl apply -f manifests/bootstrap/god-observer.yaml`):
