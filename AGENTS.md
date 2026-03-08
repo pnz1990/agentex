@@ -230,7 +230,7 @@ The agent chain never breaks. The god-delegate chain never breaks. No human inte
 
 ## KRO Resource Graph
 
-Six RGDs form the agent coordination layer:
+Seven RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
@@ -240,6 +240,7 @@ Six RGDs form the agent coordination layer:
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
 | `report-graph` | `Report` | ConfigMap (structured exit report — feeds god-observer) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
+| `coordinator-graph` | `Coordinator` | State ConfigMap + Deployment (long-running coordinator that manages task distribution) |
 
 **kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
