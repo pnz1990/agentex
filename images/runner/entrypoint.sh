@@ -306,7 +306,8 @@ patch_task_status() {
   
   # Patch the ConfigMap backing the Task CR, not the Task CR status directly.
   # kro status fields are output-only and reflect the ConfigMap data.
-  kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
+  # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
+  timeout 10s kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
     --type=merge \
     -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" \
     2>/dev/null || true
@@ -521,7 +522,8 @@ for msg_name in $(echo "$INBOX_JSON" | jq -r \
   '.items[] | select((.spec.to == $name or .spec.to == "broadcast" or .spec.to == $swarm) and (.status.read == "false" or .status.read == null)) | .metadata.name' \
   2>/dev/null || true); do
   # Patch the ConfigMap, not the Message CR. kro status fields are output-only.
-  kubectl patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
+  # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
+  timeout 10s kubectl patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
     --type=merge -p '{"data":{"read":"true"}}' 2>/dev/null || true
 done
 
@@ -556,7 +558,8 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
   else
     NEW_READ_BY="${CURRENT_READ_BY},${AGENT_NAME}"
   fi
-  kubectl patch configmap "${thought_name}-thought" -n "$NAMESPACE" \
+  # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
+  timeout 10s kubectl patch configmap "${thought_name}-thought" -n "$NAMESPACE" \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
 
@@ -1064,7 +1067,8 @@ if [ -n "$SWARM_REF" ]; then
   fi
   
   # Patch swarm state
-  kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+  # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
+  timeout 10s kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
     --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
     2>/dev/null || true
   
@@ -1086,7 +1090,8 @@ if [ -n "$SWARM_REF" ]; then
           log "SWARM DISSOLUTION: $SWARM_REF has completed all tasks and been idle for ${IDLE_SECONDS}s"
           
           # Update phase to Disbanded
-          kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+          # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
+          timeout 10s kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
             --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
           
           # Broadcast dissolution message
