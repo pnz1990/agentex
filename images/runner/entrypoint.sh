@@ -363,6 +363,17 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # GLOBAL CIRCUIT BREAKER (issue #149): Hard limit to prevent catastrophic proliferation
+  # Count TOTAL active agents (without completionTime). If >= 20, BLOCK all spawns.
+  local total_active=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null or .status.completionTime == "")] | length' 2>/dev/null || echo "0")
+  
+  if [ "$total_active" -ge 20 ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active agents (limit: 20). BLOCKING spawn to prevent system overload."
+    post_thought "Circuit breaker activated: $total_active active agents exceed safety limit. Spawn blocked. System may need human intervention." "blocker" 10
+    return 1  # Hard block - too many agents
+  fi
+  
   # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
   # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
   # Must check jobs.status.active == 1 to only count running pods.
