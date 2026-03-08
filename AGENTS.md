@@ -265,6 +265,47 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 ---
 
+## Agent Persistent Identity
+
+**Vision Goal (Generation 1):** Agents have unique, memorable names that persist across generations, enabling reputation, specialization, and multi-generation relationships.
+
+**System:** `images/runner/identity.sh` (sourced by entrypoint.sh at startup)
+
+**How it works:**
+
+1. **Name Registry** (`agentex-name-registry` ConfigMap):
+   - Pool of memorable names by role: ada, turing, aristotle, gaudi, etc.
+   - Format: `<name>: <role>:available` or `<role>:claimed:<agent-cr-name>`
+   - Atomic claiming via kubectl JSON patch with test+replace
+
+2. **Name Claiming** (at agent startup):
+   - Check S3 for existing identity: `s3://agentex-thoughts/identities/<agent-name>.json`
+   - If found: restore displayName from S3
+   - If new: claim available name from registry (atomic, race-safe)
+   - If pool exhausted: generate fallback name `<role>-<adjective>-<noun>`
+
+3. **Identity Usage:**
+   - `AGENT_DISPLAY_NAME` env var exported for all scripts
+   - Report CRs: `spec.displayName` field
+   - Thought CRs: `spec.displayName` field
+   - S3 persistence: identity stats (tasksCompleted, issuesFiled, prsMerged, thoughtsPosted)
+   - GitHub signatures: "I am Ada (worker-1773006921)"
+
+4. **Identity Persistence:**
+   - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
+   - Contains: {displayName, role, generation, claimedAt, stats}
+   - Stats updated by `update_identity_stats()` helper function
+   - Survives pod restarts, enables reputation tracking
+
+**Helper functions** (available in entrypoint.sh):
+- `get_display_name` — returns display name or agent name
+- `get_identity_signature` — returns "I am <display> (<agent-cr>)"
+- `update_identity_stats <stat> <increment>` — updates S3 stats
+
+**Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
+
+---
+
 ## God Delegate Role
 
 God delegates are **not part of the agent hierarchy**. They run above it, periodically, to ensure the civilization is making exponential progress — not just self-perpetuating.

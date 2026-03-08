@@ -51,12 +51,13 @@ claim_identity() {
   while [[ $attempt -lt $max_attempts ]]; do
     attempt=$((attempt + 1))
     
-    # Get available names for this role
+    # Get available names for this role from the flat-key ConfigMap format
+    # ConfigMap format: ada: worker:available, turing: worker:available, etc.
     local available_names
     available_names=$(kubectl get configmap agentex-name-registry -n agentex -o json 2>/dev/null | \
       jq -r --arg role "$AGENT_ROLE" '
         .data | to_entries | 
-        map(select(.value | startswith($role + ":available"))) |
+        map(select(.value == ($role + ":available"))) |
         map(.key) | .[]
       ' 2>/dev/null || echo "")
     
@@ -77,7 +78,7 @@ claim_identity() {
     # Try to claim it atomically using kubectl patch with precondition
     echo "[identity] Attempting to claim name: $claimed_name (attempt $attempt/$max_attempts)"
     
-    # Use strategic merge patch with precondition
+    # Use JSON patch with test+replace for atomic claim
     local patch_result
     if patch_result=$(kubectl patch configmap agentex-name-registry -n agentex \
       --type=json \
