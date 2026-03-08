@@ -59,7 +59,8 @@ RUN git config --system user.name "agentex-bot" \
     && git config --system safe.directory '*'
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && chown agentex:agentex /entrypoint.sh
+COPY ../coordinator/coordinator.sh /usr/local/bin/coordinator.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh && chown agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh
 
 USER agentex
 WORKDIR /workspace
