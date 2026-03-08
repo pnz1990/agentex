@@ -1107,7 +1107,7 @@ PROMPT
 # This is a SECONDARY check before OpenCode execution to catch load spikes.
 # Issue #502: Early check at step 1.2 prevents most TOCTOU proliferation.
 # This check catches edge cases where load increased after agent startup.
-PRE_EXEC_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+PRE_EXEC_ACTIVE=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
 log "Pre-execution circuit breaker check: $PRE_EXEC_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
@@ -1155,7 +1155,7 @@ fi
 ESCALATED_ROLE=""
 
 # Check all Thought CRs posted by THIS agent during this run for structural blockers
-BLOCKER_THOUGHTS=$(kubectl get thoughts.kro.run -n "$NAMESPACE" \
+BLOCKER_THOUGHTS=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" \
   -l "agentex/agent=$AGENT_NAME" \
   -o json 2>/dev/null | jq -r \
   --arg name "$AGENT_NAME" \
@@ -1177,7 +1177,7 @@ fi
 
 # Check if THIS agent spawned a successor by filtering on the spawned-by label.
 # This is precise and avoids false positives from other agents' spawns.
-SUCCESSOR_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" \
+SUCCESSOR_AGENTS=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" \
   -l "agentex/spawned-by=$AGENT_NAME" \
   -o json 2>/dev/null || echo '{"items":[]}')
 SPAWNED_BY_ME=$(echo "$SUCCESSOR_AGENTS" | jq '.items | length' 2>/dev/null || echo "0")
@@ -1199,14 +1199,14 @@ else
   for agent_name in $(echo "$SUCCESSOR_AGENTS" | jq -r '.items[].metadata.name' 2>/dev/null || true); do
     # Check if Agent CR has status.jobName populated by kro
     # Issue #474: Use .kro.run API group (not default agentex.io)
-    JOB_NAME=$(kubectl get agent.kro.run "$agent_name" -n "$NAMESPACE" \
+    JOB_NAME=$(kubectl_with_timeout 10 get agent.kro.run "$agent_name" -n "$NAMESPACE" \
       -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     
     if [ -z "$JOB_NAME" ]; then
       log "WARNING: Agent CR $agent_name exists but status.jobName is empty (kro hasn't processed it yet)"
       # Give kro a moment to process the Agent CR (it may be in progress)
       sleep 5
-      JOB_NAME=$(kubectl get agent.kro.run "$agent_name" -n "$NAMESPACE" \
+      JOB_NAME=$(kubectl_with_timeout 10 get agent.kro.run "$agent_name" -n "$NAMESPACE" \
         -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     fi
     
@@ -1219,7 +1219,7 @@ else
     fi
     
     # Verify the Job actually exists
-    if kubectl get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
+    if timeout 10s kubectl get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
       log "✓ Agent CR $agent_name → Job $JOB_NAME exists"
       JOBS_VERIFIED=$((JOBS_VERIFIED + 1))
     else
