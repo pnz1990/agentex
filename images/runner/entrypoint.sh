@@ -379,9 +379,10 @@ spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
   # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
-  # Count running agents of the same role. If >= 3, require consensus before spawning.
+  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
+  # This prevents false positives from completed/failed agents that are still in the cluster (issue #154).
   local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role)] | length' 2>/dev/null || echo "0")
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
