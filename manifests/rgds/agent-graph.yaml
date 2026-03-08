@@ -16,6 +16,8 @@ spec:
       jobName: ${agentJob.metadata.name}
       completionTime: ${agentJob.status.completionTime}
       failed: ${agentJob.status.failed}
+      active: ${agentJob.status.active}
+      succeeded: ${agentJob.status.succeeded}
   resources:
     - id: agentJob
       template:
