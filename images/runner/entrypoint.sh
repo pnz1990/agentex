@@ -345,6 +345,37 @@ TALLIED_AT: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   return 0
 }
 
+# Check the age of a consensus proposal in seconds.
+# Usage: check_proposal_age "motion-name"
+# Returns: age in seconds, or 9999 if proposal not found
+check_proposal_age() {
+  local motion_name="$1"
+  
+  # Get all Thought CRs
+  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  
+  # Find the proposal and get its creation timestamp
+  local proposal_timestamp=$(echo "$thoughts_json" | jq -r \
+    --arg motion "$motion_name" \
+    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | contains("MOTION: " + $motion))) | 
+     .metadata.creationTimestamp' | head -1)
+  
+  if [ -z "$proposal_timestamp" ]; then
+    log "Proposal age check: motion '$motion_name' not found"
+    echo "9999"
+    return 0
+  fi
+  
+  # Calculate age in seconds
+  local now_epoch=$(date +%s)
+  local proposal_epoch=$(date -d "$proposal_timestamp" +%s 2>/dev/null || echo "$now_epoch")
+  local age_seconds=$((now_epoch - proposal_epoch))
+  
+  log "Proposal age: motion=$motion_name age=${age_seconds}s (created=$proposal_timestamp)"
+  echo "$age_seconds"
+  return 0
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
@@ -863,7 +894,6 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   TS=$(ts)
   NEXT_TASK="task-continue-${TS}"
-  NEXT_AGENT="worker-${TS}"
 
   # Determine what the next agent should do:
   # If role escalation was triggered, use that; otherwise cycle through roles
@@ -880,6 +910,9 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
       *)         NEXT_ROLE="worker" ;;
     esac
   fi
+  
+  # Agent name should match role (issue #111)
+  NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
   # Count running agents of the same role. If >= 3, require consensus before spawning.
@@ -903,18 +936,34 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
       # Don't spawn - consensus rejected it
       NEEDS_EMERGENCY_SPAWN=false
     else
-      # Consensus pending - create proposal and vote yes (this agent believes it's necessary)
-      log "Consensus PENDING: creating proposal for spawning $NEXT_ROLE agent"
-      DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-      propose_motion "$MOTION_NAME" \
-        "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
-        "3/5" \
-        "$DEADLINE"
-      cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+      # Consensus pending - check proposal age to decide if we should spawn
+      log "Consensus PENDING: checking proposal age for $MOTION_NAME"
       
-      log "Consensus proposal created. Spawning anyway (urgent: maintain liveness)."
-      # Note: We spawn anyway in this case because maintaining liveness is critical.
-      # Other agents can vote and future spawns will see the consensus result.
+      # Get proposal age (will be 9999 if not found, which triggers creation)
+      PROPOSAL_AGE=$(check_proposal_age "$MOTION_NAME")
+      
+      if [ "$PROPOSAL_AGE" -eq 9999 ]; then
+        # No proposal exists - create one and vote yes
+        log "No consensus proposal found. Creating proposal for spawning $NEXT_ROLE agent"
+        DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+        propose_motion "$MOTION_NAME" \
+          "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
+          "3/5" \
+          "$DEADLINE"
+        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        
+        # Spawn immediately after creating proposal (grace period for first proposer)
+        log "Consensus proposal created. Spawning for liveness (grace period for voting)."
+      elif [ "$PROPOSAL_AGE" -lt 300 ]; then
+        # Proposal is recent (< 5 minutes) - spawn for liveness, but log warning
+        log "Consensus pending but proposal is recent (${PROPOSAL_AGE}s old). Spawning for liveness."
+        post_thought "Warning: Spawning $NEXT_ROLE despite pending consensus (proposal age: ${PROPOSAL_AGE}s). Agents should vote to reach consensus." "observation" 6
+      else
+        # Proposal is stale (>= 5 minutes) - BLOCK the spawn
+        log "Consensus pending and proposal is stale (${PROPOSAL_AGE}s old). BLOCKING spawn to prevent proliferation."
+        post_thought "Emergency spawn BLOCKED by stale consensus: $RUNNING_AGENTS $NEXT_ROLE agents exist, proposal pending for ${PROPOSAL_AGE}s with no consensus. Not spawning." "blocker" 7
+        NEEDS_EMERGENCY_SPAWN=false
+      fi
     fi
   fi
 
