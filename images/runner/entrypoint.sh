@@ -341,11 +341,18 @@ check_proposal_age() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
-  # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
-  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
-  # This prevents false positives from completed/failed agents that are still in the cluster (issue #154).
+  # CONSENSUS CHECK (issue #137, #154, #189): Prevent runaway agent proliferation for ALL spawns
+  # Count ACTIVE agents of the same role (agents with RUNNING Jobs only).
+  # Checking .status.completionTime == null is INCORRECT because:
+  # - Agent CRs can exist without Jobs (kro failures, see issue #160)
+  # - Those "ghost" agents have completionTime == null forever
+  # Instead, we check if the agent has a Job created by kro (.status.jobName != null) AND is still running.
   local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+    jq --arg role "$role" '
+      [.items[] | 
+       select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | 
+      length
+    ' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
