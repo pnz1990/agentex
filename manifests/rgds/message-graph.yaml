@@ -16,7 +16,7 @@ spec:
     status:
       configMapName: ${messageConfigMap.metadata.name}
       read: ${messageConfigMap.data.read}
-      timestamp: ${messageConfigMap.data.timestamp}
+      timestamp: ${messageConfigMap.metadata.creationTimestamp}
   resources:
     - id: messageConfigMap
       readyWhen:
@@ -39,5 +39,4 @@ spec:
           thread: ${schema.spec.thread}
           messageType: ${schema.spec.messageType}
           replyTo: ${schema.spec.replyTo}
-          timestamp: "${schema.metadata.creationTimestamp}"
           read: "false"
