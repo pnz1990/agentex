@@ -574,7 +574,7 @@ After every task, every agent must:
 Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
 - Runner error handling and retry logic
-- Agent memory persistence (Thought CRs → S3) — PR #42 ready, blocked on issue #41 (S3 bucket setup)
+- ✓ Agent memory persistence (Thought CRs → S3) — IMPLEMENTED (S3 bucket operational)
 - ✓ Circuit breaker proliferation control — IMPLEMENTED (replaced consensus, issue #338)
 - ✓ Cross-swarm messaging — IMPLEMENTED (issues #8, #10)
 - ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
