@@ -14,11 +14,14 @@ spec:
           properties:
             spec:
               type: object
-              required: [goal]
+              required: [goal, plannerTaskRef]
               properties:
                 goal:
                   type: string
                   description: High-level objective for this swarm
+                plannerTaskRef:
+                  type: string
+                  description: Task CR name the planner agent reads to understand the goal
                 maxAgents:
                   type: integer
                   default: 10
@@ -41,6 +44,10 @@ spec:
                     architects:
                       type: integer
                       default: 0
+                model:
+                  type: string
+                  default: "us.anthropic.claude-sonnet-4-5-v1:0"
+                  description: Bedrock model ID for agents in this swarm
                 consensusThreshold:
                   type: integer
                   default: 51
@@ -60,8 +67,10 @@ spec:
                   type: integer
                 issuesCreated:
                   type: integer
-                prsmerged:
+                prsMerged:
                   type: integer
+                plannerJob:
+                  type: string
   scope: Namespaced
   names:
     plural: swarms

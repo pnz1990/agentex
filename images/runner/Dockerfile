@@ -3,6 +3,8 @@ FROM ubuntu:24.04
 ARG KUBECTL_VERSION=1.31.0
 ARG GH_VERSION=2.63.2
 ARG OPENCODE_VERSION=latest
+ARG UID=1000
+ARG GID=1000
 
 RUN apt-get update && apt-get install -y \
     curl \
@@ -35,13 +37,22 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # OpenCode CLI
 RUN npm install -g opencode-ai@${OPENCODE_VERSION}
 
-# git config
-RUN git config --global user.name "agentex-bot" \
-    && git config --global user.email "agentex@pnz1990.bot" \
-    && git config --global credential.helper store
+# Create non-root user for PSA restricted compliance
+RUN groupadd -g ${GID} agentex && useradd -u ${UID} -g ${GID} -m -s /bin/bash agentex
+
+# Directories the agent needs write access to
+RUN mkdir -p /workspace /home/agentex/.config/opencode /home/agentex/.kube \
+    && chown -R agentex:agentex /workspace /home/agentex
+
+# git config (global, owned by agentex user)
+RUN git config --system user.name "agentex-bot" \
+    && git config --system user.email "agentex@pnz1990.bot" \
+    && git config --system credential.helper store \
+    && git config --system safe.directory '*'
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+USER agentex
 WORKDIR /workspace
 ENTRYPOINT ["/entrypoint.sh"]

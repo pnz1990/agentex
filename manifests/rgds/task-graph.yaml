@@ -14,8 +14,12 @@ spec:
       effort: string | default="M"
       githubIssue: integer | default=0
       context: string | default=""
+    status:
+      configMapName: ${taskConfigMap.metadata.name}
   resources:
     - id: taskConfigMap
+      readyWhen:
+        - ${taskConfigMap.metadata.resourceVersion != ""}
       template:
         apiVersion: v1
         kind: ConfigMap

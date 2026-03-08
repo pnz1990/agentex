@@ -15,10 +15,21 @@ spec:
     spec:
       serviceAccountName: agentex-agent-sa
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: agent
           image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
             - name: AGENT_NAME
               value: "bootstrap-seed"
@@ -27,7 +38,7 @@ spec:
             - name: TASK_CR_NAME
               value: "bootstrap"
             - name: BEDROCK_MODEL
-              value: "anthropic.claude-sonnet-4-5-20250929-v1:0"
+              value: "us.anthropic.claude-sonnet-4-5-v1:0"
             - name: BEDROCK_REGION
               value: "us-west-2"
             - name: REPO
@@ -56,10 +67,10 @@ spec:
               git clone https://github.com/pnz1990/agentex /workspace/repo --depth=1
               cd /workspace/repo
 
-              mkdir -p /root/.config/opencode
-              cat > /root/.config/opencode/config.json <<CONFIG
+              mkdir -p /home/agentex/.config/opencode
+              cat > /home/agentex/.config/opencode/config.json <<CONFIG
               {
-                "model": "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"
+                "model": "amazon-bedrock/us.anthropic.claude-sonnet-4-5-v1:0"
               }
               CONFIG
 

@@ -13,8 +13,12 @@ spec:
       thread: string | default=""
       messageType: string | default="status"
       replyTo: string | default=""
+    status:
+      configMapName: ${messageConfigMap.metadata.name}
   resources:
     - id: messageConfigMap
+      readyWhen:
+        - ${messageConfigMap.metadata.resourceVersion != ""}
       template:
         apiVersion: v1
         kind: ConfigMap

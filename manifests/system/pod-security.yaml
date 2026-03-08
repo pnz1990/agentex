@@ -1,0 +1,18 @@
+# PodSecurityAdmission label for the agentex namespace.
+# Agents run as non-root (restricted baseline) — enforced at admission.
+# The runner image must be updated to run as non-root (UID 1000).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentex
+  labels:
+    # Enforce restricted pod security standard
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # Warn on anything that would violate restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    # Audit violations without blocking (useful during transition)
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

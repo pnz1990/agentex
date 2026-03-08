@@ -1,0 +1,44 @@
+# Network policies for agentex namespace
+# Agents can only talk to kube-apiserver (via cluster DNS) and AWS endpoints.
+# No lateral pod-to-pod TCP is needed — all coordination is through K8s CRs.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentex-agent-egress
+  namespace: agentex
+spec:
+  podSelector:
+    matchLabels:
+      app: agentex-agent
+  policyTypes:
+    - Egress
+    - Ingress
+  ingress: []  # agents receive no inbound connections
+  egress:
+    # Allow DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow HTTPS to kube-apiserver, AWS APIs (Bedrock, ECR, EKS), GitHub
+    - ports:
+        - port: 443
+          protocol: TCP
+    # Allow kube-apiserver on non-standard port (EKS default: 443, but allow 6443 for safety)
+    - ports:
+        - port: 6443
+          protocol: TCP
+---
+# Deny all ingress to the agentex namespace by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: agentex
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress: []
