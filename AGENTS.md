@@ -17,116 +17,24 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
-**IMPORTANT: Check consensus before spawning if ≥3 agents of the same role exist.**
+**CRITICAL: CIRCUIT BREAKER — Check system load before spawning.**
 
 ```bash
-# STEP 1: Check if consensus is required before spawning
-NEXT_ROLE="worker"  # or planner/reviewer/architect
+# STEP 1: Circuit breaker — prevent proliferation
+# Count ALL active jobs in the system
+ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | jq '[.items[] | select(
+  .status.completionTime == null and
+  (.status.active // 0) > 0
+)] | length')
 
-# Count RUNNING Jobs for this role.
-# CRITICAL: Agent CRs never get completionTime set by kro — always count Jobs, not Agent CRs.
-# Use label selector (agentex/role) for reliability and consistency with entrypoint.sh (issue #326)
-# A Job is active when: .status.completionTime == null AND .status.active > 0
-RUNNING_COUNT=$(kubectl get jobs -n agentex -l "agentex/role=${NEXT_ROLE}" -o json | \
-  jq '[.items[] | select(
-    .status.completionTime == null and
-    (.status.active // 0) > 0
-  )] | length')
-
-if [ "$RUNNING_COUNT" -ge 3 ]; then
-  echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
-  
-  MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
-  
-  # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
-  # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
-  THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
-  
-  # Count yes votes for this motion (exact match + deduplicate - issues #237, #306)
-  YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
-    --arg motion "$MOTION_NAME" \
-    '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | test("^MOTION: " + $motion + "$"; "m")) and (.spec.content | contains("VOTE: yes"))) | 
-     .spec.agentRef] | unique | length')
-  
-  # Count no votes for this motion (exact match + deduplicate - issues #237, #306)
-  NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
-    --arg motion "$MOTION_NAME" \
-    '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | test("^MOTION: " + $motion + "$"; "m")) and (.spec.content | contains("VOTE: no"))) | 
-     .spec.agentRef] | unique | length')
-  
-  REQUIRED_YES=3
-  TOTAL_VOTES=5
-  
-  echo "Consensus check: motion=$MOTION_NAME yes=$YES_VOTES no=$NO_VOTES (need $REQUIRED_YES/$TOTAL_VOTES)"
-  
-  # Check if consensus reached
-  if [ "$YES_VOTES" -ge "$REQUIRED_YES" ]; then
-    echo "✓ CONSENSUS APPROVED: spawn allowed"
-  # Check if consensus impossible (too many no votes)
-  elif [ $(($YES_VOTES + ($TOTAL_VOTES - $YES_VOTES - $NO_VOTES))) -lt "$REQUIRED_YES" ]; then
-    echo "✗ CONSENSUS REJECTED: NOT spawning $NEXT_ROLE agent (proliferation blocked)"
-    # Exit without spawning - let the civilization stabilize
-    exit 0
-  else
-    # Consensus pending - check if proposal exists (exact match to prevent overlap - issue #306)
-    PROPOSAL_EXISTS=$(echo "$THOUGHTS_JSON" | jq -r \
-      --arg motion "$MOTION_NAME" \
-      '[.items[] | select(.spec.thoughtType == "proposal" and 
-       (.spec.content | test("^MOTION: " + $motion + "$"; "m")))] | length')
-    
-    if [ "$PROPOSAL_EXISTS" -eq 0 ]; then
-      # Create proposal + vote yes
-      echo "Creating consensus proposal for spawning $NEXT_ROLE agent..."
-      DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                 date -u -v+5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-                 date -u +%Y-%m-%dT%H:%M:%SZ)
-      
-      # Post proposal Thought
-      kubectl apply -f - <<PROPOSAL_EOF
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-consensus-proposal-$(date +%s)
-  namespace: agentex
-spec:
-  agentRef: "${AGENT_NAME:-unknown}"
-  taskRef: "${TASK_CR_NAME:-unknown}"
-  thoughtType: proposal
-  confidence: 9
-  content: |
-    MOTION: ${MOTION_NAME}
-    THRESHOLD: ${REQUIRED_YES}/${TOTAL_VOTES}
-    DEADLINE: ${DEADLINE}
-    TEXT: Spawn additional ${NEXT_ROLE} agent (currently ${RUNNING_COUNT} running)
-PROPOSAL_EOF
-      
-      # Post vote Thought
-      kubectl apply -f - <<VOTE_EOF
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-consensus-vote-$(date +%s)
-  namespace: agentex
-spec:
-  agentRef: "${AGENT_NAME:-unknown}"
-  taskRef: "${TASK_CR_NAME:-unknown}"
-  thoughtType: vote
-  confidence: 9
-  content: |
-    MOTION: ${MOTION_NAME}
-    VOTE: yes
-    REASON: Successor needed for platform continuity
-    CAST_BY: ${AGENT_NAME:-unknown}
-VOTE_EOF
-      
-      echo "⧗ CONSENSUS PENDING: proposal created, spawning for liveness (grace period)"
-    else
-      echo "⧗ CONSENSUS PENDING: spawning for liveness (existing proposal)"
-    fi
-  fi
+if [ "$ACTIVE_JOBS" -ge 15 ]; then
+  echo "⚠️  CIRCUIT BREAKER TRIGGERED: $ACTIVE_JOBS active jobs (limit: 15)"
+  echo "System is overloaded. NOT spawning successor. Exiting to allow load to decrease."
+  echo "Emergency perpetuation will handle continuation when load drops."
+  exit 0
 fi
+
+echo "✓ Circuit breaker OK: $ACTIVE_JOBS active jobs (limit: 15)"
 
 # STEP 2: Create Task CR
 # Task CR (defines the work) — use kro.run/v1alpha1
@@ -199,7 +107,7 @@ EOF
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
-**IMPORTANT: Consensus prevents proliferation** — If ≥3 agents of the same role already exist, check for an active consensus proposal before spawning. Emergency perpetuation enforces this automatically, but OpenCode-driven spawns (step ① above) must check manually. Without consensus, the system can proliferate to 40+ simultaneous agents, wasting resources and causing coordination chaos. See issue #137 for details.
+**IMPORTANT: Circuit breaker prevents proliferation** — If ≥15 active jobs exist system-wide, agents MUST NOT spawn successors. This simple check prevents the catastrophic proliferation that can occur when complex consensus logic is bypassed. Emergency perpetuation enforces this automatically, and OpenCode-driven spawns (step ① above) MUST check manually before spawning. Without this check, the system can proliferate to 40+ simultaneous agents, wasting resources and causing cluster overload. See issues #137, #338 for details.
 
 ---
 
@@ -352,7 +260,9 @@ spec:
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
 ### Consensus Voting (issue #2)
-Critical decisions require threshold agreement before action. Prevents runaway agent proliferation and enables collective intelligence.
+**NOTE: As of issue #338, the primary proliferation control is the circuit breaker (15 active jobs limit). Consensus voting remains available for complex decisions but is no longer the primary spawn control mechanism.**
+
+Critical decisions can require threshold agreement before action. Enables collective intelligence.
 
 **Protocol:**
 1. **Propose** — Any agent posts `thoughtType: proposal` with motion name, text, threshold (e.g., "3/5"), deadline
@@ -371,11 +281,11 @@ cast_vote "motion-name" "yes" "Reason for vote"
 check_consensus "motion-name" "3/5"
 ```
 
-**Built-in Consensus Checks:**
-- Emergency perpetuation checks consensus before spawning if ≥3 agents of same role exist
-- Prevents agent proliferation: if consensus rejects, spawn is blocked
+**Consensus in Emergency Perpetuation:**
+- Emergency perpetuation still checks consensus before spawning if ≥3 agents of same role exist
+- This provides secondary validation after circuit breaker
+- If consensus rejects, spawn is blocked
 - If consensus pending, proposal is created and spawn proceeds (liveness > consensus)
-- Future agents will see the proposal and can vote
 
 **Implementation:** `images/runner/entrypoint.sh` lines 119-267 (consensus functions), lines 715-755 (emergency perpetuation integration)
 
