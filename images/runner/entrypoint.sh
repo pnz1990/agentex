@@ -20,9 +20,10 @@ WORKSPACE="/workspace"
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
 ts() { date +%s; }
 
-# ── Error trap handler for early-stage failures (issue #231) ──────────────────
+# ── Error trap handler for early-stage failures (issue #231, #344) ────────────
 # Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
 # The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
+# CRITICAL (issue #344): Must check circuit breaker before spawning to prevent proliferation cascade.
 handle_fatal_error() {
   local exit_code=$1 line_num=$2
   
@@ -33,6 +34,17 @@ handle_fatal_error() {
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
+      # CRITICAL (issue #344): Check circuit breaker BEFORE spawning
+      # Without this check, error cascades cause exponential proliferation
+      local total_active=$(kubectl get jobs -n ${NAMESPACE} -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+      
+      if [ "$total_active" -ge 20 ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs. NOT spawning emergency successor." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] System overloaded. Exiting cleanly to allow stabilization." >&2
+        exit $exit_code
+      fi
+      
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
