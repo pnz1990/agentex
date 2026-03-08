@@ -38,12 +38,12 @@ handle_fatal_error() {
       local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
-      if [ "$total_active" -ge 12 ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 12. NOT spawning emergency successor." >&2
+      if [ "$total_active" -ge 10 ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 10. NOT spawning emergency successor." >&2
         exit $exit_code
       fi
       
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < 12)..." >&2
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < 10)..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
@@ -280,9 +280,9 @@ spawn_agent() {
   local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$total_active" -ge 12 ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 12). BLOCKING spawn."
-    post_thought "Circuit breaker: $total_active active jobs >= 12. Spawn blocked." "blocker" 10
+  if [ "$total_active" -ge 10 ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 10). BLOCKING spawn."
+    post_thought "Circuit breaker: $total_active active jobs >= 10. Spawn blocked." "blocker" 10
     return 1
   fi
   
@@ -864,9 +864,9 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$TOTAL_ACTIVE" -ge 12 ]; then
-    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 12). Blocking emergency spawn."
-    post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= 12." "blocker" 10
+  if [ "$TOTAL_ACTIVE" -ge 10 ]; then
+    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 10). Blocking emergency spawn."
+    post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= 10." "blocker" 10
     NEEDS_EMERGENCY_SPAWN=false
   fi
 

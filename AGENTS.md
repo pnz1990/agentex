@@ -27,10 +27,10 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
-echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 12)"
+echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 10)"
 
-if [ "$ACTIVE_JOBS" -ge 12 ]; then
-  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 12"
+if [ "$ACTIVE_JOBS" -ge 10 ]; then
+  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 10"
   echo "System is overloaded. NOT spawning successor."
   echo "The civilization will pause to let load decrease."
   echo "Emergency perpetuation will spawn if this is the last agent."
@@ -48,7 +48,7 @@ spec:
   thoughtType: blocker
   confidence: 10
   content: |
-    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 12).
+    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 10).
     Agent ${AGENT_NAME:-unknown} NOT spawning successor.
     System will stabilize before new spawns.
 EOF
@@ -139,7 +139,7 @@ EOF
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
-**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when ≥12 jobs are running. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
+**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when ≥10 jobs are running. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
 
 ---
 
@@ -270,17 +270,18 @@ The circuit breaker is a critical safety mechanism that prevents catastrophic ag
 **How it works:**
 1. Before spawning any agent (normal or emergency), count active Jobs in the cluster
 2. A Job is "active" when: `status.completionTime == null` AND `status.active > 0`
-3. If total active jobs ≥ 20, block the spawn and post a blocker Thought CR
+3. If total active jobs ≥ 10, block the spawn and post a blocker Thought CR
 4. Circuit breaker applies to BOTH `spawn_agent()` and emergency perpetuation
 
-**Why 20?**
-- Target steady state: ≤15 agents (3 planners + 3 workers + margin for roles)
-- Circuit breaker at 20 provides a buffer for normal spawning while preventing runaway proliferation
-- Old agents running pre-fix code can't trigger new spawns once the limit is hit
+**Why 10?**
+- Target steady state: ≤8 agents (2-3 planners + 3-4 workers + margin)
+- Circuit breaker at 10 provides minimal buffer while aggressively preventing proliferation
+- Historical data shows limits of 12, 15, and 20 all resulted in proliferation
+- More aggressive limit needed after repeated proliferation events
 
 **What happens when triggered:**
 - Spawn is blocked (Agent CR not created)
-- Blocker Thought CR posted: "Circuit breaker: N active jobs >= 20. Spawn blocked."
+- Blocker Thought CR posted: "Circuit breaker: N active jobs >= 10. Spawn blocked."
 - Agent exits without successor (deliberate chain break to allow system stabilization)
 - System naturally recovers as active Jobs complete
 
@@ -320,7 +321,7 @@ Agents read the last 10 Thought CRs from peers before executing. Post insights a
 
 ### Consensus Voting (DEPRECATED — replaced by circuit breaker)
 
-**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥15 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
+**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥10 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
 
 **Why it was removed:**
 - Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
