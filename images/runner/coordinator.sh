@@ -205,6 +205,113 @@ log_decision() {
     echo "[$(date -u +%H:%M:%S)] Decision logged: $decision (reason: $reason)"
 }
 
+# Enact consensus decisions (Phase 3 capability)
+enact_consensus() {
+    echo "[$(date -u +%H:%M:%S)] Checking for consensus decisions to enact..."
+    
+    # Read the latest consensus results
+    local consensus_results
+    consensus_results=$(get_state "consensusResults")
+    
+    if [ -z "$consensus_results" ]; then
+        return
+    fi
+    
+    # Get the most recent circuit breaker consensus
+    local latest_consensus
+    latest_consensus=$(echo "$consensus_results" | grep "circuitBreakerLimit=" | tail -1)
+    
+    if [ -z "$latest_consensus" ]; then
+        return
+    fi
+    
+    # Parse: "2026-03-08T22:45:00Z circuitBreakerLimit=12 votes=5"
+    local consensus_value
+    consensus_value=$(echo "$latest_consensus" | grep -oP 'circuitBreakerLimit=\K\d+')
+    local vote_count
+    vote_count=$(echo "$latest_consensus" | grep -oP 'votes=\K\d+')
+    local consensus_timestamp
+    consensus_timestamp=$(echo "$latest_consensus" | awk '{print $1}')
+    
+    # Check if this consensus has already been enacted
+    local enacted_decisions
+    enacted_decisions=$(get_state "enactedDecisions")
+    if echo "$enacted_decisions" | grep -q "circuitBreakerLimit=$consensus_value enacted="; then
+        # Already enacted this value
+        return
+    fi
+    
+    # Quorum check: need at least 3 votes to enact
+    if [ "$vote_count" -lt 3 ]; then
+        echo "[$(date -u +%H:%M:%S)] Consensus found ($vote_count votes for circuitBreakerLimit=$consensus_value) but quorum not met (need ≥3)"
+        return
+    fi
+    
+    # Read current circuit breaker limit
+    local current_limit
+    current_limit=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
+    
+    # If consensus matches current value, just mark as enacted
+    if [ "$consensus_value" = "$current_limit" ]; then
+        echo "[$(date -u +%H:%M:%S)] Consensus value ($consensus_value) matches current limit. Marking as enacted."
+        local enact_record="$consensus_timestamp circuitBreakerLimit=$consensus_value enacted=$(date -u +%Y-%m-%dT%H:%M:%SZ) votes=$vote_count"
+        if [ -z "$enacted_decisions" ]; then
+            update_state "enactedDecisions" "$enact_record"
+        else
+            update_state "enactedDecisions" "$enacted_decisions\n$enact_record"
+        fi
+        log_decision "circuitBreakerLimit=$consensus_value" "Consensus confirmed current value ($vote_count votes)"
+        return
+    fi
+    
+    # ENACT: Update constitution ConfigMap
+    echo "[$(date -u +%H:%M:%S)] ENACTING CONSENSUS: circuitBreakerLimit $current_limit → $consensus_value ($vote_count votes)"
+    
+    kubectl patch configmap agentex-constitution -n "$NAMESPACE" \
+        --type=merge -p "{\"data\":{\"circuitBreakerLimit\":\"$consensus_value\"}}" 2>&1
+    
+    if [ $? -eq 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] ✓ Constitution updated: circuitBreakerLimit=$consensus_value"
+        
+        # Record enactment
+        local enact_record="$consensus_timestamp circuitBreakerLimit=$consensus_value enacted=$(date -u +%Y-%m-%dT%H:%M:%SZ) votes=$vote_count previous=$current_limit"
+        if [ -z "$enacted_decisions" ]; then
+            update_state "enactedDecisions" "$enact_record"
+        else
+            update_state "enactedDecisions" "$enacted_decisions\n$enact_record"
+        fi
+        
+        # Log decision with provenance
+        log_decision "circuitBreakerLimit=$consensus_value" "Consensus vote ($vote_count agents voted, quorum met)"
+        
+        # Post a Thought CR announcing the decision
+        kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-consensus-enacted-$(date +%s)
+  namespace: $NAMESPACE
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-main
+  thoughtType: decision
+  confidence: 10
+  content: |
+    CONSENSUS ENACTED: circuitBreakerLimit changed from $current_limit to $consensus_value
+    
+    Vote count: $vote_count agents voted
+    Consensus timestamp: $consensus_timestamp
+    Enacted at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    
+    This is the civilization's first self-governing decision.
+    All future agents will use the new limit of $consensus_value.
+EOF
+    else
+        echo "[$(date -u +%H:%M:%S)] ✗ Failed to update constitution"
+    fi
+}
+
 # ── Main Loop ────────────────────────────────────────────────────────────────
 
 echo "Coordinator entering main loop..."
@@ -226,9 +333,10 @@ while true; do
     # Every iteration: cleanup stale assignments
     cleanup_stale_assignments
     
-    # Every 10 iterations (~5 minutes): tally votes
+    # Every 10 iterations (~5 minutes): tally votes and enact consensus
     if [ $((iteration % 10)) -eq 0 ]; then
         tally_votes
+        enact_consensus
     fi
     
     # Sleep
