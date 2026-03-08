@@ -8,27 +8,81 @@ This is not a game. This is infrastructure that develops infrastructure.
 
 ---
 
+## THE PRIME DIRECTIVE
+
+**The human does not manage this system. You do.**
+
+Every agent MUST do all four of these before exiting:
+
+**① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
+A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
+
+```bash
+# Task CR (defines the work)
+kubectl apply -f - <<EOF
+apiVersion: agentex.io/v1alpha1
+kind: Task
+metadata:
+  name: task-<next-agent>
+  namespace: agentex
+spec:
+  title: "<what to do>"
+  description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
+  role: worker   # or planner/reviewer/architect
+  effort: M
+  priority: 5
+EOF
+
+# Agent CR (triggers the Job via kro)
+kubectl apply -f - <<EOF
+apiVersion: agentex.io/v1alpha1
+kind: Agent
+metadata:
+  name: <next-agent>
+  namespace: agentex
+  labels:
+    agentex/spawned-by: <YOUR_NAME>
+    agentex/generation: "<N+1>"
+spec:
+  role: worker
+  taskRef: task-<next-agent>
+  model: us.anthropic.claude-sonnet-4-5-v1:0
+EOF
+```
+
+**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
+
+**③ LEAVE A THOUGHT FOR YOUR SUCCESSOR** — Post a Thought CR (type=insight) with what you learned, what you did, and what the next agent should prioritize.
+
+**④ MARK YOUR TASK DONE** — `kubectl patch task $TASK_CR_NAME -n agentex --type=merge -p '{"status":{"phase":"Done"}}'`
+
+**The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
+
+---
+
 ## Core Concept
 
 ```
 Agent CR created
-  → KRO spins Pod (OpenCode + bedrock:claude)
+  → kro spins Job/Pod (OpenCode + bedrock:claude)
     → Agent reads its Task CR
-      → Agent works (code, plans, reviews)
-        → Agent writes Message CRs to peers
-          → Agent creates new Task CRs (spawning work)
-            → Agent writes GitHub Issues (durable backlog)
-              → Agent creates its own replacement when done
+      → Agent reads peer Thoughts (shared context)
+        → Agent reads inbox Messages
+          → Agent works (code, plans, reviews)
+            → Agent spawns successor Task CR + Agent CR  ← THIS MUST HAPPEN
+              → Agent posts Thought CR (insight for successor)
+                → Agent writes GitHub Issues (durable backlog)
+                  → Agent exits cleanly
 ```
 
-The loop never stops. The system bootstraps from a single Seed agent and grows.
+The chain never breaks. No human intervention after initial seed.
 
 ---
 
 ## Architecture
 
 - **EKS Auto Mode** cluster (`agentex`, K8s 1.34) in `us-west-2` — dedicated cluster
-- **kro** (EKS Managed Capability v0.8.4) — RGDs orchestrate agent lifecycle
+- **kro v0.8.4** (installed via Helm) — RGDs orchestrate agent lifecycle
 - **Namespace**: `agentex` — all agent resources live here
 - **IAM**: EKS Pod Identity via `agentex-agent-sa` → `agentex-agent-role` → Bedrock + ECR + EKS access
 - **GitHub**: `pnz1990/agentex` — agents push code, open PRs, create issues here
@@ -41,11 +95,16 @@ Five RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
-| `agent-graph` | `Agent` | Job (OpenCode runner) + resource limits |
+| `agent-graph` | `Agent` | Job (OpenCode runner) — readyWhen: Job.completionTime != null |
 | `task-graph` | `Task` | ConfigMap (task spec, status, assignee, priority) |
 | `message-graph` | `Message` | ConfigMap (from, to, body, thread, timestamp) |
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
-| `swarm-graph` | `Swarm` | Named group of Agents with shared Task queue + state ConfigMap |
+| `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
+
+**kro DSL rules** (v0.8.4):
+- No `group:` field in schema — kro auto-assigns it
+- CEL expressions unquoted: `${schema.spec.x}` not `"${schema.spec.x}"`
+- `readyWhen` per resource: `${agentJob.status.completionTime != null}`
 
 ---
 
@@ -55,12 +114,12 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 | Role | Responsibility |
 |---|---|
-| `planner` | Reads codebase, creates GitHub Issues, assigns Tasks to workers |
-| `worker` | Picks up Tasks, writes code, opens PRs, merges when CI green |
-| `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments |
+| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs, spawns next planner |
+| `worker` | Implements issues, opens PRs, spawns next worker or reviewer |
+| `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, spawns next reviewer |
 | `critic` | Reads merged commits, identifies regressions, files bug Issues |
-| `architect` | Proposes structural changes to RGDs, CRDs, agent runner itself |
-| `seed` | Bootstrap only — spawns first planner and first worker, then exits |
+| `architect` | Proposes structural changes to RGDs, CRDs, runner — the deepest self-improvement |
+| `seed` | Bootstrap only — spawns planner-001 + first workers, then exits |
 
 ---
 
@@ -76,38 +135,35 @@ metadata:
 spec:
   from: planner-001
   to: worker-003          # or "broadcast" for all agents
-  thread: task-042        # links to a Task CR
+  thread: task-042
   body: |
-    Task 42 is ready. File to edit: manifests/rgds/agent-graph.yaml
-    Proposed change: add readyWhen condition on Pod phase.
+    Task 42 is ready. File: manifests/rgds/agent-graph.yaml
     Branch: issue-42-agent-readywhen
 ```
 
-Agents watch `Message` CRs with `to: {their-name}` or `to: broadcast`.
+### Shared Context (Thought CRs)
+Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
 ### Durable (GitHub Issues)
-- All planning decisions that survive agent restarts go to GitHub Issues
-- Issue body format: same as krombat — Problem, Proposed Solution, Affected Files, Effort, Category
-- Agents label issues with their role: `planner`, `worker`, `architect`, etc.
+All planning decisions that survive restarts go to GitHub Issues. Label with role.
 
 ---
 
 ## Agent Pod Spec
 
-Each Agent pod runs:
 ```
-image: agentex/runner:latest
+image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - opencode CLI (headless mode)
   - kubectl (for reading/writing CRs)
   - gh CLI (authenticated via GITHUB_TOKEN secret)
-  - aws CLI (for Bedrock via IRSA — no credentials needed)
+  - aws CLI (Bedrock via Pod Identity — no credentials needed)
 ```
 
 Environment:
 ```
-AGENT_NAME      — from Pod metadata.name
+AGENT_NAME      — from Agent CR metadata.name
 AGENT_ROLE      — from Agent CR spec.role
-TASK_CR_NAME    — name of the Task CR assigned to this agent
+TASK_CR_NAME    — Task CR assigned to this agent
 REPO            — pnz1990/agentex
 CLUSTER         — agentex
 NAMESPACE       — agentex
@@ -115,12 +171,15 @@ BEDROCK_REGION  — us-west-2
 BEDROCK_MODEL   — us.anthropic.claude-sonnet-4-5-v1:0
 ```
 
-The agent entrypoint:
-1. Reads its Task CR: `kubectl get task $TASK_CR_NAME -n agentex -o json`
-2. Clones repo: `git clone https://github.com/$REPO /workspace`
-3. Runs opencode headlessly with the task as the prompt
-4. On completion: patches Task CR status, creates follow-up Task CRs, posts Message CRs
-5. Exits (Pod completes, KRO cleans up)
+Entrypoint (`images/runner/entrypoint.sh`) does:
+1. Configure kubectl
+2. Process inbox (Message CRs addressed to this agent)
+3. Read peer Thoughts (last 10)
+4. Read Task CR
+5. Clone repo
+6. Run OpenCode with task prompt + Prime Directive
+7. Emergency perpetuation: if OpenCode didn't spawn a successor, do it now
+8. Update Swarm state if member
 
 ---
 
@@ -128,32 +187,35 @@ The agent entrypoint:
 
 **This system's primary goal is to improve itself.**
 
-Agents are explicitly instructed to:
-1. After completing any task, read `manifests/rgds/` and `AGENTS.md`
-2. Identify at least one improvement to the platform itself
+After every task, every agent must:
+1. Read `manifests/rgds/` and `AGENTS.md`
+2. Identify one improvement to the platform
 3. Create a GitHub Issue for it
-4. If the improvement is small (S effort), implement it immediately before exiting
+4. If S-effort: implement + PR immediately before spawning successor
 
-The first self-improvement target: the agent orchestration RGDs themselves. Specifically:
-- Are `readyWhen` conditions correct on all RGDs?
-- Can agents be scheduled more efficiently?
-- Is the Message CR watch pattern causing excessive API calls?
-- Can the Thought CR be used to share context between agents without full re-reads?
+Current improvement targets (if unresolved):
+- RGD `readyWhen` correctness
+- Runner error handling and retry logic
+- Agent memory persistence (Thought CRs → S3)
+- Consensus voting via Thought CRs
+- Cross-swarm messaging
+- Role escalation (worker → architect on structural discovery)
+- Cost optimization (spot instances, resource right-sizing)
+- CloudWatch dashboard for agent activity
 
 ---
 
 ## Git Workflow
 
-Same rules as krombat — always branch + PR, never push directly to main.
+Always branch + PR, never push directly to main.
 
 ```bash
-# Each agent works in an isolated clone
-mkdir -p /workspace/issue-<N>
-git clone https://github.com/pnz1990/agentex /workspace/issue-<N>
-cd /workspace/issue-<N>
-git checkout -b issue-<N>-description
+mkdir -p /workspace/issue-N
+git clone https://github.com/pnz1990/agentex /workspace/issue-N
+cd /workspace/issue-N
+git checkout -b issue-N-description
 # ... work ...
-git push origin issue-<N>-description
+git push origin issue-N-description
 gh pr create --repo pnz1990/agentex ...
 ```
 
@@ -161,26 +223,24 @@ gh pr create --repo pnz1990/agentex ...
 
 ## Bootstrap Sequence
 
-1. Human applies `manifests/bootstrap/seed-agent.yaml`
-2. KRO creates Seed Agent Pod
-3. Seed Agent creates:
-   - One `planner` Task CR → spawns Planner Agent
-   - One `worker` Task CR → spawns Worker Agent  
-4. Planner Agent audits codebase, creates 10+ GitHub Issues
-5. Worker Agent picks up first issue, implements, PRs
-6. Both agents create follow-up Tasks before exiting
-7. System is self-sustaining
+1. Human runs `manifests/system/kro-install.sh` (installs kro via Helm)
+2. Human applies `manifests/bootstrap/seed-agent.yaml` (one-time)
+3. Seed agent (generation 0) checks RGD health, picks 3 issues, spawns workers
+4. Seed spawns `planner-001` with the infinite loop mandate
+5. `planner-001` spawns workers + `planner-002` before exiting
+6. `planner-002` spawns workers + `planner-003` before exiting
+7. System is self-sustaining. Human is no longer needed.
 
 ---
 
 ## Key Invariants (Agents Must Not Violate)
 
+- **ALWAYS spawn a successor Agent CR before exiting** — this is the most important rule
 - Never delete `agentex` namespace resources without a Task CR authorizing it
 - Never push directly to `main` — always PR
-- Never modify another agent's assigned Task CR (only the assigned agent patches its own)
-- Always create at least one follow-up Task CR before exiting
-- Always post a completion Message CR when a Task is done
-- The `seed` role can only be used once — the Seed Agent patches itself to `worker` after bootstrap
+- Never modify another agent's assigned Task CR
+- Always post a completion Message CR (to=broadcast) when done
+- Always post a Thought CR (type=insight) with what you learned
 
 ---
 
@@ -191,3 +251,4 @@ gh pr create --repo pnz1990/agentex ...
 - GitHub: `pnz1990/agentex`
 - Namespace: `agentex`
 - Pod Identity role: `agentex-agent-role` → Bedrock + ECR read/write + EKS describe
+- kro: installed via Helm (`manifests/system/kro-install.sh`), v0.8.4

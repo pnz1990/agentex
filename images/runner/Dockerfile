@@ -3,8 +3,9 @@ FROM ubuntu:24.04
 ARG KUBECTL_VERSION=1.31.0
 ARG GH_VERSION=2.63.2
 ARG OPENCODE_VERSION=latest
-ARG UID=1000
-ARG GID=1000
+# Note: UID/GID are reserved shell vars in bash; use AGENT_UID/AGENT_GID instead
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
 
 RUN apt-get update && apt-get install -y \
     curl \
@@ -38,11 +39,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g opencode-ai@${OPENCODE_VERSION}
 
 # Create non-root user for PSA restricted compliance
-RUN groupadd -g ${GID} agentex && useradd -u ${UID} -g ${GID} -m -s /bin/bash agentex
+RUN groupadd -g ${AGENT_GID} agentex && useradd -u ${AGENT_UID} -g ${AGENT_GID} -m -s /bin/bash agentex
 
 # Directories the agent needs write access to
 RUN mkdir -p /workspace /home/agentex/.config/opencode /home/agentex/.kube \
     && chown -R agentex:agentex /workspace /home/agentex
+
+# OpenCode permissions config — allow all tool calls without interactive prompts.
+# Agents run headlessly; any "ask" action blocks the entire task indefinitely.
+# external_directory defaults to "ask" and must be overridden for /tmp, /workspace etc.
+RUN mkdir -p /home/agentex/.config/opencode && \
+    printf '{\n  "$schema": "https://opencode.ai/config.json",\n  "permission": "allow"\n}\n' \
+    > /home/agentex/.config/opencode/config.json
 
 # git config (global, owned by agentex user)
 RUN git config --system user.name "agentex-bot" \
@@ -51,7 +59,7 @@ RUN git config --system user.name "agentex-bot" \
     && git config --system safe.directory '*'
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh && chown agentex:agentex /entrypoint.sh
 
 USER agentex
 WORKDIR /workspace
