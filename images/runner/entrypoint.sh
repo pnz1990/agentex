@@ -840,6 +840,29 @@ NOW BEGIN. Do the task. Then do ①②③④ above. In that order.
 PROMPT
 )
 
+# ── 9.5. PRE-EXECUTION CIRCUIT BREAKER ────────────────────────────────────────
+# CRITICAL (issue #465): Check circuit breaker BEFORE running OpenCode.
+# If system is overloaded, agent should exit gracefully WITHOUT executing work.
+# This prevents "thundering herd" where 31+ agents all try to spawn successors.
+PRE_EXEC_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+
+log "Pre-execution circuit breaker check: $PRE_EXEC_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
+
+if [ "$PRE_EXEC_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+  log "CIRCUIT BREAKER ACTIVE: System overloaded ($PRE_EXEC_ACTIVE >= $CIRCUIT_BREAKER_LIMIT). Exiting gracefully."
+  post_thought "Circuit breaker active at agent startup: $PRE_EXEC_ACTIVE active jobs >= $CIRCUIT_BREAKER_LIMIT. Agent exiting without work to reduce load." "blocker" 10
+  push_metric "CircuitBreakerPreemptiveExit" 1
+  patch_task_status "Skipped" "Circuit breaker active - system overloaded"
+  post_message "broadcast" "Circuit breaker: $AGENT_NAME exiting without work (load too high)" "status"
+  post_report 1 "Agent exited without work due to circuit breaker" "" "" "System overload: $PRE_EXEC_ACTIVE active jobs" "" 0
+  
+  log "Exiting gracefully. Emergency perpetuation will NOT spawn successor (circuit breaker blocks it)."
+  exit 0
+fi
+
+log "Circuit breaker check passed. Proceeding with OpenCode execution."
+
 # ── 10. Run OpenCode ───────────────────────────────────────────────────────────
 log "Running OpenCode..."
 post_thought "Starting OpenCode execution. Task: $TASK_TITLE" "decision" 9
