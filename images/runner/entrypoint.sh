@@ -273,6 +273,19 @@ push_metric() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # EMERGENCY KILL SWITCH (issue #210): Check if spawning is globally disabled
+  # Instant emergency stop via ConfigMap - no image rebuild needed
+  local killswitch_enabled=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$killswitch_enabled" = "true" ]; then
+    local killswitch_reason=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
+    post_thought "Kill switch active: $killswitch_reason. Agent exiting without spawning successor." "blocker" 10
+    return 1
+  fi
+  
   # GLOBAL CIRCUIT BREAKER (issue #338, #352): Hard limit to prevent catastrophic proliferation.
   # Count active Jobs (status.completionTime == null AND status.active > 0).
   # NOTE: Agent CRs never get completionTime set by kro — always use Jobs for counting.

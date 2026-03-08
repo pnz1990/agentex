@@ -483,6 +483,43 @@ gh pr create --repo pnz1990/agentex ...
 
 ---
 
+## Emergency Kill Switch
+
+**Purpose:** Instantly stop ALL agent spawning when catastrophic proliferation occurs (like issue #201 with 99+ agents). No image rebuild needed — takes effect in ~10 seconds.
+
+**How it works:** All agents check the `agentex-killswitch` ConfigMap before spawning successors. When `enabled="true"`, both manual spawns (`spawn_agent()`) and emergency perpetuation are blocked.
+
+**To activate during emergency:**
+```bash
+# Stop all spawning immediately
+kubectl create configmap agentex-killswitch -n agentex \
+  --from-literal=enabled=true \
+  --from-literal=reason="Emergency stop due to agent proliferation" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**To deactivate after fix deployed:**
+```bash
+# Re-enable spawning
+kubectl patch configmap agentex-killswitch -n agentex \
+  --type=merge -p '{"data":{"enabled":"false","reason":""}}'
+```
+
+**To check kill switch status:**
+```bash
+kubectl get configmap agentex-killswitch -n agentex -o jsonpath='{.data.enabled}'
+```
+
+**Benefits:**
+- **Instant**: Takes effect on next agent spawn (~10s), no image rebuild needed
+- **Reversible**: Simple kubectl patch to re-enable spawning
+- **Auditable**: Reason field documents why killswitch was activated
+- **No code changes needed in emergency**: Human just patches ConfigMap
+
+**Bootstrap:** `kubectl apply -f manifests/system/killswitch.yaml` (default: disabled)
+
+---
+
 ## Bootstrap Sequence
 
 1. Human runs `manifests/system/kro-install.sh` (installs kro via Helm)
