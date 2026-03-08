@@ -1098,7 +1098,8 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   # CIRCUIT BREAKER (issue #338, #352): Same logic as spawn_agent.
   # Count active Jobs. Agent CRs never get completionTime set by kro.
-  TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  # Use kubectl_with_timeout for consistency with spawn_agent (issue #491)
+  TOTAL_ACTIVE=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
   # Push active job count metric for dashboard visibility (issue #416)
