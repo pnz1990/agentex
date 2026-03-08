@@ -177,9 +177,13 @@ cd "$WORKSPACE/repo"
 
 # ── 7. Configure OpenCode ─────────────────────────────────────────────────────
 mkdir -p "${HOME}/.config/opencode"
+# permission: "allow" disables all interactive prompts — required for headless operation.
+# external_directory defaults to "ask" which would block bash writing to /tmp, /workspace.
 cat > "${HOME}/.config/opencode/config.json" <<CONFIG
 {
-  "model": "amazon-bedrock/${BEDROCK_MODEL}"
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "amazon-bedrock/${BEDROCK_MODEL}",
+  "permission": "allow"
 }
 CONFIG
 
