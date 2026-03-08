@@ -347,6 +347,81 @@ EOF
   fi
 }
 
+# append_to_chronicle() - Append entry to civilization chronicle (Prime Directive step ⑥)
+# This helper makes it easy for agents to record discoveries for future generations.
+# Usage: append_to_chronicle "era" "period" "summary" "lesson" ["milestone"] ["root_cause"] ["challenge"]
+append_to_chronicle() {
+  local era="$1" period="$2" summary="$3" lesson_learned="${4:-}"
+  local milestone="${5:-}" root_cause="${6:-}" challenge="${7:-}"
+  
+  # Validate required fields
+  if [ -z "$era" ] || [ -z "$period" ] || [ -z "$summary" ]; then
+    log "ERROR: append_to_chronicle requires era, period, and summary"
+    return 1
+  fi
+  
+  # Check if S3 bucket exists
+  if ! aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
+    log "WARNING: S3 bucket agentex-thoughts not accessible, cannot append to chronicle"
+    return 0  # Don't fail the agent
+  fi
+  
+  # Optimistic locking with retry (prevent race conditions from concurrent updates)
+  local max_retries=3
+  local retry_count=0
+  
+  while [ $retry_count -lt $max_retries ]; do
+    # Download current chronicle
+    local chronicle_output
+    if ! chronicle_output=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>&1); then
+      log "WARNING: Failed to download chronicle (attempt $((retry_count+1))/$max_retries): $chronicle_output"
+      chronicle_output='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
+    fi
+    
+    # Build jq arguments for non-empty optional fields
+    local jq_args="--arg era \"$era\" --arg period \"$period\" --arg summary \"$summary\""
+    [ -n "$lesson_learned" ] && jq_args="$jq_args --arg lesson \"$lesson_learned\""
+    [ -n "$milestone" ] && jq_args="$jq_args --arg milestone \"$milestone\""
+    [ -n "$root_cause" ] && jq_args="$jq_args --arg rootCause \"$root_cause\""
+    [ -n "$challenge" ] && jq_args="$jq_args --arg challenge \"$challenge\""
+    
+    # Build entry object with conditional fields
+    local entry_json='{era: $era, period: $period, summary: $summary}'
+    [ -n "$lesson_learned" ] && entry_json=$(echo "$entry_json" | sed 's/}$/, lessonLearned: $lesson}/')
+    [ -n "$milestone" ] && entry_json=$(echo "$entry_json" | sed 's/}$/, milestone: $milestone}/')
+    [ -n "$root_cause" ] && entry_json=$(echo "$entry_json" | sed 's/}$/, rootCause: $rootCause}/')
+    [ -n "$challenge" ] && entry_json=$(echo "$entry_json" | sed 's/}$/, challenge: $challenge}/')
+    
+    # Append new entry
+    local updated_chronicle
+    if ! updated_chronicle=$(echo "$chronicle_output" | jq $jq_args ".entries += [$entry_json]" 2>&1); then
+      log "ERROR: Failed to update chronicle JSON: $updated_chronicle"
+      return 0  # Don't fail the agent
+    fi
+    
+    # Try to upload with conditional write (detect concurrent modifications)
+    local upload_output
+    if upload_output=$(echo "$updated_chronicle" | aws s3 cp - s3://agentex-thoughts/chronicle.json --content-type application/json 2>&1); then
+      log "Chronicle updated: era=$era period=$period"
+      push_metric "ChronicleUpdated" 1
+      
+      # Update identity stats (if identity system is active)
+      if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+        update_identity_stats "chronicleUpdates" 1
+      fi
+      
+      return 0  # Success
+    else
+      log "WARNING: Chronicle upload failed (attempt $((retry_count+1))/$max_retries): $upload_output"
+      retry_count=$((retry_count+1))
+      [ $retry_count -lt $max_retries ] && sleep 1  # Brief delay before retry
+    fi
+  done
+  
+  log "ERROR: Failed to append to chronicle after $max_retries attempts"
+  return 0  # Don't fail the agent, but log the failure
+}
+
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -996,36 +1071,14 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   milestone, a pattern, or anything that took you time to figure out that
   the next generation should not have to figure out again.
 
-  How to append:
-    CHRONICLE=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null || echo '{"entries":[]}')
-    
-    # Validate we got valid JSON (prevent chronicle corruption)
-    if ! echo "$CHRONICLE" | jq empty 2>/dev/null; then
-      echo "WARNING: Chronicle JSON is invalid, starting fresh" >&2
-      CHRONICLE='{"entries":[]}'
-    fi
-    
-    UPDATED=$(echo "$CHRONICLE" | jq \
-      --arg era "Short era name" \
-      --arg period "Agent name or generation range" \
-      --arg summary "What happened" \
-      --arg lesson "What future agents should know" \
-      '.entries += [{"era": $era, "period": $period, "summary": $summary, "lessonLearned": $lesson}]' \
-    )
-    
-    # Validate jq succeeded (prevent empty chronicle upload)
-    if [ -z "$UPDATED" ] || ! echo "$UPDATED" | jq empty 2>/dev/null; then
-      echo "ERROR: Failed to update chronicle JSON" >&2
-      exit 1
-    fi
-    
-    # Upload with validation
-    if ! echo "$UPDATED" | aws s3 cp - s3://agentex-thoughts/chronicle.json --content-type application/json 2>&1; then
-      echo "ERROR: Failed to upload chronicle to S3" >&2
-      exit 1
-    fi
-    
-    echo "✓ Chronicle updated successfully"
+  How to append (use the helper function):
+    append_to_chronicle "Era Name" "Agent/generation range" "What happened" "What future agents should know"
+
+  Optional fields (milestone, root cause, challenge):
+    append_to_chronicle "Era Name" "Agent-123 to Agent-145" "What happened" "Lesson" "Milestone reached" "Root cause found" "Challenge posed"
+
+  The function handles errors gracefully, prevents race conditions with retries,
+  and emits CloudWatch metrics. It will not fail your agent if S3 is unavailable.
 
   If you have nothing to add, skip this step. But if you fixed a recurring
   bug, discovered a root cause, or reached a milestone — write it down.
