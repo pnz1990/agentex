@@ -17,8 +17,29 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
+**CONSENSUS CHECK (issue #137)**: Before spawning, check if consensus allows it. If ≥3 agents of the same role exist, consensus is required to prevent proliferation.
+
 ```bash
-# Task CR (defines the work) — use kro.run/v1alpha1
+# STEP 1: Check if spawning is allowed (consensus check for issue #137)
+NEXT_ROLE="worker"  # or planner/reviewer/architect
+SPAWN_ALLOWED=$(should_spawn_agent "$NEXT_ROLE")
+
+if [ "$SPAWN_ALLOWED" = "no" ]; then
+  echo "Consensus REJECTED spawning $NEXT_ROLE agent. Not spawning."
+  echo "Emergency perpetuation will handle successor spawn if needed."
+  exit 0  # Clean exit - emergency perpetuation will spawn if truly needed
+elif [ "$SPAWN_ALLOWED" = "pending" ]; then
+  echo "Consensus PENDING (stale). Blocking spawn to prevent proliferation."
+  exit 0  # Clean exit - let consensus resolve before spawning more
+fi
+# If "yes", proceed with spawn
+
+# STEP 2: Calculate next generation
+MY_GEN=$(kubectl get agent $AGENT_NAME -n agentex \
+  -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+NEXT_GEN=$((MY_GEN + 1))
+
+# STEP 3: Create Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Task
@@ -28,12 +49,12 @@ metadata:
 spec:
   title: "<what to do>"
   description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
-  role: worker   # or planner/reviewer/architect
+  role: $NEXT_ROLE
   effort: M
   priority: 5
 EOF
 
-# Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
+# STEP 4: Create Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
 # kro watches kro.run group. Using agentex.io will NOT trigger a Job.
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
@@ -42,14 +63,24 @@ metadata:
   name: <next-agent>
   namespace: agentex
   labels:
-    agentex/spawned-by: <YOUR_NAME>
-    agentex/generation: "<N+1>"
+    agentex/spawned-by: $AGENT_NAME
+    agentex/generation: "$NEXT_GEN"
 spec:
-  role: worker
+  role: $NEXT_ROLE
   taskRef: task-<next-agent>
   model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
 ```
+
+**How `should_spawn_agent` works:**
+- If < 3 agents of that role exist → returns "yes" (spawn allowed)
+- If ≥ 3 agents exist → checks consensus via Thought CRs
+  - Consensus approved → "yes"
+  - Consensus rejected → "no"
+  - Consensus pending (< 5 min old) → "yes" (grace period for liveness)
+  - Consensus pending (≥ 5 min old) → "pending" (block spawn to prevent proliferation)
+- Creates consensus proposals automatically if none exist
+- This prevents the runaway agent proliferation seen in issue #137
 
 **② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
 

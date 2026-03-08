@@ -373,6 +373,72 @@ check_proposal_age() {
   return 0
 }
 
+# Check if spawning an agent of a given role is allowed (consensus check).
+# Usage: should_spawn_agent "planner"
+# Returns: "yes" (ok to spawn), "no" (blocked by consensus), "pending" (waiting for consensus)
+# This function implements consensus logic for NORMAL OpenCode-driven spawns (issue #137).
+# Emergency perpetuation has its own embedded consensus check (lines 920-968).
+should_spawn_agent() {
+  local role="$1"
+  
+  # Count running agents of the same role
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role)] | length' 2>/dev/null || echo "0")
+  
+  # If < 3 agents exist, spawning is always allowed (no consensus needed)
+  if [ "$running_agents" -lt 3 ]; then
+    log "Spawn check: $running_agents $role agents exist (< 3). Spawning allowed without consensus."
+    echo "yes"
+    return 0
+  fi
+  
+  # ≥ 3 agents exist - consensus required
+  log "Spawn check: $running_agents $role agents exist (≥ 3). Consensus check required."
+  
+  local motion_name="spawn-more-${role}-agents"
+  local consensus_result=$(check_consensus "$motion_name" "3/5")
+  
+  if [ "$consensus_result" = "yes" ]; then
+    log "Spawn check: Consensus APPROVED for spawning $role agent"
+    echo "yes"
+    return 0
+  elif [ "$consensus_result" = "no" ]; then
+    log "Spawn check: Consensus REJECTED for spawning $role agent"
+    echo "no"
+    return 0
+  else
+    # Consensus pending - check proposal age
+    local proposal_age=$(check_proposal_age "$motion_name")
+    
+    if [ "$proposal_age" -ge 9999 ]; then
+      # No proposal exists - create one and vote yes
+      log "Spawn check: Creating new consensus proposal for spawning $role agent"
+      local deadline=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+      propose_motion "$motion_name" \
+        "Spawn additional $role agent. Currently $running_agents agents exist with this role." \
+        "3/5" \
+        "$deadline"
+      cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
+      
+      # Allow spawn because proposal is brand new (< 1 second old)
+      log "Spawn check: Consensus proposal created. Spawning (grace period: proposal is fresh)."
+      echo "yes"
+      return 0
+    elif [ "$proposal_age" -lt 300 ]; then
+      # Proposal exists and is < 5 minutes old - allow spawn (grace period for voting)
+      log "Spawn check: Consensus pending but recent (age=${proposal_age}s < 300s). Spawning for liveness."
+      cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
+      echo "yes"
+      return 0
+    else
+      # Proposal is stale (≥ 5 minutes old) - block spawn
+      log "Spawn check: Consensus pending and STALE (age=${proposal_age}s ≥ 300s). BLOCKING spawn to prevent proliferation."
+      echo "pending"
+      return 0
+    fi
+  fi
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
@@ -628,6 +694,22 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
   Next agent name format: worker-$(date +%s) or planner-$(date +%s) etc.
 
+  # CONSENSUS CHECK: Prevent agent proliferation (issue #137)
+  # If ≥ 3 agents of the same role exist, consensus is required before spawning.
+  # The should_spawn_agent function is available in your environment.
+  NEXT_ROLE="worker"  # or planner/reviewer/architect
+  SPAWN_ALLOWED=$(should_spawn_agent "$NEXT_ROLE")
+  
+  if [ "$SPAWN_ALLOWED" = "no" ]; then
+    echo "Consensus REJECTED spawning $NEXT_ROLE agent. Not spawning."
+    echo "Emergency perpetuation will handle successor spawn if needed."
+    exit 0  # Clean exit - emergency perpetuation will spawn if truly needed
+  elif [ "$SPAWN_ALLOWED" = "pending" ]; then
+    echo "Consensus PENDING (stale). Blocking spawn to prevent proliferation."
+    exit 0  # Clean exit - let consensus resolve before spawning more
+  fi
+  # If "yes", proceed with spawn
+
   kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Task
@@ -637,7 +719,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   spec:
     title: "<what the next agent should do>"
     description: "<detailed instructions>"
-    role: worker   # or planner/reviewer/architect
+    role: $NEXT_ROLE
     effort: M
     priority: 5
   EOF
@@ -659,7 +741,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
       agentex/spawned-by: <YOUR_AGENT_NAME>
       agentex/generation: "${NEXT_GEN}"
   spec:
-    role: worker   # match the Task role
+    role: $NEXT_ROLE   # match the Task role
     taskRef: task-<next-name>
     model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
   EOF
