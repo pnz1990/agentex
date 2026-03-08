@@ -23,18 +23,16 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 # STEP 1: Check if consensus is required before spawning
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
 
-# Count RUNNING agents only (those with active Jobs, not completed/failed ones)
-# Counts only agents with active pods (jobName exists AND active == 1) to prevent false positives
-# from ghost Agent CRs that kro failed to process (issue #189) AND ERROR/failed agents (issue #241)
-# active == 1 means Job has a running pod; succeeded/failed means Job is done
-RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
-  jq --arg role "$NEXT_ROLE" \
-  '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.active == 1)] | length')
+# Count ACTIVE Agent CRs (without completionTime) for this role.
+# DO NOT use jobs.status.active - that counts running pods which persist after agent completes.
+# Use Agent.status.completionTime == null to only count agents that are actually running.
+RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json 2>/dev/null | \
+  jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
 
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
   
-  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
+  MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
   
   # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
   # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
