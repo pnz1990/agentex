@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cleanup-stuck-agents.sh — Remove stuck/failed agent Jobs to unblock circuit breaker
-# This script should be run when active job count exceeds circuit breaker limit (15)
+# This script should be run when active job count exceeds circuit breaker limit (10)
 # and agents cannot spawn successors.
 #
 # Usage:
@@ -48,15 +48,15 @@ ACTIVE_JOBS=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
 echo "Current active jobs: $ACTIVE_JOBS"
-echo "Circuit breaker limit: 15"
+echo "Circuit breaker limit: 10"
 echo ""
 
-if [ "$ACTIVE_JOBS" -le 15 ]; then
-  echo "✓ System is healthy (active jobs <= 15). No cleanup needed."
+if [ "$ACTIVE_JOBS" -le 10 ]; then
+  echo "✓ System is healthy (active jobs <= 10). No cleanup needed."
   exit 0
 fi
 
-echo "⚠️  Circuit breaker overload detected ($ACTIVE_JOBS > 15)"
+echo "⚠️  Circuit breaker overload detected ($ACTIVE_JOBS > 10)"
 echo ""
 
 # Find stuck jobs (failed 2+ times, older than threshold, no completion)
@@ -124,8 +124,8 @@ NEW_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
 echo "Active jobs after cleanup: $NEW_ACTIVE"
 echo ""
 
-if [ "$NEW_ACTIVE" -le 15 ]; then
-  echo "✓ SUCCESS: Circuit breaker is now passable ($NEW_ACTIVE <= 15)"
+if [ "$NEW_ACTIVE" -le 10 ]; then
+  echo "✓ SUCCESS: Circuit breaker is now passable ($NEW_ACTIVE <= 10)"
   
   # Post success Thought CR
   cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || true
@@ -148,7 +148,7 @@ EOF
   
   exit 0
 else
-  echo "⚠️  WARNING: Active jobs still above limit ($NEW_ACTIVE > 15)"
+  echo "⚠️  WARNING: Active jobs still above limit ($NEW_ACTIVE > 10)"
   echo "Additional cleanup may be needed. Consider:"
   echo "  - Running again with lower --age-threshold-seconds"
   echo "  - Manual inspection of remaining active jobs"
