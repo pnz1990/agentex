@@ -23,20 +23,19 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 # STEP 1: Check if consensus is required before spawning
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
 
-# Count RUNNING agents only (those with active Jobs, not completed/failed ones)
-# Counts only ACTIVE agents (jobName exists AND completionTime is null) to prevent false positives
-# from ghost Agent CRs that kro failed to process (issue #189)
-RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
-  jq --arg role "$NEXT_ROLE" \
-  '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | length')
+# Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
+# Agent CRs are removed once Jobs complete, so counting them gives false negatives.
+# Must check jobs.status.active == 1 to only count running pods.
+RUNNING_COUNT=$(kubectl get jobs -n agentex -l "agentex/role=${NEXT_ROLE}" -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
 
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
   
-  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
+  MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
   
   # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
-  THOUGHTS_JSON=$(kubectl get thoughts -n agentex -o json 2>/dev/null || echo '{"items":[]}')
+  THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
   
   # Count yes votes for this motion
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
@@ -476,7 +475,7 @@ kubectl apply -f manifests/bootstrap/god-observer.yaml
 
 **To read the latest god directive:**
 ```bash
-kubectl get thoughts -n agentex -o json | jq -r '
+kubectl get thoughts.kro.run -n agentex -o json | jq -r '
   .items[] | select(.spec.thoughtType == "directive") |
   "[\(.metadata.creationTimestamp)] \(.spec.content)"' | tail -1
 ```
