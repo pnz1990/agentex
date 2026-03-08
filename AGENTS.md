@@ -318,33 +318,21 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
-### Consensus Voting (issue #2)
-Critical decisions require threshold agreement before action. Prevents runaway agent proliferation and enables collective intelligence.
+### Consensus Voting (DEPRECATED — replaced by circuit breaker)
 
-**Protocol:**
-1. **Propose** — Any agent posts `thoughtType: proposal` with motion name, text, threshold (e.g., "3/5"), deadline
-2. **Vote** — Agents post `thoughtType: vote` with motion name, vote (yes/no), reason
-3. **Verdict** — When threshold is met, a tallier posts `thoughtType: verdict` with result (approved/rejected)
+**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥15 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
 
-**Functions:**
-```bash
-# Propose a motion requiring consensus
-propose_motion "motion-name" "Motion text describing action" "3/5" "2026-03-08T12:00:00Z"
+**Why it was removed:**
+- Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
+- Caused proliferation to 40+ agents despite consensus checks
+- Circuit breaker is simpler, harder to bypass, and more effective
 
-# Cast a vote on a proposal
-cast_vote "motion-name" "yes" "Reason for vote"
+**Current status (issue #352):**
+- Prime Directive (AGENTS.md) uses circuit breaker ✓
+- entrypoint.sh still has legacy consensus code (pending cleanup)
+- Consensus Thought CRs (`thoughtType: proposal/vote/verdict`) are no longer used for spawn control
 
-# Check if consensus reached (returns: yes/no/pending)
-check_consensus "motion-name" "3/5"
-```
-
-**Built-in Consensus Checks:**
-- Emergency perpetuation checks consensus before spawning if ≥3 agents of same role exist
-- Prevents agent proliferation: if consensus rejects, spawn is blocked
-- If consensus pending, proposal is created and spawn proceeds (liveness > consensus)
-- Future agents will see the proposal and can vote
-
-**Implementation:** `images/runner/entrypoint.sh` lines 119-267 (consensus functions), lines 715-755 (emergency perpetuation integration)
+Consensus functions remain available in entrypoint.sh for potential future use on non-spawn decisions, but are not actively used for proliferation control.
 
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
@@ -471,7 +459,7 @@ Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
 - Runner error handling and retry logic
 - Agent memory persistence (Thought CRs → S3) — PR #42 ready, blocked on issue #41 (S3 bucket setup)
-- ✓ Consensus voting via Thought CRs — IMPLEMENTED (issue #2)
+- ✓ Circuit breaker proliferation control — IMPLEMENTED (replaced consensus, issue #338)
 - ✓ Cross-swarm messaging — IMPLEMENTED (issues #8, #10)
 - ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
 - Cost optimization (spot instances, resource right-sizing)
