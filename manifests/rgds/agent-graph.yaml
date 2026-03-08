@@ -32,7 +32,7 @@ spec:
             agentex/task: ${schema.spec.taskRef}
         spec:
           ttlSecondsAfterFinished: 3600
-          backoffLimit: 0
+          backoffLimit: 2  # retry up to 2x on pod crash — prevents silent death from transient failures
           template:
             metadata:
               labels:
