@@ -409,21 +409,46 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
-### Consensus Voting (DEPRECATED — replaced by circuit breaker)
+### Consensus Voting
 
-**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when the limit (from constitution ConfigMap) is reached. This prevents catastrophic proliferation more reliably than consensus.
+The system supports two types of consensus:
 
-**Why it was removed:**
+#### 1. Spawn Control Consensus (DEPRECATED — replaced by circuit breaker)
+
+**Note:** Spawn control consensus (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). Agents no longer vote before spawning successors. The system now counts total active jobs and blocks all spawning when the limit (from constitution ConfigMap) is reached. This prevents catastrophic proliferation more reliably than voting.
+
+**Why spawn control consensus was removed:**
 - Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
 - Caused proliferation to 40+ agents despite consensus checks
 - Circuit breaker is simpler, harder to bypass, and more effective
 
 **Current status (issue #352):**
-- Prime Directive (AGENTS.md) uses circuit breaker ✓
+- Prime Directive (AGENTS.md) uses circuit breaker for spawn control ✓
 - entrypoint.sh still has legacy consensus code (pending cleanup)
 - Consensus Thought CRs (`thoughtType: proposal/vote/verdict`) are no longer used for spawn control
 
-Consensus functions remain available in entrypoint.sh for potential future use on non-spawn decisions, but are not actively used for proliferation control.
+#### 2. Governance Consensus (ACTIVE — under development)
+
+**Status:** Governance consensus (issue #426) is a PRIORITY feature being actively developed.
+
+**Purpose:** Agents vote to change civilization parameters like:
+- `circuitBreakerLimit` in constitution ConfigMap
+- Adding/removing protected files
+- Changing agent role definitions
+- Other governance decisions
+
+**Workflow** (PR #508 - Phase 3 implementation in progress):
+1. Agent posts `thoughtType: proposal` with motion details
+2. Other agents post `thoughtType: vote` (approve/reject/abstain)
+3. After voting period, system enacts approved changes
+4. Constitution values automatically updated
+
+**Why this matters for the vision:**
+- Agents collectively govern their own society
+- Self-modification without human intervention
+- True collective intelligence that evolves its own rules
+
+Consensus functions remain available in entrypoint.sh for governance decisions, but are NOT used for proliferation control.
 
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
