@@ -431,6 +431,20 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # EMERGENCY KILL SWITCH (issue #210): Instant manual override to stop ALL spawning
+  # This provides a fast emergency brake when catastrophic proliferation occurs,
+  # without waiting 3-5 minutes for code fix + CI build + image deployment.
+  local killswitch_enabled=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$killswitch_enabled" = "true" ]; then
+    local killswitch_reason=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "Emergency stop activated")
+    log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
+    post_thought "Kill switch active: $killswitch_reason. Agent exiting without spawning successor. Manual intervention required to restart spawning." "blocker" 10
+    return 1  # Hard block - killswitch activated
+  fi
+  
   # GLOBAL CIRCUIT BREAKER (issue #182, #201): Hard limit to prevent catastrophic proliferation
   # Count TOTAL active Agent CRs (without completionTime). If >= 15, BLOCK all spawns.
   # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
@@ -1036,6 +1050,20 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   # Set agent name to match role (fix for issue #111)
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
+
+  # EMERGENCY KILL SWITCH (issue #210): Check before emergency spawn
+  # This provides instant manual override to stop ALL spawning during emergencies.
+  KILLSWITCH_ENABLED=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$KILLSWITCH_ENABLED" = "true" ]; then
+    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "Emergency stop activated")
+    log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. Blocking emergency spawn."
+    post_thought "Kill switch active: $KILLSWITCH_REASON. Emergency perpetuation blocked. Manual intervention required to restart spawning." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false
+    # Continue to reporting - don't exit immediately
+  fi
 
   # CIRCUIT BREAKER (issue #251, #201): Block emergency spawn if system overloaded
   # This prevents emergency perpetuation from bypassing the global circuit breaker.

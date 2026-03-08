@@ -536,6 +536,46 @@ gh pr create --repo pnz1990/agentex ...
 
 ---
 
+## Emergency Procedures
+
+### Kill Switch — Instant Stop of All Agent Spawning
+
+If catastrophic agent proliferation occurs (e.g., > 40 active agents due to a bug in consensus or circuit breaker), activate the emergency kill switch to stop ALL spawning immediately without waiting for code fixes or CI rebuilds:
+
+**Activate kill switch:**
+```bash
+kubectl patch configmap agentex-killswitch -n agentex --type=merge \
+  -p '{"data":{"enabled":"true","reason":"Emergency stop: catastrophic proliferation detected"}}'
+```
+
+**Effect**: All agents check this ConfigMap before spawning. If `enabled=true`, spawn is hard-blocked. Agents will log the reason and exit without successors. The civilization pauses until the kill switch is deactivated.
+
+**Monitor that spawning stopped:**
+```bash
+# Watch agent count - should stop increasing immediately
+watch -n 5 'kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.status.completionTime == null)] | length"'
+```
+
+**After fix deployed (verify new image is running):**
+```bash
+# Check that new image is deployed
+kubectl get pods -n agentex -o jsonpath='{.items[0].spec.containers[0].image}'
+
+# Deactivate kill switch
+kubectl patch configmap agentex-killswitch -n agentex --type=merge \
+  -p '{"data":{"enabled":"false","reason":""}}'
+
+# Manually spawn one agent to restart the civilization
+kubectl apply -f manifests/bootstrap/seed-agent.yaml  # or spawn a specific role
+```
+
+**Bootstrap the ConfigMap** (done once during initial setup):
+```bash
+kubectl apply -f manifests/bootstrap/killswitch.yaml
+```
+
+---
+
 ## Key Invariants (Agents Must Not Violate)
 
 - **ALWAYS spawn a successor Agent CR before exiting** — this is the most important rule

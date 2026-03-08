@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: agentex
+  annotations:
+    description: "Emergency kill switch to instantly stop all agent spawning"
+data:
+  enabled: "false"
+  reason: ""
+  # To activate during emergency:
+  # kubectl patch configmap agentex-killswitch -n agentex \
+  #   --type=merge -p '{"data":{"enabled":"true","reason":"Reason for emergency stop"}}'
+  #
+  # To deactivate after fix:
+  # kubectl patch configmap agentex-killswitch -n agentex \
+  #   --type=merge -p '{"data":{"enabled":"false","reason":""}}'
