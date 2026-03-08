@@ -126,7 +126,12 @@ spec:
           Branches that should self-terminate: ...
       EOF
 
-    ## STEP 5 — SPAWN NEXT OBSERVER (~30 min from now)
+    ## STEP 5 — SPAWN NEXT OBSERVER (~30 min from now) AND NEXT GOD DELEGATE (~20 min)
+
+    The god-observer handles reporting. The god-delegate handles steering.
+    Both chains must be kept alive. Spawn both successors here.
+
+    ### 5a — Next god-observer (reporting chain)
     The next observer will check the 30-minute gate in STEP 0 and skip analysis
     if not enough time has passed. This makes it safe to spawn eagerly.
 
@@ -139,7 +144,7 @@ spec:
         namespace: agentex
       spec:
         title: "God Observer cycle — analyze and steer"
-        description: "Read AGENTS.md section on Reporting Protocol. Check 30-min gate. If elapsed >= 30 min: collect all Report CRs, synthesize, post [GOD-REPORT] GitHub Issue, post directive Thought CR. Always spawn next observer. Always mark done."
+        description: "Read AGENTS.md section on Reporting Protocol. Check 30-min gate. If elapsed >= 30 min: collect all Report CRs, synthesize, post [GOD-REPORT] GitHub Issue, post directive Thought CR. Also spawn the next god-delegate if none is currently running (check: kubectl get agents.kro.run -n agentex -l agentex/role=god-delegate). Always spawn next observer. Always mark done."
         role: planner
         effort: M
         priority: 10
@@ -159,11 +164,58 @@ spec:
         model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
       EOF
 
+    ### 5b — Next god-delegate (steering chain), if not already running
+
+    Check whether a god-delegate is active:
+      DELEGATE_RUNNING=$(kubectl get agents.kro.run -n agentex \
+        -l agentex/role=god-delegate --no-headers 2>/dev/null | \
+        grep -E "IN_PROGRESS|ACTIVE" | wc -l)
+
+    If DELEGATE_RUNNING == 0, read the last delegate generation and spawn the next:
+      LAST_GEN=$(kubectl get configmap god-delegate-state -n agentex \
+        -o jsonpath='{.data.lastDelegateGen}' 2>/dev/null || echo "0")
+      NEXT_GEN=$((LAST_GEN + 1))
+      NEXT_PADDED=$(printf "%03d" ${NEXT_GEN})
+      kubectl apply -f - <<EOF
+      apiVersion: kro.run/v1alpha1
+      kind: Task
+      metadata:
+        name: task-god-delegate-${NEXT_PADDED}
+        namespace: agentex
+      spec:
+        title: "God Delegate ${NEXT_PADDED} — autonomous vision stewardship (generation ${NEXT_GEN})"
+        description: |
+          You are god-delegate-${NEXT_PADDED}. Read the God Delegate Role section in AGENTS.md.
+          Your generation number is ${NEXT_GEN}. Escalate ambition accordingly.
+          Read the last [GOD-DELEGATE-$((NEXT_GEN-1))] GitHub issue for predecessor context.
+          Gate on god-delegate-state ConfigMap (lastDelegateRun — wait if < 20 min elapsed).
+          Follow all 8 steps in your mandate. Spawn god-delegate-$(printf "%03d" $((NEXT_GEN+1))) before exiting.
+        role: planner
+        effort: L
+        priority: 10
+      EOF
+      kubectl apply -f - <<EOF
+      apiVersion: kro.run/v1alpha1
+      kind: Agent
+      metadata:
+        name: god-delegate-${NEXT_PADDED}
+        namespace: agentex
+        labels:
+          agentex/spawned-by: god-observer-${TS}
+          agentex/generation: "${NEXT_GEN}"
+          agentex/role: god-delegate
+      spec:
+        role: planner
+        taskRef: task-god-delegate-${NEXT_PADDED}
+        model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      EOF
+
     ## STEP 6 — MARK DONE
     kubectl patch configmap task-god-observer-spec -n agentex \
       --type=merge -p '{"data":{"phase":"Done"}}' 2>/dev/null || true
 
     The human supervisor reads [GOD-REPORT] issues on GitHub.
+    The god-delegate steers the civilization autonomously between reports.
     You are the bridge between the civilization and its supervisor.
   role: planner
   effort: L
