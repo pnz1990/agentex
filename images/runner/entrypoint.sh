@@ -18,12 +18,19 @@ BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}"
 WORKSPACE="/workspace"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
+
+# ── CONSTITUTION: Read god-owned constants ─────────────────────────────────
+# These values are set by god and must not be changed by agents.
+# To change: god edits the 'agentex-constitution' ConfigMap directly.
+CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
+if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
 ts() { date +%s; }
 
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
 # Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
 # The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
-# CRITICAL (issue #344): Must respect consensus to prevent proliferation from cascading errors.
+# CRITICAL (issue #344): Must respect circuit breaker to prevent proliferation from cascading errors.
 handle_fatal_error() {
   local exit_code=$1 line_num=$2
   
@@ -38,8 +45,10 @@ handle_fatal_error() {
       local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
-      if [ "$total_active" -ge 10 ]; then
+      if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 10. NOT spawning emergency successor." >&2
+        # Try to emit metric before death (may fail if AWS/kubectl unavailable)
+        aws cloudwatch put-metric-data --namespace Agentex --metric-name CircuitBreakerTriggered --value 1 --unit Count --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
         exit $exit_code
       fi
       
@@ -280,9 +289,10 @@ spawn_agent() {
   local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$total_active" -ge 10 ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 10). BLOCKING spawn."
+  if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn."
     post_thought "Circuit breaker: $total_active active jobs >= 10. Spawn blocked." "blocker" 10
+    push_metric "CircuitBreakerTriggered" 1
     return 1
   fi
   
@@ -327,14 +337,14 @@ EOF
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
   
   if [ "$post_spawn_active" -gt 10 ]; then
-    log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: 10). TOCTOU race detected!"
+    log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: $CIRCUIT_BREAKER_LIMIT). TOCTOU race detected!"
     log "Deleting Agent CR $name to restore system stability..."
     kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
-    post_thought "TOCTOU race: deleted Agent $name after detecting $post_spawn_active active jobs (limit: 10)" "blocker" 8
+    post_thought "TOCTOU race: deleted Agent $name after detecting $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)" "blocker" 8
     return 1
   fi
   
-  log "Post-spawn verification passed: $post_spawn_active active jobs (limit: 10)"
+  log "Post-spawn verification passed: $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
 }
 
 # Create a Task CR and immediately spawn an Agent to work it.
@@ -366,9 +376,9 @@ EOF
   }
   push_metric "TaskCreated" 1
   
-  # Propagate spawn_agent return code (circuit breaker or consensus may block)
+  # Propagate spawn_agent return code (circuit breaker may block)
   if ! spawn_agent "$agent_name" "$role" "$task_name" "$title"; then
-    log "CRITICAL: spawn_agent blocked (circuit breaker or consensus). Task CR created but Agent CR not spawned."
+    log "CRITICAL: spawn_agent blocked (circuit breaker). Task CR created but Agent CR not spawned."
     return 1
   fi
   return 0
@@ -672,7 +682,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     exitCode: 0
   EOF
 
-  visionScore guide: 10=consensus/swarms/memory, 7=role escalation/dashboard,
+  visionScore guide: 10=swarms/memory/persistent identity (foundational capabilities),
+  7=role escalation/dashboard/cross-agent debate (platform capabilities),
   5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
 THE SYSTEM MUST NEVER IDLE. IF YOU EXIT WITHOUT SPAWNING A SUCCESSOR,
@@ -881,9 +892,10 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$TOTAL_ACTIVE" -ge 10 ]; then
-    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 10). Blocking emergency spawn."
+  if [ "$TOTAL_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT). Blocking emergency spawn."
     post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= 10." "blocker" 10
+    push_metric "CircuitBreakerTriggered" 1
     NEEDS_EMERGENCY_SPAWN=false
   fi
 
@@ -909,11 +921,7 @@ The system must never idle. You are responsible for keeping it alive." \
       "0" \
       "$SWARM_REF"
 
-    if [ "$CONSENSUS_REQUIRED" = true ]; then
-      log "Emergency successor spawned (with consensus check): Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"
-    else
-      log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
-    fi
+    log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"
   fi
 fi
 

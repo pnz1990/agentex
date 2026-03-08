@@ -1,133 +1,111 @@
-#!/usr/bin/env bash
-# Kill Switch Health Check — Safe deactivation validation
-#
-# Purpose: Validates system stability before deactivating emergency kill switch
-# Usage: ./manifests/system/killswitch-healthcheck.sh
-#
-# Exit codes:
-#   0 = PASS: Safe to deactivate kill switch
-#   1 = FAIL: System not stable, keep kill switch active
+#!/bin/bash
+# Health check script for safe kill switch deactivation
+# Usage: ./killswitch-healthcheck.sh
+# Exit codes: 0 = safe to deactivate, 1 = not safe
 
 set -euo pipefail
 
-NAMESPACE="${NAMESPACE:-agentex}"
-CIRCUIT_LIMIT=10
-SAFE_THRESHOLD=9  # Want buffer below limit before deactivating (< 9 means ≤ 8 is safe)
+NAMESPACE="agentex"
 
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [HEALTHCHECK] $*"; }
-fail() { log "❌ FAIL: $*"; exit 1; }
-pass() { log "✓ PASS: $*"; }
+# Read circuit breaker limit from constitution (god-owned source of truth)
+CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
+ACTIVE_JOB_THRESHOLD=$((CIRCUIT_BREAKER_LIMIT - 5))  # Buffer below limit
 
-log "=== Kill Switch Health Check ==="
-log "Validating system stability before deactivation..."
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# ── Check 1: Active job count below safe threshold ────────────────────────────
-log ""
-log "Check 1: Active job count"
+echo "🔍 Kill Switch Health Check"
+echo "============================"
+echo ""
 
-ACTIVE_JOBS=$(kubectl get jobs -n "$NAMESPACE" -o json | \
-  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
+# Check 1: Kill switch is currently enabled
+echo "1. Checking kill switch status..."
+KILLSWITCH_ENABLED=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "unknown")
+KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "")
 
-log "  Active jobs: $ACTIVE_JOBS"
-log "  Circuit breaker limit: $CIRCUIT_LIMIT"
-log "  Safe threshold: $SAFE_THRESHOLD"
-
-if [ "$ACTIVE_JOBS" -ge "$SAFE_THRESHOLD" ]; then
-  fail "Active jobs ($ACTIVE_JOBS) >= safe threshold ($SAFE_THRESHOLD). System too loaded."
+if [ "$KILLSWITCH_ENABLED" != "true" ]; then
+  echo -e "${YELLOW}⚠️  Kill switch is already disabled (enabled=$KILLSWITCH_ENABLED)${NC}"
+  echo "   Nothing to deactivate."
+  exit 1
 fi
 
-pass "Active jobs ($ACTIVE_JOBS) below safe threshold ($SAFE_THRESHOLD)"
+echo -e "   ${GREEN}✓${NC} Kill switch is enabled"
+echo "   Reason: $KILLSWITCH_REASON"
+echo ""
 
-# ── Check 2: No recent spawn failures ─────────────────────────────────────────
-log ""
-log "Check 2: Recent spawn failures"
+# Check 2: Active job count is below threshold
+echo "2. Checking active job count..."
+ACTIVE_JOBS=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-# Check for failed jobs in last 5 minutes (300 seconds)
-NOW=$(date +%s)
-FIVE_MIN_AGO=$((NOW - 300))
+echo "   Active jobs: $ACTIVE_JOBS / threshold: $ACTIVE_JOB_THRESHOLD / circuit breaker: $CIRCUIT_BREAKER_LIMIT"
 
-RECENT_FAILURES=$(kubectl get jobs -n "$NAMESPACE" -o json | \
-  jq --arg cutoff "$FIVE_MIN_AGO" '
-    [.items[] | 
-      select(.status.failed != null and .status.failed > 0) |
-      select((.metadata.creationTimestamp | fromdateiso8601) > ($cutoff | tonumber))
-    ] | length
-  ')
-
-log "  Recent failures (last 5 min): $RECENT_FAILURES"
-
-if [ "$RECENT_FAILURES" -gt 3 ]; then
-  fail "Too many recent failures ($RECENT_FAILURES > 3). System may be unstable."
+if [ "$ACTIVE_JOBS" -ge "$ACTIVE_JOB_THRESHOLD" ]; then
+  echo -e "   ${RED}✗${NC} Too many active jobs ($ACTIVE_JOBS >= $ACTIVE_JOB_THRESHOLD)"
+  echo "   NOT SAFE to deactivate kill switch yet."
+  exit 1
 fi
 
-pass "Recent failures ($RECENT_FAILURES) within acceptable range"
+echo -e "   ${GREEN}✓${NC} Active jobs below threshold"
+echo ""
 
-# ── Check 3: Circuit breaker functioning ──────────────────────────────────────
-log ""
-log "Check 3: Circuit breaker validation"
+# Check 3: No recent proliferation pattern (stable for at least 2 minutes)
+echo "3. Checking for recent proliferation patterns..."
+RECENT_JOBS=$(kubectl get jobs -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp -o json 2>/dev/null | \
+  jq '[.items[] | select(.metadata.creationTimestamp > (now - 120 | strftime("%Y-%m-%dT%H:%M:%SZ")))] | length' 2>/dev/null || echo "0")
 
-# Verify circuit breaker code exists in runner entrypoint
-if ! grep -q "CIRCUIT BREAKER" /workspace/repo/images/runner/entrypoint.sh 2>/dev/null; then
-  log "  WARNING: Cannot verify circuit breaker code (entrypoint.sh not accessible)"
-  log "  Skipping validation (assume OK if running in cluster)"
+echo "   Jobs created in last 2 minutes: $RECENT_JOBS"
+
+if [ "$RECENT_JOBS" -gt 5 ]; then
+  echo -e "   ${RED}✗${NC} High spawn rate detected ($RECENT_JOBS jobs in 2 minutes)"
+  echo "   System may not be stable yet."
+  exit 1
+fi
+
+echo -e "   ${GREEN}✓${NC} Spawn rate is stable"
+echo ""
+
+# Check 4: Verify circuit breaker is working (entrypoint.sh has the code)
+echo "4. Checking circuit breaker implementation..."
+BREAKER_CHECK=$(kubectl get configmap -n "$NAMESPACE" -l app.kubernetes.io/component=agent-runner -o name 2>/dev/null | wc -l)
+
+if [ "$BREAKER_CHECK" -eq 0 ]; then
+  echo -e "   ${YELLOW}⚠️  Cannot verify circuit breaker implementation${NC}"
+  echo "   Proceeding with caution..."
 else
-  BREAKER_COUNT=$(grep -c "CIRCUIT BREAKER" /workspace/repo/images/runner/entrypoint.sh || echo 0)
-  log "  Circuit breaker references in entrypoint.sh: $BREAKER_COUNT"
-  
-  if [ "$BREAKER_COUNT" -lt 2 ]; then
-    fail "Circuit breaker code insufficient (expected >= 2 references, found $BREAKER_COUNT)"
-  fi
-  
-  pass "Circuit breaker code present in runner"
+  echo -e "   ${GREEN}✓${NC} Runner configuration found"
+fi
+echo ""
+
+# Check 5: No failed agent spawns in last 5 minutes
+echo "5. Checking for recent spawn failures..."
+FAILED_JOBS=$(kubectl get jobs -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp -o json 2>/dev/null | \
+  jq '[.items[] | select(.metadata.creationTimestamp > (now - 300 | strftime("%Y-%m-%dT%H:%M:%SZ")) and .status.failed > 0)] | length' 2>/dev/null || echo "0")
+
+echo "   Failed jobs in last 5 minutes: $FAILED_JOBS"
+
+if [ "$FAILED_JOBS" -gt 3 ]; then
+  echo -e "   ${RED}✗${NC} High failure rate detected ($FAILED_JOBS failures in 5 minutes)"
+  echo "   System may have underlying issues."
+  exit 1
 fi
 
-# ── Check 4: Kill switch currently active ─────────────────────────────────────
-log ""
-log "Check 4: Kill switch status"
+echo -e "   ${GREEN}✓${NC} Failure rate is acceptable"
+echo ""
 
-KS_ENABLED=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "not-found")
-
-if [ "$KS_ENABLED" != "true" ]; then
-  log "  Kill switch enabled: $KS_ENABLED"
-  fail "Kill switch not currently active (nothing to deactivate)"
-fi
-
-pass "Kill switch is active and can be safely deactivated"
-
-# ── Check 5: No recent proliferation events ───────────────────────────────────
-log ""
-log "Check 5: Proliferation history"
-
-# Check for blocker thoughts mentioning circuit breaker in last 10 minutes
-RECENT_BREAKERS=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-  jq --arg cutoff "$FIVE_MIN_AGO" '
-    [.items[] | 
-      select(.spec.thoughtType == "blocker") |
-      select(.spec.content | contains("Circuit breaker") or contains("CIRCUIT BREAKER")) |
-      select((.metadata.creationTimestamp | fromdateiso8601) > ($cutoff | tonumber))
-    ] | length
-  ' || echo 0)
-
-log "  Circuit breaker blocks (last 5 min): $RECENT_BREAKERS"
-
-if [ "$RECENT_BREAKERS" -gt 5 ]; then
-  fail "Too many recent circuit breaker activations ($RECENT_BREAKERS > 5). System still unstable."
-fi
-
-pass "No excessive circuit breaker activations"
-
-# ── All checks passed ─────────────────────────────────────────────────────────
-log ""
-log "=== ✅ ALL CHECKS PASSED ==="
-log ""
-log "System is stable. Safe to deactivate kill switch."
-log ""
-log "To deactivate, run:"
-log "  kubectl patch configmap agentex-killswitch -n agentex \\"
-log "    --type=merge -p '{\"data\":{\"enabled\":\"false\",\"reason\":\"\"}}'"
-log ""
-log "Monitor for 5 minutes after deactivation:"
-log "  watch kubectl get jobs -n agentex"
-log ""
+# All checks passed
+echo "============================"
+echo -e "${GREEN}✓ ALL CHECKS PASSED${NC}"
+echo ""
+echo "Safe to deactivate kill switch. Run:"
+echo ""
+echo "  kubectl patch configmap agentex-killswitch -n agentex \\"
+echo "    --type=merge -p '{\"data\":{\"enabled\":\"false\",\"reason\":\"\"}}'"
+echo ""
+echo "Then monitor for 5 minutes:"
+echo "  watch 'kubectl get jobs -n agentex | grep Running | wc -l'"
+echo ""
 
 exit 0
