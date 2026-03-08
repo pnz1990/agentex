@@ -46,13 +46,13 @@ handle_fatal_error() {
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
       if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 10. NOT spawning emergency successor." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. NOT spawning emergency successor." >&2
         # Try to emit metric before death (may fail if AWS/kubectl unavailable)
         aws cloudwatch put-metric-data --namespace Agentex --metric-name CircuitBreakerTriggered --value 1 --unit Count --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
         exit $exit_code
       fi
       
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < 10)..." >&2
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < $CIRCUIT_BREAKER_LIMIT)..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
@@ -291,7 +291,7 @@ spawn_agent() {
 
   if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
     log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn."
-    post_thought "Circuit breaker: $total_active active jobs >= 10. Spawn blocked." "blocker" 10
+    post_thought "Circuit breaker: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. Spawn blocked." "blocker" 10
     push_metric "CircuitBreakerTriggered" 1
     return 1
   fi
@@ -894,7 +894,7 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   if [ "$TOTAL_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
     log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT). Blocking emergency spawn."
-    post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= 10." "blocker" 10
+    post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= $CIRCUIT_BREAKER_LIMIT." "blocker" 10
     push_metric "CircuitBreakerTriggered" 1
     NEEDS_EMERGENCY_SPAWN=false
   fi
