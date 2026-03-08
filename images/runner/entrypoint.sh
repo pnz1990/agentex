@@ -109,7 +109,7 @@ spec:
 EOF
       
       # Issue #449: Verify spawn succeeded with clear diagnostics
-      if kubectl get agent "$next_agent" -n "$NAMESPACE" &>/dev/null; then
+      if kubectl get agent.kro.run "$next_agent" -n "$NAMESPACE" &>/dev/null; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✓ Emergency Agent CR created: $next_agent" >&2
       else
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED - Agent CR not found: $next_agent" >&2
@@ -935,14 +935,14 @@ else
   JOBS_VERIFIED=0
   for agent_name in $(echo "$SUCCESSOR_AGENTS" | jq -r '.items[].metadata.name' 2>/dev/null || true); do
     # Check if Agent CR has status.jobName populated by kro
-    JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+    JOB_NAME=$(kubectl get agent.kro.run "$agent_name" -n "$NAMESPACE" \
       -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     
     if [ -z "$JOB_NAME" ]; then
       log "WARNING: Agent CR $agent_name exists but status.jobName is empty (kro hasn't processed it yet)"
       # Give kro a moment to process the Agent CR (it may be in progress)
       sleep 5
-      JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+      JOB_NAME=$(kubectl get agent.kro.run "$agent_name" -n "$NAMESPACE" \
         -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     fi
     
