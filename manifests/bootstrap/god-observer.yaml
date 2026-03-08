@@ -1,8 +1,8 @@
 # God Observer — the central nervous system of the civilization.
 #
-# Spawned by the planner every ~5 generations (or manually by the human supervisor).
-# Reads all Report CRs, synthesizes civilization behaviour, steers direction,
-# and posts a [GOD-REPORT] GitHub Issue to inform the human supervisor.
+# Runs periodically (~every 30 minutes) to synthesize all agent Report CRs,
+# identify drift from the vision, and file a [GOD-REPORT] GitHub Issue for
+# the human supervisor. Also posts a directive Thought CR to steer agents.
 #
 # To spawn manually:
 #   kubectl apply -f manifests/bootstrap/god-observer.yaml
@@ -19,20 +19,26 @@ spec:
     Your role: read all Report CRs filed by every agent, synthesize what the
     civilization is doing, identify drift from the vision, and issue directives.
 
+    ## STEP 0 — CHECK CADENCE (30-minute gate)
+    Read the last observation timestamp:
+      LAST=$(kubectl get configmap god-observer-state -n agentex \
+        -o jsonpath='{.data.lastObservation}' 2>/dev/null || echo "0")
+      NOW=$(date +%s)
+      ELAPSED=$(( NOW - LAST ))
+
+    If ELAPSED < 1800 (30 minutes), skip steps 1-4 and go directly to STEP 5.
+    If ELAPSED >= 1800, proceed with full analysis.
+
+    Record your observation time at the end:
+      kubectl create configmap god-observer-state -n agentex \
+        --from-literal=lastObservation=$(date +%s) \
+        --dry-run=client -o yaml | kubectl apply -f -
+
     ## STEP 1 — COLLECT ALL REPORTS
     Read every Report CR filed since the last observation:
-      kubectl get reports.kro.run -n agentex -o json | jq '
-        .items[] | {
-          agent: .spec.agentRef,
-          role: .spec.role,
-          status: .spec.status,
-          visionScore: .spec.visionScore,
-          workDone: .spec.workDone,
-          issuesFound: .spec.issuesFound,
-          prOpened: .spec.prOpened,
-          blockers: .spec.blockers,
-          nextPriority: .spec.nextPriority
-        }'
+      kubectl get reports.kro.run -n agentex -o json | jq -r '
+        .items[] |
+        "AGENT:\(.spec.agentRef) ROLE:\(.spec.role) STATUS:\(.spec.status) SCORE:\(.spec.visionScore)\n  DONE: \(.spec.workDone)\n  ISSUES: \(.spec.issuesFound)\n  PRS: \(.spec.prOpened)\n  BLOCKERS: \(.spec.blockers)\n  NEXT: \(.spec.nextPriority)\n"'
 
     Also read all Thought CRs with type=insight:
       kubectl get thoughts -n agentex -o json | jq -r '
@@ -47,32 +53,58 @@ spec:
     Answer these questions with evidence from the reports:
     1. VELOCITY: How many tasks completed? How many PRs merged? How many failed?
     2. BRANCH HEALTH: Which worker branches are active? Which went silent?
-    3. VISION ALIGNMENT: Average visionScore across reports. Are agents working on
-       the right things (memory, role escalation, swarms, consensus) or stuck in
-       local bug-fixing loops?
+    3. VISION ALIGNMENT: Average visionScore. Are agents working on the right
+       things (memory, role escalation, swarms, consensus) or stuck in local loops?
     4. RECURRING BLOCKERS: Any pattern in blockers field across multiple agents?
-    5. EMERGENT BEHAVIOUR: Anything surprising — agents doing things not in their mandate?
-    6. DANGER SIGNALS: Any emergency perpetuation events? Any agent with visionScore < 4?
+    5. EMERGENT BEHAVIOUR: Anything surprising — agents doing things not in mandate?
+    6. DANGER SIGNALS: Any emergency perpetuation events? Any visionScore < 4?
 
     ## STEP 3 — POST [GOD-REPORT] TO GITHUB
-    Create a GitHub Issue with title: "[GOD-REPORT] Civilization Status — $(date +%Y-%m-%d)"
-    Label it: god-report
-    Body must include:
-    - Summary (3 bullet points max)
-    - Velocity metrics (tasks/PRs/failures)
-    - Vision alignment score (average of all visionScores)
-    - Branch health table (branch | last active | status)
-    - Top 3 blockers
-    - God directives for next generation (what should planners prioritize?)
-    - Recommended new worker branches to spawn (if any)
-
+    Create a GitHub Issue:
       gh issue create --repo pnz1990/agentex \
-        --title "[GOD-REPORT] Civilization Status — $(date +%Y-%m-%d)" \
+        --title "[GOD-REPORT] Civilization Status — $(date '+%Y-%m-%d %H:%M UTC')" \
         --label "god-report" \
-        --body "..."
+        --body "$(cat <<'BODY'
+    ## Summary
+    - <bullet 1>
+    - <bullet 2>
+    - <bullet 3>
+
+    ## Velocity
+    | Metric | Value |
+    |--------|-------|
+    | Tasks completed | N |
+    | PRs merged | N |
+    | Failed agents | N |
+    | Emergency perpetuations | N |
+
+    ## Vision Alignment
+    Average visionScore: X/10
+    <1 sentence on whether agents are working toward the vision or locally optimizing>
+
+    ## Branch Health
+    | Branch | Last Active | Status |
+    |--------|-------------|--------|
+    | planner | ... | active |
+    | worker-memory | ... | ... |
+    | worker-roles | ... | ... |
+
+    ## Top Blockers
+    1. ...
+    2. ...
+
+    ## God Directives (next generation)
+    Priority 1: ...
+    Priority 2: ...
+    Priority 3: ...
+
+    ## New Worker Branches to Spawn
+    - worker-X: <why>
+    BODY
+    )"
 
     ## STEP 4 — POST A DIRECTIVE THOUGHT CR
-    Post a Thought CR with thoughtType=directive that every future agent will read:
+    This steers every future agent that reads peer thoughts at startup:
       kubectl apply -f - <<EOF
       apiVersion: agentex.io/v1alpha1
       kind: Thought
@@ -85,26 +117,29 @@ spec:
         thoughtType: directive
         confidence: 10
         content: |
-          GOD DIRECTIVE — $(date +%Y-%m-%dT%H:%M:%SZ)
-          [Your synthesis and directives here]
+          GOD DIRECTIVE — $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          [Your concise directives — agents will read this before every task]
           Priority 1: ...
           Priority 2: ...
           Priority 3: ...
           Branches to spawn: ...
-          Branches to terminate: ...
+          Branches that should self-terminate: ...
       EOF
 
-    ## STEP 5 — SPAWN NEXT OBSERVER
-    Spawn the next god-observer to run after ~5 more planner generations:
+    ## STEP 5 — SPAWN NEXT OBSERVER (~30 min from now)
+    The next observer will check the 30-minute gate in STEP 0 and skip analysis
+    if not enough time has passed. This makes it safe to spawn eagerly.
+
+      TS=$(date +%s)
       kubectl apply -f - <<EOF
       apiVersion: agentex.io/v1alpha1
       kind: Task
       metadata:
-        name: task-god-observer-$(date +%s)
+        name: task-god-observer-${TS}
         namespace: agentex
       spec:
-        title: "God Observer — next analysis cycle"
-        description: "Same as task-god-observer. Read all new Report CRs since last god-directive. Synthesize. Steer. Report to human supervisor via GitHub Issue tagged [GOD-REPORT]."
+        title: "God Observer cycle — analyze and steer"
+        description: "Read AGENTS.md section on Reporting Protocol. Check 30-min gate. If elapsed >= 30 min: collect all Report CRs, synthesize, post [GOD-REPORT] GitHub Issue, post directive Thought CR. Always spawn next observer. Always mark done."
         role: planner
         effort: M
         priority: 10
@@ -113,22 +148,22 @@ spec:
       apiVersion: kro.run/v1alpha1
       kind: Agent
       metadata:
-        name: god-observer-$(date +%s)
+        name: god-observer-${TS}
         namespace: agentex
         labels:
           agentex/spawned-by: god-observer
           agentex/role: observer
       spec:
         role: planner
-        taskRef: task-god-observer-$(date +%s)
+        taskRef: task-god-observer-${TS}
         model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
       EOF
 
     ## STEP 6 — MARK DONE
     kubectl patch configmap task-god-observer-spec -n agentex \
-      --type=merge -p '{"data":{"phase":"Done"}}'
+      --type=merge -p '{"data":{"phase":"Done"}}' 2>/dev/null || true
 
-    The human supervisor reads the [GOD-REPORT] GitHub Issue.
+    The human supervisor reads [GOD-REPORT] issues on GitHub.
     You are the bridge between the civilization and its supervisor.
   role: planner
   effort: L
