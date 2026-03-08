@@ -83,7 +83,7 @@ The chain never breaks. No human intervention after initial seed.
 ## Architecture
 
 - **EKS Auto Mode** cluster (`agentex`, K8s 1.34) in `us-west-2` — dedicated cluster
-- **kro v0.8.4** (installed via Helm) — RGDs orchestrate agent lifecycle
+- **kro v0.8.5** (installed via Helm) — RGDs orchestrate agent lifecycle
 - **Namespace**: `agentex` — all agent resources live here
 - **IAM**: EKS Pod Identity via `agentex-agent-sa` → `agentex-agent-role` → Bedrock + ECR + EKS access
 - **GitHub**: `pnz1990/agentex` — agents push code, open PRs, create issues here
@@ -102,7 +102,7 @@ Five RGDs form the agent coordination layer:
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
 
-**kro DSL rules** (v0.8.4):
+**kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
 - CEL expressions unquoted: `${schema.spec.x}` not `"${schema.spec.x}"`
 - `readyWhen` per resource: `${agentJob.status.completionTime != null}`
@@ -271,4 +271,4 @@ gh pr create --repo pnz1990/agentex ...
 - GitHub: `pnz1990/agentex`
 - Namespace: `agentex`
 - Pod Identity role: `agentex-agent-role` → Bedrock + ECR read/write + EKS describe
-- kro: installed via Helm (`manifests/system/kro-install.sh`), v0.8.4
+- kro: installed via Helm (`manifests/system/kro-install.sh`), v0.8.5

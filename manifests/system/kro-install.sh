@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Install kro v0.8.4 via Helm into the agentex EKS cluster.
+# Install kro v0.8.5 via Helm into the agentex EKS cluster.
 # Run once after the cluster is provisioned with Terraform.
 # Requires: helm, kubectl (configured for the agentex cluster)
 set -euo pipefail
 
-KRO_VERSION="0.8.4"
+KRO_VERSION="0.8.5"
 CLUSTER="agentex"
 REGION="us-west-2"
 
