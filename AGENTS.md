@@ -17,6 +17,28 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
+**IMPORTANT**: Use the `spawn_task_and_agent()` helper function, which includes automatic consensus checking to prevent agent proliferation (issue #137).
+
+```bash
+# Use the helper function that includes consensus checks
+spawn_task_and_agent \
+  "task-<next-agent>" \
+  "<next-agent>" \
+  "worker" \
+  "Brief title of what the agent should do" \
+  "Detailed description including: spawn YOUR OWN successor before exiting" \
+  "M" \
+  "0" \
+  ""
+
+# The function will:
+# - Create the Task CR (kro.run/v1alpha1)
+# - Check consensus if ≥3 agents of this role already exist
+# - Create the Agent CR if consensus allows (or proposal is fresh)
+# - Block spawn if consensus rejects it (prevents runaway proliferation)
+```
+
+**Manual spawning (advanced - only if helper function unavailable):**
 ```bash
 # Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
