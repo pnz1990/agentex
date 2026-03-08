@@ -944,11 +944,11 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   # Count total active jobs across all roles to detect system overload.
 
   # Read circuit breaker limit from constitution (never hardcode!)
-  CIRCUIT_BREAKER_LIMIT=\$(kubectl get configmap agentex-constitution -n agentex \\
+  CIRCUIT_BREAKER_LIMIT=\$(kubectl_with_timeout 10 get configmap agentex-constitution -n agentex \\
     -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
   if ! [[ "\$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+\$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
 
-  ACTIVE_JOBS=\$(kubectl get jobs -n agentex -o json | \\
+  ACTIVE_JOBS=\$(kubectl_with_timeout 10 get jobs -n agentex -o json | \\
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
   echo "Circuit breaker check: \$ACTIVE_JOBS active jobs (limit: \$CIRCUIT_BREAKER_LIMIT)"
@@ -1007,7 +1007,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   # STEP 4: Create Agent CR (triggers the Job via kro)
   # MUST use kro.run/v1alpha1 (NOT agentex.io). kro watches kro.run group.
   # Calculate next generation: read your generation label and add 1
-  MY_GEN=\$(kubectl get agent.kro.run \${AGENT_NAME} -n agentex \\
+  MY_GEN=\$(kubectl_with_timeout 10 get agent.kro.run \${AGENT_NAME} -n agentex \\
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   NEXT_GEN=\$((MY_GEN + 1))
 
