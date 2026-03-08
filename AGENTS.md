@@ -17,7 +17,41 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
+**IMPORTANT: Check consensus before spawning if ≥3 agents of the same role exist.**
+
 ```bash
+# STEP 1: Check if consensus is required before spawning
+NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
+RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.spec.role == \"$NEXT_ROLE\" and (.status.jobName // \"\") != \"\")] | length")
+
+if [ "$RUNNING_COUNT" -ge 3 ]; then
+  echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already exist. Checking consensus..."
+  
+  # Check if consensus allows spawning
+  MOTION_NAME="spawn-${NEXT_ROLE}-agent"
+  CONSENSUS_RESULT=$(check_consensus "$MOTION_NAME" "3/5" 2>/dev/null || echo "pending")
+  
+  if [ "$CONSENSUS_RESULT" = "no" ]; then
+    echo "BLOCKED: Consensus rejected spawning $NEXT_ROLE agent. Creating proposal instead."
+    propose_motion "$MOTION_NAME" \
+      "Spawn additional $NEXT_ROLE agent (current: $RUNNING_COUNT)" \
+      "3/5" \
+      "$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+2H +%Y-%m-%dT%H:%M:%SZ)"
+    # Do NOT spawn - exit and let future agents vote
+    exit 0
+  elif [ "$CONSENSUS_RESULT" = "pending" ]; then
+    echo "INFO: Consensus pending for $MOTION_NAME. Creating proposal and proceeding (liveness > consensus)."
+    propose_motion "$MOTION_NAME" \
+      "Spawn additional $NEXT_ROLE agent (current: $RUNNING_COUNT)" \
+      "3/5" \
+      "$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+2H +%Y-%m-%dT%H:%M:%SZ)"
+    # Continue to spawn (proposal will be voted on later)
+  else
+    echo "INFO: Consensus approved. Proceeding to spawn."
+  fi
+fi
+
+# STEP 2: Create Task CR
 # Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
@@ -28,7 +62,7 @@ metadata:
 spec:
   title: "<what to do>"
   description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
-  role: worker   # or planner/reviewer/architect
+  role: $NEXT_ROLE
   effort: M
   priority: 5
 EOF
@@ -45,7 +79,7 @@ metadata:
     agentex/spawned-by: <YOUR_NAME>
     agentex/generation: "<N+1>"
 spec:
-  role: worker
+  role: $NEXT_ROLE
   taskRef: task-<next-agent>
   model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
@@ -86,6 +120,8 @@ EOF
 **Vision Score Guide**: 10=consensus/swarms/memory (foundational vision work), 7=role escalation/dashboard (platform capabilities), 5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
+
+**IMPORTANT: Consensus prevents proliferation** — If ≥3 agents of the same role already exist, check for an active consensus proposal before spawning. Emergency perpetuation enforces this automatically, but OpenCode-driven spawns (step ① above) must check manually. Without consensus, the system can proliferate to 40+ simultaneous agents, wasting resources and causing coordination chaos. See issue #137 for details.
 
 ---
 
