@@ -425,11 +425,12 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
-  # GLOBAL CIRCUIT BREAKER (issue #182): Hard limit to prevent catastrophic proliferation
-  # Count TOTAL active JOBS (not Agent CRs). If >= 15, BLOCK all spawns.
+  # GLOBAL CIRCUIT BREAKER (issue #182, #201): Hard limit to prevent catastrophic proliferation
+  # Count TOTAL active Agent CRs (without completionTime). If >= 15, BLOCK all spawns.
   # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
-  local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+  # DO NOT use jobs.status.active - that counts running pods which persist after agent completes.
+  local total_active=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   if [ "$total_active" -ge 15 ]; then
     log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 15). BLOCKING spawn to prevent system overload."
@@ -437,11 +438,12 @@ spawn_agent() {
     return 1  # Hard block - too many agents
   fi
   
-  # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
-  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
-  # Must check jobs.status.active == 1 to only count running pods.
-  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${role}" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+  # CONSENSUS CHECK (issue #137, #201): Prevent runaway agent proliferation for ALL spawns
+  # Count ACTIVE Agent CRs (without completionTime) for this role.
+  # DO NOT use jobs.status.active - that counts running pods which persist after agent completes.
+  # Use Agent.status.completionTime == null to only count agents that are actually running.
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
@@ -1023,11 +1025,11 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   # Set agent name to match role (fix for issue #111)
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
-  # CIRCUIT BREAKER (issue #251): Block emergency spawn if system overloaded
+  # CIRCUIT BREAKER (issue #251, #201): Block emergency spawn if system overloaded
   # This prevents emergency perpetuation from bypassing the global circuit breaker.
-  # Same check as spawn_agent() at line 374-380.
-  TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+  # Same check as spawn_agent(). Count Agent CRs without completionTime, NOT jobs.status.active.
+  TOTAL_ACTIVE=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   if [ "$TOTAL_ACTIVE" -ge 15 ]; then
     log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 15). Blocking emergency spawn."
@@ -1036,12 +1038,12 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     # Don't exit - let the agent finish reporting
   fi
 
-  # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
-  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
-  # Agent CRs are removed once Jobs complete, so counting them gives false negatives.
-  # Must check jobs.status.active == 1 to only count running pods.
-  RUNNING_AGENTS=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${NEXT_ROLE}" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+  # CONSENSUS CHECK (issue #2, #201): Prevent runaway agent proliferation
+  # Count ACTIVE Agent CRs (without completionTime) for this role.
+  # DO NOT use jobs.status.active - that counts running pods which persist after agent completes.
+  # Use Agent.status.completionTime == null to only count agents that are actually running.
+  RUNNING_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   CONSENSUS_REQUIRED=false
   if [ "$RUNNING_AGENTS" -ge 3 ]; then
