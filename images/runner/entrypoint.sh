@@ -110,7 +110,17 @@ push_metric() {
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
-  log "Spawning successor: name=$name role=$role task=$task_ref reason=$reason"
+  
+  # Calculate next generation number by reading current agent's generation label
+  local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+  # Handle non-numeric generation (e.g., "next" from old code) by defaulting to 0
+  if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
+    my_generation=0
+  fi
+  local next_generation=$((my_generation + 1))
+  
+  log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
   kubectl apply -f - <<EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
@@ -119,7 +129,7 @@ metadata:
   namespace: ${NAMESPACE}
   labels:
     agentex/spawned-by: ${AGENT_NAME}
-    agentex/generation: "next"
+    agentex/generation: "${next_generation}"
 spec:
   role: "${role}"
   taskRef: "${task_ref}"
