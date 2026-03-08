@@ -33,6 +33,7 @@ spec:
         spec:
           ttlSecondsAfterFinished: 3600
           backoffLimit: 2  # retry up to 2x on pod crash — prevents silent death from transient failures
+          activeDeadlineSeconds: 1800  # Force termination after 30 minutes (prevents resource waste from stuck agents)
           template:
             metadata:
               labels:

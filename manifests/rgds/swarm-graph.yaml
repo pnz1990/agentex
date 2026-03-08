@@ -69,6 +69,7 @@ spec:
         spec:
           ttlSecondsAfterFinished: 3600
           backoffLimit: 0
+          activeDeadlineSeconds: 1800  # Force termination after 30 minutes (prevents resource waste from stuck agents)
           template:
             metadata:
               labels:
