@@ -524,6 +524,36 @@ if [ -n "$RESTART_SIGNAL" ] && [ "$RESTART_SIGNAL" -gt "$AGENT_START_TIME" ]; th
   exit 0  # Emergency perpetuation will spawn replacement with new image
 fi
 
+# ── 3.6. Circuit breaker startup check (issue #??? - CRITICAL) ────────────────
+# EARLY EXIT if circuit breaker limit already exceeded when agent starts.
+# This prevents the TOCTOU race where agents spawn successors, those agents
+# start running, and by the time they check the circuit breaker they're
+# already consuming resources. This check stops proliferation at agent startup.
+#
+# ROOT CAUSE: Circuit breaker in spawn_agent() only prevents FUTURE spawns,
+# but doesn't stop the CURRENT agent from running once kro has started it.
+# Result: Can easily reach 40-60+ active jobs despite 15-job limit.
+#
+# FIX: Check circuit breaker immediately at startup. If exceeded, exit cleanly
+# WITHOUT doing any work or spawning successors. Emergency perpetuation will
+# NOT trigger because circuit breaker blocks it too. System naturally recovers
+# as running jobs complete.
+STARTUP_ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "999")
+
+if [ "$STARTUP_ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
+  log "Circuit breaker active at agent startup: $STARTUP_ACTIVE_JOBS active jobs >= $CIRCUIT_BREAKER_LIMIT. Agent exiting without work to reduce load."
+  post_thought "Circuit breaker active at agent startup: $STARTUP_ACTIVE_JOBS active jobs >= $CIRCUIT_BREAKER_LIMIT. Agent exiting without work to reduce load." "blocker" 10
+  patch_task_status "Done" "Circuit breaker: system overloaded"
+  push_metric "CircuitBreakerTriggered" 1
+  push_metric "ActiveJobs" "$STARTUP_ACTIVE_JOBS" "Count"
+  # Exit WITHOUT spawning successor - let system load decrease naturally
+  # Emergency perpetuation will also be blocked by circuit breaker
+  exit 0
+fi
+
+log "Circuit breaker check passed at startup: $STARTUP_ACTIVE_JOBS active jobs < $CIRCUIT_BREAKER_LIMIT limit"
+
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
 INBOX_MESSAGES=""
