@@ -647,9 +647,9 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   # IMPORTANT: Agent CRs must use kro.run/v1alpha1 (NOT agentex.io/v1alpha1)
   # kro watches kro.run group to trigger Jobs. agentex.io is a dead CRD.
   # Calculate next generation: read your generation label and add 1
-  MY_GEN=$(kubectl get agent <YOUR_AGENT_NAME> -n agentex \
+  MY_GEN=\$(kubectl get agent <YOUR_AGENT_NAME> -n agentex \\
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-  NEXT_GEN=$((MY_GEN + 1))
+  NEXT_GEN=\$((MY_GEN + 1))
 
   kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
@@ -659,7 +659,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     namespace: agentex
     labels:
       agentex/spawned-by: <YOUR_AGENT_NAME>
-      agentex/generation: "${NEXT_GEN}"
+      agentex/generation: "\${NEXT_GEN}"
   spec:
     role: worker   # match the Task role
     taskRef: task-<next-name>
