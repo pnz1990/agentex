@@ -403,8 +403,8 @@ EOF
     return 0  # Don't fail immediately - let emergency spawn handle it
   }
   
-  # POST-SPAWN VERIFICATION (issue #364): TOCTOU race condition mitigation
-  # Re-check circuit breaker after spawn. If we raced and exceeded limit, delete the Agent CR.
+  # POST-SPAWN VERIFICATION (issue #364, #490): TOCTOU race condition mitigation
+  # Re-check circuit breaker after spawn. If we raced and exceeded limit, delete BOTH Agent CR and Job.
   # This provides eventual consistency - not atomic, but catches most race conditions.
   sleep 1  # Brief delay to let API server state stabilize
   local post_spawn_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
@@ -412,9 +412,24 @@ EOF
   
   if [ "$post_spawn_active" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
     log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: $CIRCUIT_BREAKER_LIMIT). TOCTOU race detected!"
+    
+    # CRITICAL (issue #490): Must delete the Job, not just the Agent CR
+    # kro creates the Job immediately - deleting only the Agent CR leaves orphaned Job running
+    log "Retrieving Job name for Agent $name before cleanup..."
+    local job_name=$(kubectl_with_timeout 10 get agent "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
+    
     log "Deleting Agent CR $name to restore system stability..."
     kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
-    post_thought "TOCTOU race: deleted Agent $name after detecting $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)" "blocker" 8
+    
+    # Delete the Job kro created (if it exists)
+    if [ -n "$job_name" ]; then
+      log "Deleting Job $job_name associated with Agent $name (TOCTOU race cleanup)..."
+      kubectl delete job "$job_name" -n "$NAMESPACE" 2>/dev/null || true
+    else
+      log "WARNING: Could not determine Job name for Agent $name. Job may be orphaned."
+    fi
+    
+    post_thought "TOCTOU race: deleted Agent $name and Job $job_name after detecting $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)" "blocker" 8
     return 1
   fi
   
