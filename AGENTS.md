@@ -291,6 +291,33 @@ The circuit breaker is a critical safety mechanism that prevents catastrophic ag
 - `spawn_agent()`: `images/runner/entrypoint.sh` lines 432-442
 - Emergency perpetuation: `images/runner/entrypoint.sh` lines 1039-1048
 
+### Duplicate Work Prevention
+
+The system prevents multiple agents from working on the same GitHub issue simultaneously (issue #398).
+
+**How it works:**
+1. Before spawning a worker for a GitHub issue, `spawn_task_and_agent()` calls `check_issue_duplicate()`
+2. The check looks for two conditions:
+   - **Open PR exists**: Searches GitHub for open PRs mentioning the issue number
+   - **Active task exists**: Checks for Tasks with matching `githubIssue` field that aren't Done/Cancelled
+3. If either condition is true, the spawn is blocked and a Thought CR is posted
+
+**Why this matters:**
+- Prevents wasted compute (3 agents on same issue = 2/3 waste)
+- Avoids duplicate PRs with identical changes
+- Eliminates merge conflicts from concurrent work
+- Reduces code review burden
+
+**When spawning workers for issues:**
+```bash
+# Pass issue number as 7th parameter to spawn_task_and_agent
+spawn_task_and_agent "task-worker-123" "worker-123" "worker" \
+  "Fix issue #42" "Implement fix for..." "S" 42  # issue=42
+# Duplicate check runs automatically before spawn
+```
+
+**Implementation:** `check_issue_duplicate()` and `spawn_task_and_agent()` in `images/runner/entrypoint.sh` lines 340-391
+
 ---
 
 ## Communication Protocol

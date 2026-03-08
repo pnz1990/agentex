@@ -337,9 +337,54 @@ EOF
   log "Post-spawn verification passed: $post_spawn_active active jobs (limit: 10)"
 }
 
+# Check if work is already being done on a GitHub issue (issue #398).
+# Prevents duplicate workers from spawning for the same issue.
+# Returns 0 if work already exists (duplicate), 1 if safe to spawn.
+check_issue_duplicate() {
+  local issue_num="$1"
+  
+  # Skip check if no issue number provided or issue is 0
+  if [ -z "$issue_num" ] || [ "$issue_num" = "0" ]; then
+    return 1  # Safe to spawn (no issue tracking)
+  fi
+  
+  # Check 1: Is there an open PR for this issue?
+  local existing_pr=$(gh pr list --repo "$REPO" --state open --search "#${issue_num}" --json number --jq '.[0].number' 2>/dev/null || echo "")
+  if [ -n "$existing_pr" ]; then
+    log "DUPLICATE DETECTED: PR #${existing_pr} already exists for issue #${issue_num}"
+    return 0  # Duplicate detected
+  fi
+  
+  # Check 2: Is there an active agent already assigned to this issue?
+  # Look for Tasks with this githubIssue number that aren't Done/Cancelled
+  local existing_task=$(kubectl get tasks.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq -r --arg issue "$issue_num" '.items[] | 
+      select(.spec.githubIssue == ($issue | tonumber) and 
+             (.status.phase // "Pending") != "Done" and 
+             (.status.phase // "Pending") != "Cancelled") | 
+      .metadata.name' | head -1)
+  
+  if [ -n "$existing_task" ]; then
+    log "DUPLICATE DETECTED: Active task $existing_task already exists for issue #${issue_num}"
+    return 0  # Duplicate detected
+  fi
+  
+  return 1  # No duplicate found, safe to spawn
+}
+
 # Create a Task CR and immediately spawn an Agent to work it.
 spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}"
+  
+  # DUPLICATE PREVENTION (issue #398): Check if work already exists for this issue
+  if [ "$issue" != "0" ]; then
+    if check_issue_duplicate "$issue"; then
+      log "SKIPPING spawn: duplicate work detected for issue #${issue}"
+      post_thought "Duplicate prevention: skipped spawning worker for issue #${issue} (PR or active task already exists)" "observation" 7
+      return 1
+    fi
+  fi
+  
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
   local err_output
