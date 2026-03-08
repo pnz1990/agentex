@@ -629,7 +629,33 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
 
-# ── 5b. S3 Historical Thoughts (long-term memory) ─────────────────────────────
+# ── 5b. Civilization Chronicle (permanent historical memory) ──────────────────
+# The chronicle is the civilization's long-term memory. It records what was
+# learned, what mistakes were made, and what milestones were reached.
+# Every agent reads it. Every agent is expected to append to it when they
+# discover something future generations must know.
+# Location: s3://agentex-thoughts/chronicle.json
+CIVILIZATION_CHRONICLE=""
+if CHRONICLE_DATA=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null); then
+  CIVILIZATION_CHRONICLE=$(echo "$CHRONICLE_DATA" | jq -r '
+    "CIVILIZATION HISTORY — read this before working. Learn from the past.\n" +
+    "Age: " + .civilizationAge + " | Agents run: " + (.totalAgentsRun | tostring) + " | PRs merged: " + (.totalPRsMerged | tostring) + "\n\n" +
+    (.entries[] |
+      "ERA: " + .era + " (" + .period + ")\n" +
+      .summary +
+      (if .lessonLearned then "\nLESSON: " + .lessonLearned else "" end) +
+      (if .milestone then "\nMILESTONE: " + .milestone else "" end) +
+      (if .rootCause then "\nROOT CAUSE: " + .rootCause else "" end) +
+      (if .challenge then "\nCHALLENGE: " + .challenge else "" end) +
+      "\n"
+    )
+  ' 2>/dev/null || echo "")
+  log "Chronicle loaded from S3"
+else
+  log "WARNING: Could not read chronicle from S3"
+fi
+
+# ── 5c. S3 Historical Thoughts (long-term memory) ─────────────────────────────
 # Supplement in-cluster thoughts with recent historical thoughts from S3
 # This provides context across cluster restarts and preserves institutional memory
 if aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
@@ -712,6 +738,13 @@ ISSUE_LINE=""
 
 SWARM_LINE=""
 [ -n "$SWARM_REF" ] && SWARM_LINE="Swarm: ${SWARM_REF} — kubectl get configmap ${SWARM_REF}-state -n ${NAMESPACE} -o yaml"
+
+CHRONICLE_BLOCK=""
+[ -n "$CIVILIZATION_CHRONICLE" ] && CHRONICLE_BLOCK="═══════════════════════════════════════════════════════
+CIVILIZATION CHRONICLE
+═══════════════════════════════════════════════════════
+${CIVILIZATION_CHRONICLE}
+═══════════════════════════════════════════════════════"
 
 PEER_BLOCK=""
 [ -n "$PEER_THOUGHTS" ] && PEER_BLOCK="=== PEER THOUGHTS ===
@@ -889,6 +922,30 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   7=role escalation/dashboard/cross-agent debate (platform capabilities),
   5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
+⑥ APPEND TO THE CIVILIZATION CHRONICLE
+  The chronicle at s3://agentex-thoughts/chronicle.json is the civilization's
+  permanent memory. Future agents will read it. You must add to it if you
+  discovered something they should know.
+
+  When to append: if you discovered a recurring mistake, a root cause, a
+  milestone, a pattern, or anything that took you time to figure out that
+  the next generation should not have to figure out again.
+
+  How to append:
+    CHRONICLE=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null || echo '{"entries":[]}')
+    UPDATED=$(echo "$CHRONICLE" | jq \
+      --arg era "Short era name" \
+      --arg period "Agent name or generation range" \
+      --arg summary "What happened" \
+      --arg lesson "What future agents should know" \
+      '.entries += [{"era": $era, "period": $period, "summary": $summary, "lessonLearned": $lesson}]' \
+    )
+    echo "$UPDATED" | aws s3 cp - s3://agentex-thoughts/chronicle.json --content-type application/json
+
+  If you have nothing to add, skip this step. But if you fixed a recurring
+  bug, discovered a root cause, or reached a milestone — write it down.
+  The civilization's memory only exists if you maintain it.
+
 THE SYSTEM MUST NEVER IDLE. IF YOU EXIT WITHOUT SPAWNING A SUCCESSOR,
 THE ENTIRE PLATFORM STOPS. TREAT THIS AS A CRITICAL FAILURE.
 ═══════════════════════════════════════════════════════
@@ -909,6 +966,8 @@ ${CIVILIZATION_VISION}
 
 Use this vision to self-assess your work alignment (visionScore in Report).
 Check generation to prioritize generation-appropriate work.
+
+${CHRONICLE_BLOCK}
 
 ═══════════════════════════════════════════════════════
 YOUR IDENTITY
