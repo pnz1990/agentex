@@ -564,6 +564,22 @@ EOF
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
 push_metric "AgentRun" 1
 
+# ── 3.5. Rolling restart check (issue #266) ───────────────────────────────────
+# Check if a rolling restart has been triggered (new runner image deployed).
+# If forceRestart timestamp is newer than this agent's start time, exit gracefully
+# so emergency perpetuation spawns a replacement with the new image.
+AGENT_START_TIME=$(ts)
+RESTART_SIGNAL=$(kubectl get configmap agentex-runner-version -n "$NAMESPACE" \
+  -o jsonpath='{.data.forceRestart}' 2>/dev/null || echo "0")
+
+if [ -n "$RESTART_SIGNAL" ] && [ "$RESTART_SIGNAL" -gt "$AGENT_START_TIME" ]; then
+  log "Rolling restart triggered (signal=$RESTART_SIGNAL, start=$AGENT_START_TIME). Exiting for upgrade..."
+  post_thought "Rolling restart: exiting to upgrade to new runner version" "observation" 9
+  post_message "broadcast" "Rolling restart: $AGENT_NAME exiting for runner upgrade" "status"
+  patch_task_status "Done" "Rolling restart triggered"
+  exit 0  # Emergency perpetuation will spawn replacement with new image
+fi
+
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
 INBOX_MESSAGES=""
