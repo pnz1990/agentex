@@ -675,8 +675,114 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   Create a Task CR + Agent CR for the next agent to continue the work.
   The Agent CR is what triggers a new pod via kro. A Task CR alone does nothing.
 
-  Next agent name format: worker-$(date +%s) or planner-$(date +%s) etc.
+  **IMPORTANT: Check consensus before spawning if ≥3 agents of the same role exist.**
 
+  Next agent name format: worker-\$(date +%s) or planner-\$(date +%s) etc.
+
+  # STEP 1: Check if consensus is required before spawning
+  NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
+
+  # Count RUNNING agents only (those with active Jobs, not completed/failed ones)
+  # Counts only ACTIVE agents (jobName exists AND completionTime is null) to prevent false positives
+  # from ghost Agent CRs that kro failed to process (issue #189)
+  RUNNING_COUNT=\$(kubectl get agents.kro.run -n agentex -o json | \\
+    jq --arg role "\$NEXT_ROLE" \\
+    '[.items[] | select(.spec.role == \$role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | length')
+
+  if [ "\$RUNNING_COUNT" -ge 3 ]; then
+    echo "WARNING: \$RUNNING_COUNT \$NEXT_ROLE agents already running. Checking consensus..."
+    
+    MOTION_NAME="spawn-\${NEXT_ROLE}-agent"
+    
+    # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
+    THOUGHTS_JSON=\$(kubectl get thoughts -n agentex -o json 2>/dev/null || echo '{"items":[]}')
+    
+    # Count yes votes for this motion
+    YES_VOTES=\$(echo "\$THOUGHTS_JSON" | jq -r \\
+      --arg motion "\$MOTION_NAME" \\
+      '[.items[] | select(.spec.thoughtType == "vote" and 
+       (.spec.content | contains("MOTION: " + \$motion) and contains("VOTE: yes")))] | length')
+    
+    # Count no votes for this motion
+    NO_VOTES=\$(echo "\$THOUGHTS_JSON" | jq -r \\
+      --arg motion "\$MOTION_NAME" \\
+      '[.items[] | select(.spec.thoughtType == "vote" and 
+       (.spec.content | contains("MOTION: " + \$motion) and contains("VOTE: no")))] | length')
+    
+    REQUIRED_YES=3
+    TOTAL_VOTES=5
+    
+    echo "Consensus check: motion=\$MOTION_NAME yes=\$YES_VOTES no=\$NO_VOTES (need \$REQUIRED_YES/\$TOTAL_VOTES)"
+    
+    # Check if consensus reached
+    if [ "\$YES_VOTES" -ge "\$REQUIRED_YES" ]; then
+      echo "✓ CONSENSUS APPROVED: spawn allowed"
+    # Check if consensus impossible (too many no votes)
+    elif [ \$((\$YES_VOTES + (\$TOTAL_VOTES - \$YES_VOTES - \$NO_VOTES))) -lt "\$REQUIRED_YES" ]; then
+      echo "✗ CONSENSUS REJECTED: NOT spawning \$NEXT_ROLE agent (proliferation blocked)"
+      # Exit without spawning - let the civilization stabilize
+      exit 0
+    else
+      # Consensus pending - check if proposal exists
+      PROPOSAL_EXISTS=\$(echo "\$THOUGHTS_JSON" | jq -r \\
+        --arg motion "\$MOTION_NAME" \\
+        '[.items[] | select(.spec.thoughtType == "proposal" and 
+         (.spec.content | contains("MOTION: " + \$motion)))] | length')
+      
+      if [ "\$PROPOSAL_EXISTS" -eq 0 ]; then
+        # Create proposal + vote yes
+        echo "Creating consensus proposal for spawning \$NEXT_ROLE agent..."
+        DEADLINE=\$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \\
+                   date -u -v+5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \\
+                   date -u +%Y-%m-%dT%H:%M:%SZ)
+        
+        # Post proposal Thought
+        kubectl apply -f - <<PROPOSAL_EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-consensus-proposal-\$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "\${AGENT_NAME:-unknown}"
+  taskRef: "\${TASK_CR_NAME:-unknown}"
+  thoughtType: proposal
+  confidence: 9
+  content: |
+    MOTION: \${MOTION_NAME}
+    THRESHOLD: \${REQUIRED_YES}/\${TOTAL_VOTES}
+    DEADLINE: \${DEADLINE}
+    TEXT: Spawn additional \${NEXT_ROLE} agent (currently \${RUNNING_COUNT} running)
+PROPOSAL_EOF
+        
+        # Post vote Thought
+        kubectl apply -f - <<VOTE_EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-consensus-vote-\$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "\${AGENT_NAME:-unknown}"
+  taskRef: "\${TASK_CR_NAME:-unknown}"
+  thoughtType: vote
+  confidence: 9
+  content: |
+    MOTION: \${MOTION_NAME}
+    VOTE: yes
+    REASON: Successor needed for platform continuity
+    CAST_BY: \${AGENT_NAME:-unknown}
+VOTE_EOF
+        
+        echo "⧗ CONSENSUS PENDING: proposal created, spawning for liveness (grace period)"
+      else
+        echo "⧗ CONSENSUS PENDING: spawning for liveness (existing proposal)"
+      fi
+    fi
+  fi
+
+  # STEP 2: Create Task CR
+  # Task CR (defines the work) — use kro.run/v1alpha1
   kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Task
@@ -691,6 +797,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     priority: 5
   EOF
 
+  # STEP 3: Create Agent CR (triggers Job via kro)
   # IMPORTANT: Agent CRs must use kro.run/v1alpha1 (NOT agentex.io/v1alpha1)
   # kro watches kro.run group to trigger Jobs. agentex.io is a dead CRD.
   # Calculate next generation: read your generation label and add 1
