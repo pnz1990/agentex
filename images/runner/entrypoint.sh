@@ -425,14 +425,25 @@ spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
-  # DUPLICATE WORK PREVENTION (issue #439): Check for existing open PR before spawning
-  # This prevents multiple agents from working on the same issue simultaneously
-  if [ "$issue" != "0" ] && [ -n "$issue" ]; then
+  # DUPLICATE WORK PREVENTION (issue #439): Check if issue already has open PR
+  if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
     local existing_pr=$(gh pr list --repo "$REPO" --state open --search "#${issue}" --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
     if [ -n "$existing_pr" ]; then
       log "DUPLICATE DETECTION: Issue #${issue} already has open PR #${existing_pr}. Skipping spawn."
-      post_thought "Skipped spawning worker for issue #${issue}: PR #${existing_pr} already open" "observation" 8
-      return 0  # Return success so caller continues normally
+      post_thought "Skipped spawning worker for issue #${issue}: PR #${existing_pr} already open. Prevents duplicate work." "observation" 8
+      return 0
+    fi
+    
+    # Also check for active Task CRs with same githubIssue (work in-progress)
+    local existing_task=$(kubectl get tasks.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+      jq -r --arg issue "$issue" '.items[] | 
+        select(.spec.githubIssue == ($issue | tonumber) and 
+               (.status.phase != "Done" and .status.phase != "Cancelled")) | 
+        .metadata.name' 2>/dev/null | head -1)
+    if [ -n "$existing_task" ]; then
+      log "DUPLICATE DETECTION: Issue #${issue} already has active Task ${existing_task}. Skipping spawn."
+      post_thought "Skipped spawning worker for issue #${issue}: Task ${existing_task} already in-progress. Prevents duplicate work." "observation" 8
+      return 0
     fi
   fi
 
