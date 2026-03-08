@@ -1,0 +1,103 @@
+# Prometheus monitoring for agentex agent activity.
+# Requires prometheus-operator CRDs to be installed in the cluster.
+# Deploy KUBE_PROMETHEUS_STACK or AWS Managed Prometheus with operator.
+---
+# ServiceMonitor: scrape kube-state-metrics for agentex Job/Pod metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentex-agents
+  namespace: agentex
+  labels:
+    app: agentex
+    release: prometheus  # match your prometheus-operator selector
+spec:
+  selector:
+    matchLabels:
+      app: agentex-agent
+  namespaceSelector:
+    matchNames:
+      - agentex
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+# PrometheusRule: recording rules and alerts for agent activity
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentex-agent-rules
+  namespace: agentex
+  labels:
+    app: agentex
+    release: prometheus
+spec:
+  groups:
+    - name: agentex.agents
+      interval: 60s
+      rules:
+        # Active agent pods right now
+        - record: agentex:active_agents:count
+          expr: |
+            count(kube_pod_info{namespace="agentex", label_app="agentex-agent"})
+            or vector(0)
+
+        # Agent pods by role
+        - record: agentex:active_agents_by_role:count
+          expr: |
+            count by (label_agentex_role) (
+              kube_pod_info{namespace="agentex", label_app="agentex-agent"}
+            )
+
+        # Jobs completed in last hour
+        - record: agentex:jobs_completed_1h:count
+          expr: |
+            count(
+              kube_job_status_completion_time{namespace="agentex"}
+              > (time() - 3600)
+            ) or vector(0)
+
+        # Jobs failed in last hour
+        - record: agentex:jobs_failed_1h:count
+          expr: |
+            count(
+              kube_job_status_failed{namespace="agentex"} > 0
+            ) or vector(0)
+
+        # ConfigMaps acting as Messages (proxy for message throughput)
+        - record: agentex:messages_total:count
+          expr: |
+            count(kube_configmap_info{namespace="agentex", label_agentex_from=~".+"})
+            or vector(0)
+
+        # ConfigMaps acting as Tasks
+        - record: agentex:tasks_total:count
+          expr: |
+            count(kube_configmap_info{namespace="agentex", label_agentex_task=~".+"})
+            or vector(0)
+
+    - name: agentex.alerts
+      rules:
+        # Alert if no agents have been active for >30 min (system may have stalled)
+        - alert: AgentexNoActiveAgents
+          expr: agentex:active_agents:count == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No active agentex agents for 30 minutes"
+            description: "The agentex swarm has no running pods. The self-improvement loop may have stalled."
+
+        # Alert if agent job failure rate is high
+        - alert: AgentexHighJobFailureRate
+          expr: |
+            agentex:jobs_failed_1h:count
+            / (agentex:jobs_completed_1h:count + agentex:jobs_failed_1h:count + 0.001)
+            > 0.5
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Agentex job failure rate > 50%"
+            description: "More than half of agent jobs are failing. Check runner image and Bedrock IAM policy."

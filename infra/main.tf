@@ -83,14 +83,7 @@ module "eks" {
   subnet_ids = module.vpc.private_subnets
 }
 
-# ── kro (EKS Managed Capability) ─────────────────────────────────────────────
-
-module "kro" {
-  source = "terraform-aws-modules/eks/aws//modules/capability"
-
-  type         = "KRO"
-  cluster_name = module.eks.cluster_name
-}
+# kro installed directly via Helm — see manifests/system/kro-install.sh
 
 # ── CloudWatch Agent IAM Role ─────────────────────────────────────────────────
 

@@ -9,11 +9,17 @@ spec:
     spec:
       role: string | default="worker"
       taskRef: string | required=true
-      model: string | default="anthropic.claude-sonnet-4-5-20250929-v1:0"
+      model: string | default="us.anthropic.claude-sonnet-4-5-v1:0"
       swarmRef: string | default=""
       priority: integer | default=5
+    status:
+      jobName: ${agentJob.metadata.name}
+      completionTime: ${agentJob.status.completionTime}
+      failed: ${agentJob.status.failed}
   resources:
     - id: agentJob
+      readyWhen:
+        - ${agentJob.status.completionTime != null}
       template:
         apiVersion: batch/v1
         kind: Job
@@ -36,10 +42,22 @@ spec:
             spec:
               serviceAccountName: agentex-agent-sa
               restartPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
               containers:
                 - name: agent
                   image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
-                  imagePullPolicy: IfNotPresent
+                  imagePullPolicy: Always
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false  # agent writes to /workspace and ~/.config
+                    capabilities:
+                      drop: ["ALL"]
                   env:
                     - name: AGENT_NAME
                       value: ${schema.metadata.name}

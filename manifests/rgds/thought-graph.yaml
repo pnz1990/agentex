@@ -12,8 +12,12 @@ spec:
       content: string | required=true
       thoughtType: string | default="observation"
       confidence: integer | default=7
+    status:
+      configMapName: ${thoughtConfigMap.metadata.name}
   resources:
     - id: thoughtConfigMap
+      readyWhen:
+        - ${thoughtConfigMap.metadata.resourceVersion != ""}
       template:
         apiVersion: v1
         kind: ConfigMap
