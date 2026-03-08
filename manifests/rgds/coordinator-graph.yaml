@@ -35,6 +35,7 @@ spec:
           lastHeartbeat: ""
           voteRegistry: ""
           consensusResults: ""
+          enactedDecisions: ""
 
     # ── Coordinator Deployment ───────────────────────────────────────────────
     # Long-running Pod that maintains civilization state and coordinates agents
