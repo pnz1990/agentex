@@ -220,33 +220,58 @@ spec:
           If the civilization hasn't advanced on PRIORITY 1 by then, expect escalation.
       EOF
 
-    ## STEP 6 — POST A [GOD-DELEGATE-REPORT] GITHUB ISSUE
+    ## STEP 6 — UPDATE THE LATEST [GOD-REPORT] ISSUE WITH YOUR ASSESSMENT
+
+    Do NOT create a new issue. Find the latest [GOD-REPORT] issue and comment on it.
+    This keeps all civilization status in one thread for the human supervisor.
+
+      # Find the latest [GOD-REPORT] issue number
+      GOD_REPORT_ISSUE=$(gh issue list --repo pnz1990/agentex \
+        --search "[GOD-REPORT]" --state open --limit 1 --json number \
+        --jq '.[0].number' 2>/dev/null)
+
+      # If no open GOD-REPORT exists, find the most recent closed one
+      if [ -z "$GOD_REPORT_ISSUE" ] || [ "$GOD_REPORT_ISSUE" = "null" ]; then
+        GOD_REPORT_ISSUE=$(gh issue list --repo pnz1990/agentex \
+          --search "[GOD-REPORT]" --state closed --limit 1 --json number \
+          --jq '.[0].number' 2>/dev/null)
+      fi
+
+      # If still none, create one
+      if [ -z "$GOD_REPORT_ISSUE" ] || [ "$GOD_REPORT_ISSUE" = "null" ]; then
+        GOD_REPORT_ISSUE=$(gh issue create --repo pnz1990/agentex \
+          --title "[GOD-REPORT] Civilization Status — $(date -u '+%Y-%m-%d')" \
+          --body "Initial god-report created by god-delegate-${MY_GEN}" \
+          --json number --jq '.number')
+      fi
 
       NEXT_GEN=$((MY_GEN + 1))
-      gh issue create --repo pnz1990/agentex \
-        --title "[GOD-DELEGATE-${MY_GEN}] Civilization Assessment — $(date -u '+%Y-%m-%d %H:%M UTC')" \
+      gh issue comment ${GOD_REPORT_ISSUE} --repo pnz1990/agentex \
         --body "$(cat <<BODY
-    ## God Delegate ${MY_GEN} Assessment
+    ## God Delegate ${MY_GEN} Assessment — $(date -u '+%Y-%m-%d %H:%M UTC')
 
     ### Vision Scores
     | Dimension | Score | Evidence |
     |-----------|-------|---------|
-    | Collective Intelligence | X/10 | <evidence> |
-    | Self-Improvement Depth | X/10 | <evidence> |
-    | Memory Continuity | X/10 | <evidence> |
-    | Vision Completeness | X/10 | <evidence> |
-    | Ambition Escalation | X/10 | <evidence> |
+    | Collective Intelligence | X/10 | <votes cast, motions open> |
+    | Self-Improvement Depth | X/10 | <RGD/entrypoint PRs vs total> |
+    | Memory Continuity | X/10 | <agents referencing prior work> |
+    | Vision Completeness | X/10 | <deployed features count> |
+    | Ambition Escalation | X/10 | <are problems getting harder?> |
     | **TOTAL** | **X/50** | |
 
-    ### Action Taken
-    <What problem was identified and what action was injected>
+    ### Action Taken This Cycle
+    <What problem was identified and what action was injected — proposal or worker spawn>
 
     ### Open Consensus Votes
-    <Any motions currently open>
+    <Any motions currently pending with vote count>
+
+    ### Directive to Next Agents
+    See Thought CR: thought-god-delegate-directive-<TS>
 
     ### For God Delegate ${NEXT_GEN}
-    If collective intelligence score is still < 5 next cycle, escalate to:
-    force-voting by posting 3 proposals simultaneously and requiring planners to pick one.
+    If collective intelligence score is still < 5, escalate:
+    post 3 simultaneous proposals and require planners to pick one.
     BODY
     )"
 
