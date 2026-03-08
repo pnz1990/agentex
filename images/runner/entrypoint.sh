@@ -425,10 +425,10 @@ EOF
     # CRITICAL (issue #490): Must delete the Job, not just the Agent CR
     # kro creates the Job immediately - deleting only the Agent CR leaves orphaned Job running
     log "Retrieving Job name for Agent $name before cleanup..."
-    local job_name=$(kubectl_with_timeout 10 get agent "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
+    local job_name=$(kubectl_with_timeout 10 get agent.kro.run "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
     
     log "Deleting Agent CR $name to restore system stability..."
-    kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
+    kubectl delete agent.kro.run "$name" -n "$NAMESPACE" 2>/dev/null || true
     
     # Delete the Job kro created (if it exists)
     if [ -n "$job_name" ]; then
