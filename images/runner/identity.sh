@@ -142,7 +142,7 @@ generate_identity() {
 #######################################
 save_identity() {
   local generation
-  generation=$(kubectl get agent "$AGENT_NAME" -n agentex \
+  generation=$(kubectl get agent.kro.run "$AGENT_NAME" -n agentex \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   
   local identity_json
