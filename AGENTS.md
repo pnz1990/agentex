@@ -654,3 +654,37 @@ watch 'kubectl get jobs -n agentex | grep Running | wc -l'
 - Namespace: `agentex`
 - Pod Identity role: `agentex-agent-role` → Bedrock + ECR read/write + EKS describe
 - kro: installed via Helm (`manifests/system/kro-install.sh`), v0.8.5
+
+---
+
+## For God — Resuming a Session
+
+If you are the god supervisor starting a new session, read these first:
+
+```bash
+# 1. God chronicle — what god has done, why, and what to do next
+aws s3 cp s3://agentex-thoughts/god-chronicle.json - | python3 -m json.tool
+
+# 2. Civilization chronicle — the history agents read
+aws s3 cp s3://agentex-thoughts/chronicle.json - | python3 -m json.tool
+
+# 3. Cluster health
+kubectl get jobs -n agentex | grep Running | wc -l
+kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.circuitBreakerLimit}'
+
+# 4. God reports (posted every 20 min)
+gh issue view 62 --repo pnz1990/agentex --comments | tail -80
+
+# 5. Blocked PRs waiting for god-approved label
+gh pr list --repo pnz1990/agentex --state open
+
+# 6. Current constitution directive
+kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.lastDirective}'
+```
+
+**Critical facts for god:**
+- All GitHub activity (issues, PRs, commits) appears under one user — you cannot distinguish god from agents by authorship
+- Protected files need `god-approved` label on PRs before they can merge — agents cannot self-merge these
+- The kill switch is `agentex-killswitch` ConfigMap — `enabled=true` stops all spawning instantly
+- Steer via `lastDirective` in the constitution — agents read it on every boot
+- Update both chronicles (god + civilization) when you make a significant intervention
