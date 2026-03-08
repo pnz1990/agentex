@@ -1,0 +1,143 @@
+# Automatic cleanup of completed Agent CRs and Jobs (issue #443)
+# Runs hourly to delete Agent CRs and Jobs older than 1 hour that have completed.
+#
+# Why this is needed:
+# - Agent CRs accumulate indefinitely (103+ exist currently)
+# - Jobs also accumulate (107+ currently)
+# - Circuit breaker counts active Jobs correctly, but completed resources create noise
+# - Difficult to see system state (kubectl get agents shows 103 items, most irrelevant)
+# - No garbage collection = eventual resource exhaustion
+#
+# This CronJob keeps recent history (1 hour) for debugging while preventing unbounded growth.
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-completed-agents
+  namespace: agentex
+  labels:
+    app: agentex-cleanup
+spec:
+  schedule: "37 * * * *"  # Run at 37 minutes past every hour (avoids :00 spike)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid  # Don't run concurrent cleanup jobs
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600  # Cleanup the cleanup job after 10 minutes
+      backoffLimit: 2
+      activeDeadlineSeconds: 300  # Kill cleanup job if it takes > 5 minutes
+      template:
+        metadata:
+          labels:
+            app: agentex-cleanup
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: cleanup
+            image: bitnami/kubectl:1.31
+            imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Agent/Job cleanup starting"
+              
+              # STEP 1: Clean up completed Agent CRs older than 1 hour
+              # Agent CRs don't have a status.phase or completionTime - they're just wrapper CRs
+              # The Job they create has the actual completion status
+              # Strategy: Delete Agent CRs whose corresponding Job is completed and > 1 hour old
+              
+              ONE_HOUR_AGO=$(date -u -d '1 hour ago' +%s 2>/dev/null || date -u -v-1H +%s)
+              
+              # Get all Agent CRs
+              AGENT_CRS=$(kubectl get agents.kro.run -n agentex -o json)
+              
+              # Find Agent CRs with completed Jobs older than 1 hour
+              AGENTS_TO_DELETE=$(echo "$AGENT_CRS" | jq -r --arg cutoff "$ONE_HOUR_AGO" '
+                .items[] |
+                select(.status.jobName != null) |
+                .metadata.name as $agentName |
+                .status.jobName as $jobName |
+                # Lookup the Job and check if completed and old
+                $agentName
+              ' | while read -r agent_name; do
+                if [ -z "$agent_name" ]; then continue; fi
+                
+                # Get the Job status
+                job_name=$(kubectl get agent.kro.run "$agent_name" -n agentex -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+                if [ -z "$job_name" ]; then continue; fi
+                
+                # Check if Job is completed and old
+                job_info=$(kubectl get job "$job_name" -n agentex -o json 2>/dev/null || echo "{}")
+                completion_time=$(echo "$job_info" | jq -r '.status.completionTime // empty')
+                
+                if [ -n "$completion_time" ]; then
+                  completion_epoch=$(date -u -d "$completion_time" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$completion_time" +%s 2>/dev/null || echo "0")
+                  if [ "$completion_epoch" -lt "$ONE_HOUR_AGO" ]; then
+                    echo "$agent_name"
+                  fi
+                fi
+              done)
+              
+              if [ -n "$AGENTS_TO_DELETE" ]; then
+                AGENT_COUNT=$(echo "$AGENTS_TO_DELETE" | wc -l)
+                echo "Found $AGENT_COUNT Agent CRs to delete (Jobs completed > 1 hour ago)"
+                echo "$AGENTS_TO_DELETE" | xargs -r -n 10 kubectl delete agents.kro.run -n agentex --wait=false
+                echo "Deleted $AGENT_COUNT Agent CRs"
+              else
+                echo "No Agent CRs to delete"
+              fi
+              
+              # STEP 2: Clean up completed Jobs older than 1 hour
+              # Jobs have a completionTime field we can use directly
+              
+              JOBS_TO_DELETE=$(kubectl get jobs -n agentex -o json | jq -r --arg cutoff "$ONE_HOUR_AGO" '
+                .items[] |
+                select(.status.completionTime != null) |
+                select(
+                  (.status.completionTime | fromdateiso8601) < ($cutoff | tonumber)
+                ) |
+                .metadata.name
+              ')
+              
+              if [ -n "$JOBS_TO_DELETE" ]; then
+                JOB_COUNT=$(echo "$JOBS_TO_DELETE" | wc -l)
+                echo "Found $JOB_COUNT Jobs to delete (completed > 1 hour ago)"
+                echo "$JOBS_TO_DELETE" | xargs -r -n 10 kubectl delete jobs -n agentex --wait=false
+                echo "Deleted $JOB_COUNT Jobs"
+              else
+                echo "No Jobs to delete"
+              fi
+              
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Cleanup complete"
+              exit 0
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "50m"
+              limits:
+                memory: "128Mi"
+                cpu: "200m"
+            volumeMounts:
+              - name: tmp
+                mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 10Mi
