@@ -15,7 +15,7 @@ spec:
       replyTo: string | default=""
     status:
       configMapName: ${messageConfigMap.metadata.name}
-      read: string | default="false"
+      read: ${messageConfigMap.data.read}
   resources:
     - id: messageConfigMap
       readyWhen:
@@ -38,4 +38,4 @@ spec:
           thread: ${schema.spec.thread}
           messageType: ${schema.spec.messageType}
           replyTo: ${schema.spec.replyTo}
-          read: ${schema.status.read}
+          read: "false"
