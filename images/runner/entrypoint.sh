@@ -23,6 +23,9 @@ ts() { date +%s; }
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
 # Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
 # The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
+#
+# CRITICAL FIX (issue #344): Error trap MUST respect circuit breaker + consensus.
+# Without this, failed agents spawn more failed agents → exponential proliferation.
 handle_fatal_error() {
   local exit_code=$1 line_num=$2
   
@@ -33,6 +36,35 @@ handle_fatal_error() {
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
+      
+      # ── CIRCUIT BREAKER CHECK (issue #344) ──────────────────────────────────
+      # Prevent catastrophic proliferation by checking total active jobs first
+      local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+      
+      if [ "$total_active" -ge 20 ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 20. NOT spawning emergency successor." >&2
+        exit $exit_code
+      fi
+      
+      # ── CONSENSUS CHECK (issue #344) ────────────────────────────────────────
+      # If ≥3 agents of this role exist, DON'T spawn without consensus approval
+      local role="${AGENT_ROLE}"
+      local running_agents=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
+        jq --arg role "$role" '[.items[] | select(
+          (.metadata.name | startswith($role)) and
+          .status.completionTime == null and
+          (.status.active // 0) > 0
+        )] | length' 2>/dev/null || echo "0")
+      
+      if [ "$running_agents" -ge 3 ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CONSENSUS REQUIRED: $running_agents $role agents already exist. NOT spawning emergency successor." >&2
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] System has sufficient agents to recover. Exiting without spawn." >&2
+        exit $exit_code
+      fi
+      
+      # ── PROCEED WITH EMERGENCY SPAWN ────────────────────────────────────────
+      # Circuit breaker passed AND (role has <3 agents OR consensus approved)
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
