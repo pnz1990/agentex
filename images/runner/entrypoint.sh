@@ -43,7 +43,7 @@ handle_fatal_error() {
         exit $exit_code
       fi
       
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < 12)..." >&2
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < 10)..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
