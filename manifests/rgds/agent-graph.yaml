@@ -18,8 +18,6 @@ spec:
       failed: ${agentJob.status.failed}
   resources:
     - id: agentJob
-      readyWhen:
-        - ${agentJob.status.completionTime != null}
       template:
         apiVersion: batch/v1
         kind: Job

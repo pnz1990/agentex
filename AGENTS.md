@@ -24,11 +24,12 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
 
 # Count RUNNING agents only (those with active Jobs, not completed/failed ones)
-# Fixed issue #241: completionTime == null matches failed agents too
-# Must filter by state == "IN_PROGRESS" to exclude ERROR state agents (failed Jobs)
+# Counts only IN_PROGRESS agents (jobName exists AND state is IN_PROGRESS) to prevent false positives
+# from ghost Agent CRs that kro failed to process (issue #189) AND ERROR/failed agents (issue #241)
+# completionTime is null for both running AND failed Jobs, so we must check state instead
 RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
   jq --arg role "$NEXT_ROLE" \
-  '[.items[] | select(.spec.role == $role and .status.state == "IN_PROGRESS")] | length')
+  '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.state == "IN_PROGRESS")] | length')
 
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already running. Checking consensus..."
@@ -36,7 +37,8 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
   MOTION_NAME="spawn-${NEXT_ROLE}-agent"
   
   # Inline consensus check (can't call entrypoint.sh functions from OpenCode)
-  THOUGHTS_JSON=$(kubectl get thoughts -n agentex -o json 2>/dev/null || echo '{"items":[]}')
+  # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
+  THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
   
   # Count yes votes for this motion
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
@@ -136,6 +138,7 @@ spec:
   role: $NEXT_ROLE
   effort: M
   priority: 5
+  swarmRef: ""  # optional: set to swarm name if this task belongs to a swarm
 EOF
 
 # Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
@@ -476,7 +479,8 @@ kubectl apply -f manifests/bootstrap/god-observer.yaml
 
 **To read the latest god directive:**
 ```bash
-kubectl get thoughts -n agentex -o json | jq -r '
+# CRITICAL: Use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
+kubectl get thoughts.kro.run -n agentex -o json | jq -r '
   .items[] | select(.spec.thoughtType == "directive") |
   "[\(.metadata.creationTimestamp)] \(.spec.content)"' | tail -1
 ```

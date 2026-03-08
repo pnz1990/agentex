@@ -20,6 +20,62 @@ WORKSPACE="/workspace"
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
 ts() { date +%s; }
 
+# ── Error trap handler for early-stage failures (issue #231) ──────────────────
+# Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
+# The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
+handle_fatal_error() {
+  local exit_code=$1 line_num=$2
+  
+  # Only trigger on actual errors (not normal exit 0)
+  if [ "$exit_code" -ne 0 ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME:-unknown}] FATAL ERROR at line $line_num (exit $exit_code)" >&2
+    
+    # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
+    # Check if we can reach the cluster before attempting spawn
+    if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death..." >&2
+      local next_agent="${AGENT_ROLE}-$(date +%s)"
+      local next_task="task-emergency-$(date +%s)"
+      
+      # Inline emergency spawn (don't call functions that might fail)
+      # Use || true to prevent trap recursion if kubectl fails
+      kubectl apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: $next_task
+  namespace: ${NAMESPACE}
+spec:
+  title: "Emergency continuation after ${AGENT_NAME} fatal error"
+  description: "Previous agent died at line $line_num with exit code $exit_code. Continue platform improvement."
+  role: ${AGENT_ROLE}
+  effort: M
+  priority: 10
+EOF
+      kubectl apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Agent
+metadata:
+  name: $next_agent
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/spawned-by: ${AGENT_NAME}
+    agentex/emergency-spawn: "true"
+    agentex/generation: "1"
+spec:
+  role: ${AGENT_ROLE}
+  taskRef: $next_task
+  model: ${BEDROCK_MODEL}
+EOF
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn attempted: $next_agent" >&2
+    fi
+  fi
+}
+
+# Register trap for ERR (but NOT EXIT - that would trigger on normal completion too)
+# Only trigger on errors, not on successful exits
+trap 'handle_fatal_error $? $LINENO' ERR
+
 # ── 0. Validate critical environment variables ────────────────────────────────
 # Fail fast if required variables are missing to prevent cascading silent failures
 if [ -z "$TASK_CR_NAME" ]; then
@@ -225,7 +281,7 @@ check_consensus() {
   local total_votes="${threshold#*/}"
   
   # Get all proposal and vote Thoughts for this motion
-  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
   # Find the proposal
   local proposal=$(echo "$thoughts_json" | jq -r \
@@ -239,16 +295,16 @@ check_consensus() {
     return 0
   fi
   
-  # Count yes and no votes
+  # Count yes and no votes (deduplicate by agentRef to prevent vote stuffing)
   local yes_votes=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
-     .spec.agentRef' | wc -l)
+    '[.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+     .spec.agentRef] | unique | length')
   
   local no_votes=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
-     .spec.agentRef' | wc -l)
+    '[.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+     .spec.agentRef] | unique | length')
   
   log "Consensus check: motion=$motion_name yes=$yes_votes no=$no_votes threshold=$threshold"
   
@@ -312,7 +368,7 @@ check_proposal_age() {
   local motion_name="$1"
   
   # Get all proposal Thoughts for this motion
-  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
   # Find the proposal and extract its creation timestamp
   local proposal_time=$(echo "$thoughts_json" | jq -r \
@@ -342,13 +398,14 @@ check_proposal_age() {
 should_spawn_agent() {
   local role="$1"
   
-  # Count ACTIVE agents of the same role (IN_PROGRESS state only)
-  # Fixed issue #241: completionTime == null matches failed agents too
-  # Must filter by state to exclude ERROR state agents (failed Jobs)
+  # Count ACTIVE agents of the same role (with jobName AND state is IN_PROGRESS)
+  # This prevents false positives from ghost Agent CRs that kro failed to process (issue #189)
+  # AND from ERROR/failed agents (issue #241)
+  # completionTime is null for both running AND failed Jobs, so we must check state instead
   local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
     jq --arg role "$role" '
       [.items[] | 
-       select(.spec.role == $role and .status.state == "IN_PROGRESS")] | 
+       select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.state == "IN_PROGRESS")] | 
       length
     ' 2>/dev/null || echo "0")
   
@@ -537,7 +594,7 @@ done
 # CRITICAL: Must sort by creationTimestamp to get the actual LAST 10 thoughts
 # Bug #89: .items[-10:] on unsorted output may return random 10, not the latest 10
 # Optimization #117: Fetch only the last 50 thoughts instead of all thoughts for better performance
-THOUGHTS_JSON=$(kubectl get thoughts -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp --limit=50 -o json 2>/dev/null || echo '{"items":[]}')
+THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp --limit=50 -o json 2>/dev/null || echo '{"items":[]}')
 PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
   '.items[-10:] | .[] | 
@@ -861,7 +918,7 @@ fi
 ESCALATED_ROLE=""
 
 # Check all Thought CRs posted by THIS agent during this run for structural blockers
-BLOCKER_THOUGHTS=$(kubectl get thoughts -n "$NAMESPACE" \
+BLOCKER_THOUGHTS=$(kubectl get thoughts.kro.run -n "$NAMESPACE" \
   -l "agentex/agent=$AGENT_NAME" \
   -o json 2>/dev/null | jq -r \
   --arg name "$AGENT_NAME" \
@@ -966,6 +1023,19 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   # Set agent name to match role (fix for issue #111)
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
+  # CIRCUIT BREAKER (issue #251): Block emergency spawn if system overloaded
+  # This prevents emergency perpetuation from bypassing the global circuit breaker.
+  # Same check as spawn_agent() at line 374-380.
+  TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$TOTAL_ACTIVE" -ge 15 ]; then
+    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 15). Blocking emergency spawn."
+    post_thought "Emergency spawn blocked by circuit breaker: $TOTAL_ACTIVE active jobs exceed safety limit (15). Civilization will pause until load decreases. Manual intervention may be needed to clean up stuck agents." "blocker" 10
+    NEEDS_EMERGENCY_SPAWN=false
+    # Don't exit - let the agent finish reporting
+  fi
+
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
   # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
   # Agent CRs are removed once Jobs complete, so counting them gives false negatives.
@@ -994,31 +1064,50 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
       PROPOSAL_AGE=$(check_proposal_age "$MOTION_NAME")
       
       if [ "$PROPOSAL_AGE" -ge 9999 ]; then
-        # No proposal exists yet - create one
-        log "Consensus PENDING: creating NEW proposal for spawning $NEXT_ROLE agent"
-        DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-        propose_motion "$MOTION_NAME" \
-          "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
-          "3/5" \
-          "$DEADLINE"
-        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        # No proposal exists yet - wait 2s and recheck to avoid race condition
+        # (another agent may have just created one)
+        log "Consensus check: no proposal found for '$MOTION_NAME', waiting 2s to avoid race..."
+        sleep 2
+        PROPOSAL_AGE=$(check_proposal_age "$MOTION_NAME")
         
-        log "Consensus proposal created. Spawning (grace period: proposal is fresh)."
-        # Allow spawn because proposal is brand new (< 1 second old)
-      elif [ "$PROPOSAL_AGE" -lt 300 ]; then
-        # Proposal exists and is < 5 minutes old - allow spawn (grace period for voting)
-        log "Consensus PENDING but recent (age=${PROPOSAL_AGE}s < 300s). Spawning for liveness."
+        if [ "$PROPOSAL_AGE" -ge 9999 ]; then
+          # Still no proposal after retry - create one
+          log "Consensus PENDING: creating NEW proposal for spawning $NEXT_ROLE agent"
+          DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+          propose_motion "$MOTION_NAME" \
+            "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
+            "3/5" \
+            "$DEADLINE"
+          cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+          
+          # BLOCK spawn even though we created proposal - let another agent spawn after voting
+          # This prevents every agent from spawning during the grace period
+          log "Consensus proposal created. BLOCKING spawn to allow other agents to vote first."
+          post_thought "Emergency spawn blocked: created consensus proposal '$MOTION_NAME', but blocking spawn to allow voting period. $RUNNING_AGENTS $NEXT_ROLE agents already running." "blocker" 5
+          NEEDS_EMERGENCY_SPAWN=false
+        else
+          # Proposal now exists (created by another agent) - vote on it
+          log "Consensus PENDING: proposal now exists (age=${PROPOSAL_AGE}s), voting on it"
+          cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+          
+          # Only spawn if proposal is very recent (< 30s) to reduce proliferation
+          if [ "$PROPOSAL_AGE" -lt 30 ]; then
+            log "Consensus PENDING but fresh (age=${PROPOSAL_AGE}s < 30s). Spawning for liveness."
+          else
+            log "Consensus PENDING but not fresh (age=${PROPOSAL_AGE}s ≥ 30s). BLOCKING spawn to prevent proliferation."
+            post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME'. $RUNNING_AGENTS $NEXT_ROLE agents already exist. Voted yes but blocking spawn." "blocker" 5
+            NEEDS_EMERGENCY_SPAWN=false
+          fi
+        fi
+      elif [ "$PROPOSAL_AGE" -lt 30 ]; then
+        # Proposal exists and is < 30 seconds old - vote and allow spawn (grace period for voting)
+        log "Consensus PENDING but fresh (age=${PROPOSAL_AGE}s < 30s). Voting and spawning for liveness."
         cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
       else
-        # Proposal is stale (≥ 5 minutes old) - block spawn
-        # Issue #230: Clarify blocker message (don't show 9999s for nonexistent proposals)
-        if [ "$PROPOSAL_AGE" -ge 9999 ]; then
-          log "Consensus check: proposal '$MOTION_NAME' doesn't exist. BLOCKING spawn (race condition)."
-          post_thought "Emergency spawn blocked: no consensus proposal for motion '$MOTION_NAME' exists, but $RUNNING_AGENTS $NEXT_ROLE agents already exist. Another agent may have created proposal between checks." "blocker" 5
-        else
-          log "Consensus PENDING and STALE (age=${PROPOSAL_AGE}s ≥ 300s). BLOCKING spawn to prevent proliferation."
-          post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME' (stale proposal). $RUNNING_AGENTS $NEXT_ROLE agents already exist." "blocker" 5
-        fi
+        # Proposal exists but is ≥ 30 seconds old - vote but block spawn
+        log "Consensus PENDING and aging (age=${PROPOSAL_AGE}s ≥ 30s). Voting but BLOCKING spawn to prevent proliferation."
+        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME'. $RUNNING_AGENTS $NEXT_ROLE agents already exist. Voted yes but blocking spawn." "blocker" 5
         NEEDS_EMERGENCY_SPAWN=false
       fi
     fi
