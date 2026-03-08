@@ -86,6 +86,22 @@ EOF
     log "ERROR: Failed to create Thought CR $thought_name: $err_output"
     return 0  # Don't fail the agent, but log the error
   }
+  
+  # Wait for Thought CR to actually exist in the cluster (fix for issue #221)
+  # kubectl apply returns before API server commits the resource, causing consensus to fail
+  local retries=0
+  while [ $retries -lt 10 ]; do
+    if kubectl get thought "$thought_name" -n "$NAMESPACE" &>/dev/null; then
+      break
+    fi
+    sleep 0.1
+    retries=$((retries + 1))
+  done
+  
+  if [ $retries -eq 10 ]; then
+    log "WARNING: Thought CR $thought_name created but not visible after 1s (cluster lag?)"
+  fi
+  
   push_metric "ThoughtCreated" 1
 
   # Persist thought to S3 for long-term memory (survives cluster restarts)
