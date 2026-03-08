@@ -143,10 +143,10 @@ if [ -n "$DIRECT_MSGS" ] || [ -n "$BROADCAST_MSGS" ]; then
   INBOX_MESSAGES=$(printf "=== INBOX ===\n%s\n%s\n=============\n" "$DIRECT_MSGS" "$BROADCAST_MSGS")
 fi
 
-# Mark all messages as read by patching the ConfigMap backing each Message CR
+# Mark all unread messages as read by patching the ConfigMap backing each Message CR
 for msg_name in $(echo "$INBOX_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
-  '.items[] | select(.spec.to == $name or .spec.to == "broadcast") | .metadata.name' \
+  '.items[] | select((.spec.to == $name or .spec.to == "broadcast") and (.status.read == false or .status.read == null)) | .metadata.name' \
   2>/dev/null || true); do
   # Patch the ConfigMap, not the Message CR. kro status fields are output-only.
   kubectl patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
