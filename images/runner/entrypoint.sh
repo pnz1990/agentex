@@ -404,22 +404,20 @@ check_proposal_age() {
 # Usage: if should_spawn_agent "worker"; then spawn_agent ...; fi
 should_spawn_agent() {
   local role="$1"
-
-  # Count running Jobs for this role (Jobs have reliable completionTime; Agent CRs do not).
-  # A job is "active" if it has no completionTime and at least one active pod.
-  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(
-      (.metadata.name | startswith($role)) and
-      .status.completionTime == null and
-      (.status.active // 0) > 0
-    )] | length' 2>/dev/null || echo "0")
-
+  
+  # Count ACTIVE Agent CRs (without completionTime) for this role.
+  # DO NOT use jobs.status.active - that counts running pods which persist after agent completes.
+  # Use Agent.status.completionTime == null to only count agents that are actually running.
+  # This matches the check in spawn_agent() below.
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  
   if [ "$running_agents" -ge 3 ]; then
-    log "should_spawn_agent: $running_agents active jobs with role=$role (threshold: 3)"
+    log "should_spawn_agent: $running_agents agents with role=$role exist (threshold: 3)"
     echo "$running_agents"
     return 1  # Consensus required
   else
-    log "should_spawn_agent: $running_agents active jobs with role=$role (safe to spawn)"
+    log "should_spawn_agent: $running_agents agents with role=$role exist (safe to spawn)"
     echo "$running_agents"
     return 0  # Safe to spawn
   fi
@@ -430,26 +428,23 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
-  # GLOBAL CIRCUIT BREAKER (issue #182, #201): Hard limit to prevent catastrophic proliferation.
-  # Count active Jobs (status.completionTime == null AND status.active > 0).
-  # NOTE: Agent CRs never get completionTime set by kro — always use Jobs for counting.
-  local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-
-  if [ "$total_active" -ge 20 ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 20). BLOCKING spawn."
-    post_thought "Circuit breaker: $total_active active jobs >= 20. Spawn blocked." "blocker" 10
-    return 1
+  # GLOBAL CIRCUIT BREAKER (issue #182, #201): Hard limit to prevent catastrophic proliferation
+  # Count TOTAL active Agent CRs (without completionTime). If >= 15, BLOCK all spawns.
+  # This is a safety mechanism to prevent runaway proliferation that could crash the cluster.
+  # DO NOT use jobs.status.active - that counts running pods which persist after agent completes.
+  local total_active=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$total_active" -ge 15 ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active agents (limit: 15). BLOCKING spawn to prevent system overload."
+    post_thought "Circuit breaker activated: $total_active active agents exceed safety limit (15). Spawn blocked. System may need manual cleanup of stuck agents." "blocker" 10
+    return 1  # Hard block - too many agents
   fi
 
   # CONSENSUS CHECK (issue #137): Prevent per-role proliferation.
-  # Count Jobs for this role that are still running (no completionTime).
-  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(
-      (.metadata.name | startswith($role)) and
-      .status.completionTime == null and
-      (.status.active // 0) > 0
-    )] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE Agent CRs (without completionTime) for this role.
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
