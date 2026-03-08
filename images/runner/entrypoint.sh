@@ -404,14 +404,14 @@ check_proposal_age() {
 should_spawn_agent() {
   local role="$1"
   
-  # Count ACTIVE agents of the same role (with jobName AND active == 1)
+  # Count ACTIVE agents of the same role (without completionTime)
   # This prevents false positives from ghost Agent CRs that kro failed to process (issue #189)
   # AND from ERROR/failed agents (issue #241)
-  # active == 1 means Job has a running pod; succeeded/failed means Job is done
+  # Use completionTime == null to match spawn_agent() logic (issue #308)
   local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
     jq --arg role "$role" '
       [.items[] | 
-       select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.active == 1)] | 
+       select(.spec.role == $role and .status.completionTime == null)] | 
       length
     ' 2>/dev/null || echo "0")
   
@@ -455,7 +455,7 @@ spawn_agent() {
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
     
     # Check if a proposal already exists for spawning more agents of this role
-    local motion_name="spawn-more-${role}-agents"
+    local motion_name="spawn-${role}-agent"
     local consensus_result=$(check_consensus "$motion_name" "3/5")
     
     if [ "$consensus_result" = "yes" ]; then
@@ -1063,7 +1063,7 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     CONSENSUS_REQUIRED=true
     
     # Check if a proposal already exists for spawning more agents of this role
-    MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
+    MOTION_NAME="spawn-${NEXT_ROLE}-agent"
     CONSENSUS_RESULT=$(check_consensus "$MOTION_NAME" "3/5")
     
     if [ "$CONSENSUS_RESULT" = "yes" ]; then
