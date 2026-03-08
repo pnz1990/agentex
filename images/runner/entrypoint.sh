@@ -95,7 +95,8 @@ EOF
     local s3_key="${AGENT_NAME}-${thought_name}.json"
     
     # Create JSON document with full thought metadata
-    cat <<JSON | aws s3 cp - "s3://agentex-thoughts/${s3_key}" --content-type application/json 2>/dev/null || true
+    local s3_output
+    if ! s3_output=$(cat <<JSON | aws s3 cp - "s3://agentex-thoughts/${s3_key}" --content-type application/json 2>&1
 {
   "name": "${thought_name}",
   "agentRef": "${AGENT_NAME}",
@@ -106,6 +107,9 @@ EOF
   "content": $(echo "$content" | jq -Rs .)
 }
 JSON
+); then
+      log "WARNING: Failed to persist thought to S3 (key=${s3_key}): ${s3_output}"
+    fi
   fi
 }
 
