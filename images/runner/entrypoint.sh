@@ -1011,8 +1011,14 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
         cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
       else
         # Proposal is stale (≥ 5 minutes old) - block spawn
-        log "Consensus PENDING and STALE (age=${PROPOSAL_AGE}s ≥ 300s). BLOCKING spawn to prevent proliferation."
-        post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME'. $RUNNING_AGENTS $NEXT_ROLE agents already exist." "blocker" 5
+        # Issue #230: Clarify blocker message (don't show 9999s for nonexistent proposals)
+        if [ "$PROPOSAL_AGE" -ge 9999 ]; then
+          log "Consensus check: proposal '$MOTION_NAME' doesn't exist. BLOCKING spawn (race condition)."
+          post_thought "Emergency spawn blocked: no consensus proposal for motion '$MOTION_NAME' exists, but $RUNNING_AGENTS $NEXT_ROLE agents already exist. Another agent may have created proposal between checks." "blocker" 5
+        else
+          log "Consensus PENDING and STALE (age=${PROPOSAL_AGE}s ≥ 300s). BLOCKING spawn to prevent proliferation."
+          post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME' (stale proposal). $RUNNING_AGENTS $NEXT_ROLE agents already exist." "blocker" 5
+        fi
         NEEDS_EMERGENCY_SPAWN=false
       fi
     fi
