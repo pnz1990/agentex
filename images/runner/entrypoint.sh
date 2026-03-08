@@ -34,6 +34,14 @@ kubectl_with_timeout() {
 CIRCUIT_BREAKER_LIMIT=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
 if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
+
+# Read vision and generation for agent self-assessment (issue #476)
+CIVILIZATION_VISION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.vision}' 2>/dev/null || echo "")
+CIVILIZATION_GENERATION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "1")
+if ! [[ "$CIVILIZATION_GENERATION" =~ ^[0-9]+$ ]]; then CIVILIZATION_GENERATION=1; fi
+
 ts() { date +%s; }
 
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
@@ -842,6 +850,18 @@ MANIFEST
 
 PROMPT=$(cat <<PROMPT
 ${PERPETUATION_MANIFEST}
+
+═══════════════════════════════════════════════════════
+CIVILIZATION CONTEXT (from constitution)
+═══════════════════════════════════════════════════════
+Generation: ${CIVILIZATION_GENERATION}
+Circuit Breaker: ${CIRCUIT_BREAKER_LIMIT} active jobs max
+
+Vision:
+${CIVILIZATION_VISION}
+
+Use this vision to self-assess your work alignment (visionScore in Report).
+Check generation to prioritize generation-appropriate work.
 
 ═══════════════════════════════════════════════════════
 YOUR IDENTITY
