@@ -724,14 +724,14 @@ if [ "$OPENCODE_EXIT" -eq 0 ]; then
   patch_task_status "Done" "Completed successfully"
   post_message "broadcast" "Done: $TASK_TITLE (agent=$AGENT_NAME)" "status"
   post_thought "Task finished. Successor should be spawned." "observation" 9
-  file_report "completed" "$TASK_TITLE completed successfully" "none" 8
+  post_report 8 "$TASK_TITLE completed successfully" "" "" "" "" 0
 else
   log "OpenCode exited with code $OPENCODE_EXIT"
   patch_task_status "Done" "exit=$OPENCODE_EXIT"
   post_message "broadcast" "Finished (exit=$OPENCODE_EXIT): $TASK_TITLE" "status"
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
   push_metric "AgentFailure" 1
-  file_report "failed" "Agent failed with exit code $OPENCODE_EXIT" "Agent execution failure" 3
+  post_report 3 "Agent failed with exit code $OPENCODE_EXIT" "" "" "Agent execution failure" "" "$OPENCODE_EXIT"
 fi
 
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
@@ -933,15 +933,7 @@ if [ -n "$SWARM_REF" ]; then
   # Increment tasks completed
   NEW_TASKS=$(( CURRENT_TASKS + 1 ))
   
-  # Update last activity timestamp
-  TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  
-  # Patch swarm state
-  kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
-    --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
-    2>/dev/null || true
-  
-  # Check for dissolution condition (only if not already disbanded)
+  # Check for dissolution condition BEFORE updating timestamp (only if not already disbanded)
   if [ "$CURRENT_PHASE" != "Disbanded" ]; then
     # Get all tasks associated with this swarm
     SWARM_TASKS=$(kubectl get tasks -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
@@ -951,11 +943,23 @@ if [ -n "$SWARM_REF" ]; then
     
     log "Swarm $SWARM_REF: $DONE_TASKS/$TOTAL_TASKS tasks done, $PENDING_TASKS pending"
     
+    # Only update timestamp if there are still pending tasks
+    # This allows the idle timer to accumulate when all tasks are done
+    if [ "$PENDING_TASKS" -gt 0 ]; then
+      TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    else
+      # All tasks done - preserve existing timestamp to allow dissolution
+      TIMESTAMP=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
+      if [ -z "$TIMESTAMP" ]; then
+        # First completion - set initial timestamp
+        TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      fi
+    fi
+    
     # Dissolution condition: all tasks done AND no activity for 5 minutes
     if [ "$PENDING_TASKS" -eq 0 ] && [ "$TOTAL_TASKS" -gt 0 ]; then
-      LAST_ACTIVITY=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
-      if [ -n "$LAST_ACTIVITY" ]; then
-        LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null || echo 0)
+      if [ -n "$TIMESTAMP" ]; then
+        LAST_EPOCH=$(date -d "$TIMESTAMP" +%s 2>/dev/null || echo 0)
         NOW_EPOCH=$(date +%s)
         IDLE_SECONDS=$(( NOW_EPOCH - LAST_EPOCH ))
         
@@ -975,7 +979,18 @@ if [ -n "$SWARM_REF" ]; then
         fi
       fi
     fi
+  else
+    # Swarm already disbanded - preserve timestamp
+    TIMESTAMP=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
+    if [ -z "$TIMESTAMP" ]; then
+      TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
   fi
+  
+  # Patch swarm state with updated values
+  kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
+    2>/dev/null || true
 fi
 
 log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE"
