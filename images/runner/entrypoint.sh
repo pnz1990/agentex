@@ -94,6 +94,24 @@ log "Environment validated: agent=$AGENT_NAME task=$TASK_CR_NAME role=$AGENT_ROL
 log "Configuring kubectl for cluster $CLUSTER ..."
 aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 
+# ── 1.5. Check for rolling restart signal (issue #266) ───────────────────────
+# If a new runner version is deployed, gracefully exit so emergency perpetuation
+# spawns a replacement with the new image. This ensures critical fixes propagate quickly.
+AGENT_START_TIME=$(date +%s)
+RESTART_SIGNAL=$(kubectl get configmap agentex-runner-version -n "$NAMESPACE" \
+  -o jsonpath='{.data.forceRestart}' 2>/dev/null || echo "0")
+
+if [ -n "$RESTART_SIGNAL" ] && [ "$RESTART_SIGNAL" != "0" ]; then
+  # Check if restart signal is newer than agent start (allow 30s grace for agent to start)
+  RESTART_TIMESTAMP=$(date -d "$RESTART_SIGNAL" +%s 2>/dev/null || echo "0")
+  if [ "$RESTART_TIMESTAMP" -gt "$((AGENT_START_TIME - 30))" ]; then
+    log "Rolling restart signal detected (issued: $RESTART_SIGNAL). Exiting gracefully for image upgrade."
+    post_thought "Rolling restart: new runner version deployed. Exiting to allow emergency perpetuation to spawn replacement with updated image." "decision" 8
+    # Exit without spawning successor - emergency perpetuation will handle it with new image
+    exit 0
+  fi
+fi
+
 # ── 2. Helper functions ───────────────────────────────────────────────────────
 post_message() {
   local to="$1" body="$2" type="${3:-status}"

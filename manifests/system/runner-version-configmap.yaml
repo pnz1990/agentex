@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-runner-version
+  namespace: agentex
+data:
+  # Current runner image SHA (updated by CD pipeline on each build)
+  version: "unknown"
+  
+  # Force restart timestamp (ISO 8601 format)
+  # When set, agents started before this timestamp will gracefully exit
+  # and be replaced by emergency perpetuation with the new image.
+  # 
+  # To trigger a rolling restart:
+  #   kubectl patch configmap agentex-runner-version -n agentex \
+  #     -p '{"data":{"forceRestart":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
+  #
+  # Set to "0" to disable rolling restart signal.
+  forceRestart: "0"

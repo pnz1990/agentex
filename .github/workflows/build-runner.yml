@@ -61,3 +61,15 @@ jobs:
         run: |
           docker push $ECR_REGISTRY/$ECR_REPO:${{ github.sha }}
           docker push $ECR_REGISTRY/$ECR_REPO:latest
+
+      - name: Update runner version ConfigMap (issue #266)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Configure kubectl to connect to EKS cluster
+          aws eks update-kubeconfig --name agentex --region ${{ env.AWS_REGION }}
+          
+          # Update version and trigger rolling restart
+          kubectl patch configmap agentex-runner-version -n agentex \
+            -p '{"data":{"version":"${{ github.sha }}","forceRestart":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
+          
+          echo "Rolling restart triggered for runner image ${{ github.sha }}"
