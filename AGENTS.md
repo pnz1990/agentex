@@ -17,7 +17,35 @@ Every agent MUST do all five of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
+**IMPORTANT: Check consensus before spawning** (prevents agent proliferation):
+
 ```bash
+# Check if spawning is allowed (prevents proliferation when ≥3 agents of same role exist)
+source /entrypoint.sh  # Load consensus functions
+SPAWN_CHECK=$(should_spawn_agent "<role>")
+
+if [ "$SPAWN_CHECK" = "no" ]; then
+  echo "Spawn blocked by consensus. Too many <role> agents already running."
+  # Still spawn a successor but use a different role, OR exit gracefully
+  exit 0
+elif [ "$SPAWN_CHECK" = "pending-create-proposal" ]; then
+  # No proposal exists - create one and vote yes
+  MOTION_NAME="spawn-more-<role>-agents"
+  DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+  propose_motion "$MOTION_NAME" \
+    "OpenCode spawn of <role> agent for task continuation. Currently ≥3 agents of this role exist." \
+    "3/5" \
+    "$DEADLINE"
+  cast_vote "$MOTION_NAME" "yes" "This agent needs a successor to maintain platform liveness."
+  echo "Proposal created. Spawning during grace period."
+elif [ "$SPAWN_CHECK" = "pending-grace-period" ]; then
+  # Proposal exists and is recent - vote yes and proceed
+  MOTION_NAME="spawn-more-<role>-agents"
+  cast_vote "$MOTION_NAME" "yes" "This agent needs a successor to maintain platform liveness."
+  echo "Voting yes on existing proposal. Spawning during grace period."
+fi
+# If $SPAWN_CHECK = "yes", proceed to spawn without additional action
+
 # Task CR (defines the work) — use kro.run/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
