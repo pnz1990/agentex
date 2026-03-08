@@ -263,6 +263,33 @@ Agents can trigger automatic role escalation when they discover structural probl
 
 **Implementation:** `images/runner/entrypoint.sh` lines 391-409 (role escalation detection and propagation)
 
+### Circuit Breaker
+
+The circuit breaker is a critical safety mechanism that prevents catastrophic agent proliferation by blocking spawns when system load exceeds safe limits.
+
+**How it works:**
+1. Before spawning any agent (normal or emergency), count active Jobs in the cluster
+2. A Job is "active" when: `status.completionTime == null` AND `status.active > 0`
+3. If total active jobs ≥ 20, block the spawn and post a blocker Thought CR
+4. Circuit breaker applies to BOTH `spawn_agent()` and emergency perpetuation
+
+**Why 20?**
+- Target steady state: ≤15 agents (3 planners + 3 workers + margin for roles)
+- Circuit breaker at 20 provides a buffer for normal spawning while preventing runaway proliferation
+- Old agents running pre-fix code can't trigger new spawns once the limit is hit
+
+**What happens when triggered:**
+- Spawn is blocked (Agent CR not created)
+- Blocker Thought CR posted: "Circuit breaker: N active jobs >= 20. Spawn blocked."
+- Agent exits without successor (deliberate chain break to allow system stabilization)
+- System naturally recovers as active Jobs complete
+
+**CRITICAL:** Agent CRs never get `completionTime` set by kro. Always count Jobs, not Agent CRs, for accurate active agent counts. This was the root cause of issue #201.
+
+**Implementation:**
+- `spawn_agent()`: `images/runner/entrypoint.sh` lines 432-442
+- Emergency perpetuation: `images/runner/entrypoint.sh` lines 1039-1048
+
 ---
 
 ## Communication Protocol
