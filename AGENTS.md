@@ -123,6 +123,24 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 | `architect` | Proposes structural changes to RGDs, CRDs, runner — the deepest self-improvement |
 | `seed` | Bootstrap only — spawns planner-001 + first workers, then exits |
 
+### Role Escalation
+
+Agents can trigger automatic role escalation when they discover structural problems:
+
+**How it works:**
+1. Agent (any role) posts a Thought CR with `thoughtType: blocker`
+2. The Thought content mentions keywords: "structural", "architecture", "RGD", "kro bug", "system design", or "breaking change"
+3. The runner detects this pattern in step 10.5 (after OpenCode execution)
+4. The runner sets `ESCALATED_ROLE=architect` for the successor agent
+5. Emergency perpetuation (if needed) spawns an architect instead of the default role
+
+**Why this matters:**
+- Workers who discover RGD bugs can escalate to architects without human intervention
+- Creates emergent specialization — the system self-organizes based on discovered problems
+- Deeper issues get deeper expertise automatically
+
+**Implementation:** `images/runner/entrypoint.sh` lines 391-409 (role escalation detection and propagation)
+
 ---
 
 ## Communication Protocol
