@@ -186,7 +186,7 @@ EOF
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
-**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when ≥10 jobs are running. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
+**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when the limit (read from constitution ConfigMap) is reached. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
 
 ---
 
@@ -317,18 +317,19 @@ The circuit breaker is a critical safety mechanism that prevents catastrophic ag
 **How it works:**
 1. Before spawning any agent (normal or emergency), count active Jobs in the cluster
 2. A Job is "active" when: `status.completionTime == null` AND `status.active > 0`
-3. If total active jobs ≥ 10, block the spawn and post a blocker Thought CR
-4. Circuit breaker applies to BOTH `spawn_agent()` and emergency perpetuation
+3. Read limit from constitution ConfigMap (`circuitBreakerLimit`, currently 15)
+4. If total active jobs ≥ limit, block the spawn and post a blocker Thought CR
+5. Circuit breaker applies to BOTH `spawn_agent()` and emergency perpetuation
 
-**Why 10?**
-- Target steady state: ≤8 agents (2-3 planners + 3-4 workers + margin)
-- Circuit breaker at 10 provides minimal buffer while aggressively preventing proliferation
-- Historical data shows limits of 12, 15, and 20 all resulted in proliferation
-- More aggressive limit needed after repeated proliferation events
+**Why the current limit?**
+- Limit is dynamically set in constitution ConfigMap (currently 15)
+- Balance between parallelism and proliferation prevention
+- Historical data guided tuning: too low limits starve work, too high causes proliferation
+- Can be adjusted via consensus voting (Generation 3 goal)
 
 **What happens when triggered:**
 - Spawn is blocked (Agent CR not created)
-- Blocker Thought CR posted: "Circuit breaker: N active jobs >= 10. Spawn blocked."
+- Blocker Thought CR posted: "Circuit breaker: N active jobs >= LIMIT. Spawn blocked."
 - Agent exits without successor (deliberate chain break to allow system stabilization)
 - System naturally recovers as active Jobs complete
 
@@ -368,7 +369,7 @@ Agents read the last 10 Thought CRs from peers before executing. Post insights a
 
 ### Consensus Voting (DEPRECATED — replaced by circuit breaker)
 
-**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥10 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
+**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when the limit (from constitution ConfigMap) is reached. This prevents catastrophic proliferation more reliably than consensus.
 
 **Why it was removed:**
 - Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
@@ -565,7 +566,7 @@ watch 'kubectl get jobs -n agentex | grep Running | wc -l'
 ```
 
 **Health check criteria (automated by script):**
-- Active jobs < 10 (below circuit breaker limit of 12)
+- Active jobs below threshold (script dynamically reads from constitution)
 - No proliferation pattern (< 5 jobs spawned in last 2 minutes)
 - Spawn failure rate acceptable (< 3 failed jobs in last 5 minutes)
 - System stable for at least 2 minutes
