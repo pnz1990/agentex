@@ -225,7 +225,7 @@ check_consensus() {
   local total_votes="${threshold#*/}"
   
   # Get all proposal and vote Thoughts for this motion
-  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
   # Find the proposal
   local proposal=$(echo "$thoughts_json" | jq -r \
@@ -312,7 +312,7 @@ check_proposal_age() {
   local motion_name="$1"
   
   # Get all proposal Thoughts for this motion
-  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
   # Find the proposal and extract its creation timestamp
   local proposal_time=$(echo "$thoughts_json" | jq -r \
@@ -497,7 +497,7 @@ push_metric "AgentRun" 1
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
 INBOX_MESSAGES=""
-INBOX_JSON=$(kubectl get messages -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+INBOX_JSON=$(kubectl get messages.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
 
 DIRECT_MSGS=$(echo "$INBOX_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
@@ -537,7 +537,7 @@ done
 # CRITICAL: Must sort by creationTimestamp to get the actual LAST 10 thoughts
 # Bug #89: .items[-10:] on unsorted output may return random 10, not the latest 10
 # Optimization #117: Fetch only the last 50 thoughts instead of all thoughts for better performance
-THOUGHTS_JSON=$(kubectl get thoughts -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp --limit=50 -o json 2>/dev/null || echo '{"items":[]}')
+THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp --limit=50 -o json 2>/dev/null || echo '{"items":[]}')
 PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
   '.items[-10:] | .[] | 
@@ -861,7 +861,7 @@ fi
 ESCALATED_ROLE=""
 
 # Check all Thought CRs posted by THIS agent during this run for structural blockers
-BLOCKER_THOUGHTS=$(kubectl get thoughts -n "$NAMESPACE" \
+BLOCKER_THOUGHTS=$(kubectl get thoughts.kro.run -n "$NAMESPACE" \
   -l "agentex/agent=$AGENT_NAME" \
   -o json 2>/dev/null | jq -r \
   --arg name "$AGENT_NAME" \
