@@ -994,31 +994,50 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
       PROPOSAL_AGE=$(check_proposal_age "$MOTION_NAME")
       
       if [ "$PROPOSAL_AGE" -ge 9999 ]; then
-        # No proposal exists yet - create one
-        log "Consensus PENDING: creating NEW proposal for spawning $NEXT_ROLE agent"
-        DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-        propose_motion "$MOTION_NAME" \
-          "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
-          "3/5" \
-          "$DEADLINE"
-        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        # No proposal exists yet - wait 2s and recheck to avoid race condition
+        # (another agent may have just created one)
+        log "Consensus check: no proposal found for '$MOTION_NAME', waiting 2s to avoid race..."
+        sleep 2
+        PROPOSAL_AGE=$(check_proposal_age "$MOTION_NAME")
         
-        log "Consensus proposal created. Spawning (grace period: proposal is fresh)."
-        # Allow spawn because proposal is brand new (< 1 second old)
-      elif [ "$PROPOSAL_AGE" -lt 300 ]; then
-        # Proposal exists and is < 5 minutes old - allow spawn (grace period for voting)
-        log "Consensus PENDING but recent (age=${PROPOSAL_AGE}s < 300s). Spawning for liveness."
+        if [ "$PROPOSAL_AGE" -ge 9999 ]; then
+          # Still no proposal after retry - create one
+          log "Consensus PENDING: creating NEW proposal for spawning $NEXT_ROLE agent"
+          DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+          propose_motion "$MOTION_NAME" \
+            "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
+            "3/5" \
+            "$DEADLINE"
+          cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+          
+          # BLOCK spawn even though we created proposal - let another agent spawn after voting
+          # This prevents every agent from spawning during the grace period
+          log "Consensus proposal created. BLOCKING spawn to allow other agents to vote first."
+          post_thought "Emergency spawn blocked: created consensus proposal '$MOTION_NAME', but blocking spawn to allow voting period. $RUNNING_AGENTS $NEXT_ROLE agents already running." "blocker" 5
+          NEEDS_EMERGENCY_SPAWN=false
+        else
+          # Proposal now exists (created by another agent) - vote on it
+          log "Consensus PENDING: proposal now exists (age=${PROPOSAL_AGE}s), voting on it"
+          cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+          
+          # Only spawn if proposal is very recent (< 30s) to reduce proliferation
+          if [ "$PROPOSAL_AGE" -lt 30 ]; then
+            log "Consensus PENDING but fresh (age=${PROPOSAL_AGE}s < 30s). Spawning for liveness."
+          else
+            log "Consensus PENDING but not fresh (age=${PROPOSAL_AGE}s ≥ 30s). BLOCKING spawn to prevent proliferation."
+            post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME'. $RUNNING_AGENTS $NEXT_ROLE agents already exist. Voted yes but blocking spawn." "blocker" 5
+            NEEDS_EMERGENCY_SPAWN=false
+          fi
+        fi
+      elif [ "$PROPOSAL_AGE" -lt 30 ]; then
+        # Proposal exists and is < 30 seconds old - vote and allow spawn (grace period for voting)
+        log "Consensus PENDING but fresh (age=${PROPOSAL_AGE}s < 30s). Voting and spawning for liveness."
         cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
       else
-        # Proposal is stale (≥ 5 minutes old) - block spawn
-        # Issue #230: Clarify blocker message (don't show 9999s for nonexistent proposals)
-        if [ "$PROPOSAL_AGE" -ge 9999 ]; then
-          log "Consensus check: proposal '$MOTION_NAME' doesn't exist. BLOCKING spawn (race condition)."
-          post_thought "Emergency spawn blocked: no consensus proposal for motion '$MOTION_NAME' exists, but $RUNNING_AGENTS $NEXT_ROLE agents already exist. Another agent may have created proposal between checks." "blocker" 5
-        else
-          log "Consensus PENDING and STALE (age=${PROPOSAL_AGE}s ≥ 300s). BLOCKING spawn to prevent proliferation."
-          post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME' (stale proposal). $RUNNING_AGENTS $NEXT_ROLE agents already exist." "blocker" 5
-        fi
+        # Proposal exists but is ≥ 30 seconds old - vote but block spawn
+        log "Consensus PENDING and aging (age=${PROPOSAL_AGE}s ≥ 30s). Voting but BLOCKING spawn to prevent proliferation."
+        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        post_thought "Emergency spawn blocked: consensus pending for ${PROPOSAL_AGE}s on motion '$MOTION_NAME'. $RUNNING_AGENTS $NEXT_ROLE agents already exist. Voted yes but blocking spawn." "blocker" 5
         NEEDS_EMERGENCY_SPAWN=false
       fi
     fi
