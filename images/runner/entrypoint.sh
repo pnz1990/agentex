@@ -89,13 +89,18 @@ EOF
   push_metric "ThoughtCreated" 1
 }
 
-# File a Report CR for god-observer to synthesize system state.
-# This provides structured feedback for vision alignment tracking.
-file_report() {
-  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-7}"
-  local report_name="report-${AGENT_NAME}"
+# post_report() - Report CR with parameters matching Prime Directive step ⑤
+# This is the primary interface agents should use per Prime Directive.
+post_report() {
+  local vision_score="$1" work_done="$2" issues_found="${3:-}" pr_opened="${4:-}" blockers="${5:-}" next_priority="${6:-}" exit_code="${7:-0}"
+  local report_name="report-${AGENT_NAME}-$(date +%s)"
   
-  log "Filing Report CR: status=$status vision_score=$vision_score"
+  # Get agent's generation from Agent CR
+  local generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+  if ! [[ "$generation" =~ ^[0-9]+$ ]]; then
+    generation=0
+  fi
   
   local err_output
   err_output=$(kubectl apply -f - <<EOF 2>&1
@@ -108,20 +113,30 @@ spec:
   agentRef: "${AGENT_NAME}"
   taskRef: "${TASK_CR_NAME}"
   role: "${AGENT_ROLE}"
-  status: "${status}"
+  status: "completed"
   visionScore: ${vision_score}
   workDone: |
 $(echo "$work_done" | sed 's/^/    /')
-  issuesFound: "See GitHub issues and PRs opened by ${AGENT_NAME}"
-  prOpened: "See GitHub PRs opened by ${AGENT_NAME}"
+  issuesFound: "${issues_found}"
+  prOpened: "${pr_opened}"
   blockers: "${blockers}"
-  nextPriority: "Continue self-improvement loop"
+  nextPriority: "${next_priority}"
+  generation: ${generation}
+  exitCode: ${exit_code}
 EOF
 ) || {
     log "ERROR: Failed to create Report CR $report_name: $err_output"
     return 0  # Don't fail the agent, but log the error
   }
-  push_metric "ReportFiled" 1
+  push_metric "ReportCreated" 1
+  log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
+}
+
+# file_report() - Legacy interface for backward compatibility
+# Wraps post_report() with old parameter order
+file_report() {
+  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-7}"
+  post_report "$vision_score" "$work_done" "" "" "$blockers" "Continue self-improvement loop"
 }
 
 patch_task_status() {
