@@ -24,12 +24,12 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
 
 # Use should_spawn_agent() helper function (added in issue #177)
-# Counts only ACTIVE agents (.status.completionTime == null) to prevent false positives
-# from completed/failed agents still in the cluster.
+# Counts only ACTIVE agents (jobName exists AND completionTime is null) to prevent false positives
+# from ghost Agent CRs that kro failed to process (issue #189)
 if ! source /dev/stdin <<< "$(declare -f should_spawn_agent)"; then
   # Fallback: inline implementation if function not available
   RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | \
-    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length')
+    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | length')
 else
   RUNNING_COUNT=$(should_spawn_agent "$NEXT_ROLE" && echo $? || echo $?)
 fi
