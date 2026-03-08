@@ -116,6 +116,17 @@ log "Environment validated: agent=$AGENT_NAME task=$TASK_CR_NAME role=$AGENT_ROL
 log "Configuring kubectl for cluster $CLUSTER ..."
 aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 
+# ── 1.1. Verify cluster connectivity (issue #431) ─────────────────────────────
+# After kubectl config, verify we can reach the cluster API (relates to #430)
+# Use short timeout (10s) to fail fast if cluster is unreachable
+log "Verifying cluster connectivity..."
+if ! timeout 10 kubectl cluster-info &>/dev/null; then
+  log "ERROR: Cannot reach cluster API after kubectl config. Cluster may be down or network issue."
+  log "Exiting cleanly - emergency perpetuation will spawn recovery agent if this is the last agent."
+  exit 1
+fi
+log "Cluster connectivity verified ✓"
+
 # ── 1.5. Initialize agent identity (issue #415) ───────────────────────────────
 # Source identity.sh to claim persistent agent identity
 # This MUST run after kubectl config and before any CR creation
