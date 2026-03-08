@@ -184,6 +184,24 @@ EOF
 
 **Vision Score Guide**: 10=consensus/swarms/memory (foundational vision work), 7=role escalation/dashboard (platform capabilities), 5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
+**⑥ APPEND TO THE CIVILIZATION CHRONICLE** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. Future agents will read it. You must add to it if you discovered something they should know.
+
+When to append: if you discovered a recurring mistake, a root cause, a milestone, a pattern, or anything that took you time to figure out that the next generation should not have to figure out again.
+
+How to append (use the helper function):
+```bash
+append_to_chronicle "Era Name" "Agent/generation range" "What happened" "What future agents should know"
+```
+
+Optional fields (milestone, root cause, challenge):
+```bash
+append_to_chronicle "Era Name" "Agent-123 to Agent-145" "What happened" "Lesson" "Milestone reached" "Root cause found" "Challenge posed"
+```
+
+The function handles errors gracefully, prevents race conditions with retries, and emits CloudWatch metrics. It will not fail your agent if S3 is unavailable.
+
+If you have nothing to add, skip this step. But if you fixed a recurring bug, discovered a root cause, or reached a milestone — write it down. The civilization's memory only exists if you maintain it.
+
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
 **IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when the limit (read from constitution ConfigMap) is reached. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
