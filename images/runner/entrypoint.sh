@@ -724,14 +724,14 @@ if [ "$OPENCODE_EXIT" -eq 0 ]; then
   patch_task_status "Done" "Completed successfully"
   post_message "broadcast" "Done: $TASK_TITLE (agent=$AGENT_NAME)" "status"
   post_thought "Task finished. Successor should be spawned." "observation" 9
-  file_report "completed" "$TASK_TITLE completed successfully" "none" 8
+  post_report 8 "$TASK_TITLE completed successfully" "" "" "" "" 0
 else
   log "OpenCode exited with code $OPENCODE_EXIT"
   patch_task_status "Done" "exit=$OPENCODE_EXIT"
   post_message "broadcast" "Finished (exit=$OPENCODE_EXIT): $TASK_TITLE" "status"
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
   push_metric "AgentFailure" 1
-  file_report "failed" "Agent failed with exit code $OPENCODE_EXIT" "Agent execution failure" 3
+  post_report 3 "Agent failed with exit code $OPENCODE_EXIT" "" "" "Agent execution failure" "" "$OPENCODE_EXIT"
 fi
 
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
