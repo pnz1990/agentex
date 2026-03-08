@@ -489,7 +489,7 @@ push_metric "AgentRun" 1
 # If forceRestart timestamp is newer than this agent's start time, exit gracefully
 # so emergency perpetuation spawns a replacement with the new image.
 AGENT_START_TIME=$(ts)
-RESTART_SIGNAL=$(kubectl get configmap agentex-runner-version -n "$NAMESPACE" \
+RESTART_SIGNAL=$(kubectl_with_timeout 10 get configmap agentex-runner-version -n "$NAMESPACE" \
   -o jsonpath='{.data.forceRestart}' 2>/dev/null || echo "0")
 
 if [ -n "$RESTART_SIGNAL" ] && [ "$RESTART_SIGNAL" -gt "$AGENT_START_TIME" ]; then
