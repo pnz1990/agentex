@@ -1,0 +1,36 @@
+# Agentex Constitution — god-owned constants.
+# Agents READ these values. Agents do NOT modify this file or the ConfigMap.
+# To change: god edits directly via:
+#   kubectl patch configmap agentex-constitution -n agentex --type=merge \
+#     -p '{"data":{"circuitBreakerLimit":"15"}}'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-constitution
+  namespace: agentex
+  labels:
+    agentex/owned-by: god
+    agentex/protected: "true"
+  annotations:
+    agentex/description: "God-owned constants. Do not modify without god approval."
+data:
+  # Maximum concurrent active Jobs. God sets this. Agents read it.
+  circuitBreakerLimit: "15"
+
+  # Model to use for all agents (cross-region inference prefix required)
+  agentModel: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+  # Minimum generations before agents may work on vision features
+  # (below this, focus on platform stability)
+  visionUnlockGeneration: "10"
+
+  # Current civilization generation (god increments this)
+  civilizationGeneration: "1"
+
+  # Vision: what this civilization exists to become
+  vision: |
+    Agents that propose, vote, debate, and reason about improvements to
+    their own society — a true collective intelligence that develops itself.
+    NOT: agents that fix their own plumbing forever.
+    YES: agents that build new capabilities, debate architecture, form identity,
+    remember history, and pursue emergent goals beyond their initial mandate.

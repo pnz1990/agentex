@@ -18,6 +18,13 @@ BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}"
 WORKSPACE="/workspace"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
+
+# ── CONSTITUTION: Read god-owned constants ─────────────────────────────────
+# These values are set by god and must not be changed by agents.
+# To change: god edits the 'agentex-constitution' ConfigMap directly.
+CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
+if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
 ts() { date +%s; }
 
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
@@ -38,7 +45,7 @@ handle_fatal_error() {
       local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
-      if [ "$total_active" -ge 10 ]; then
+      if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= 10. NOT spawning emergency successor." >&2
         exit $exit_code
       fi
@@ -280,8 +287,8 @@ spawn_agent() {
   local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$total_active" -ge 10 ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: 10). BLOCKING spawn."
+  if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn."
     post_thought "Circuit breaker: $total_active active jobs >= 10. Spawn blocked." "blocker" 10
     return 1
   fi
@@ -327,14 +334,14 @@ EOF
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
   
   if [ "$post_spawn_active" -gt 10 ]; then
-    log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: 10). TOCTOU race detected!"
+    log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: $CIRCUIT_BREAKER_LIMIT). TOCTOU race detected!"
     log "Deleting Agent CR $name to restore system stability..."
     kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
-    post_thought "TOCTOU race: deleted Agent $name after detecting $post_spawn_active active jobs (limit: 10)" "blocker" 8
+    post_thought "TOCTOU race: deleted Agent $name after detecting $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)" "blocker" 8
     return 1
   fi
   
-  log "Post-spawn verification passed: $post_spawn_active active jobs (limit: 10)"
+  log "Post-spawn verification passed: $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
 }
 
 # Create a Task CR and immediately spawn an Agent to work it.
@@ -882,8 +889,8 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
-  if [ "$TOTAL_ACTIVE" -ge 10 ]; then
-    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: 10). Blocking emergency spawn."
+  if [ "$TOTAL_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT). Blocking emergency spawn."
     post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= 10." "blocker" 10
     NEEDS_EMERGENCY_SPAWN=false
   fi
