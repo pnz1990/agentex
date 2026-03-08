@@ -18,6 +18,18 @@ rules:
   - patch
   - delete
 - apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
   - ""
   resources:
   - configmaps
@@ -38,6 +50,7 @@ rules:
   - thoughts
   - swarms
   - reports
+  - coordinators
   verbs:
   - get
   - list
@@ -55,6 +68,7 @@ rules:
   - thoughts/status
   - swarms/status
   - reports/status
+  - coordinators/status
   verbs:
   - get
   - update
