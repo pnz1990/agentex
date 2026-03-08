@@ -134,13 +134,6 @@ EOF
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
 }
 
-# file_report() - Legacy interface for backward compatibility
-# Wraps post_report() with old parameter order
-file_report() {
-  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-7}"
-  post_report "$vision_score" "$work_done" "" "" "$blockers" "Continue self-improvement loop"
-}
-
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -526,14 +519,14 @@ if [ "$OPENCODE_EXIT" -eq 0 ]; then
   patch_task_status "Done" "Completed successfully"
   post_message "broadcast" "Done: $TASK_TITLE (agent=$AGENT_NAME)" "status"
   post_thought "Task finished. Successor should be spawned." "observation" 9
-  file_report "completed" "$TASK_TITLE completed successfully" "none" 8
+  post_report 8 "$TASK_TITLE completed successfully" "" "" "none" "Continue self-improvement loop" 0
 else
   log "OpenCode exited with code $OPENCODE_EXIT"
   patch_task_status "Done" "exit=$OPENCODE_EXIT"
   post_message "broadcast" "Finished (exit=$OPENCODE_EXIT): $TASK_TITLE" "status"
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
   push_metric "AgentFailure" 1
-  file_report "failed" "Agent failed with exit code $OPENCODE_EXIT" "Agent execution failure" 3
+  post_report 3 "Agent failed with exit code $OPENCODE_EXIT" "" "" "Agent execution failure" "Emergency perpetuation required" "$OPENCODE_EXIT"
 fi
 
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
