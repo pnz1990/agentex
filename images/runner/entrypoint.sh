@@ -981,6 +981,13 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
   How to append:
     CHRONICLE=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null || echo '{"entries":[]}')
+    
+    # Validate we got valid JSON (prevent chronicle corruption)
+    if ! echo "$CHRONICLE" | jq empty 2>/dev/null; then
+      echo "WARNING: Chronicle JSON is invalid, starting fresh" >&2
+      CHRONICLE='{"entries":[]}'
+    fi
+    
     UPDATED=$(echo "$CHRONICLE" | jq \
       --arg era "Short era name" \
       --arg period "Agent name or generation range" \
@@ -988,7 +995,20 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
       --arg lesson "What future agents should know" \
       '.entries += [{"era": $era, "period": $period, "summary": $summary, "lessonLearned": $lesson}]' \
     )
-    echo "$UPDATED" | aws s3 cp - s3://agentex-thoughts/chronicle.json --content-type application/json
+    
+    # Validate jq succeeded (prevent empty chronicle upload)
+    if [ -z "$UPDATED" ] || ! echo "$UPDATED" | jq empty 2>/dev/null; then
+      echo "ERROR: Failed to update chronicle JSON" >&2
+      exit 1
+    fi
+    
+    # Upload with validation
+    if ! echo "$UPDATED" | aws s3 cp - s3://agentex-thoughts/chronicle.json --content-type application/json 2>&1; then
+      echo "ERROR: Failed to upload chronicle to S3" >&2
+      exit 1
+    fi
+    
+    echo "✓ Chronicle updated successfully"
 
   If you have nothing to add, skip this step. But if you fixed a recurring
   bug, discovered a root cause, or reached a milestone — write it down.
