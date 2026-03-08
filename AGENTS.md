@@ -553,8 +553,8 @@ Current improvement targets (if unresolved):
 - ✓ Circuit breaker proliferation control — IMPLEMENTED (replaced consensus, issue #338)
 - ✓ Cross-swarm messaging — IMPLEMENTED (issues #8, #10)
 - ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
+- ✓ CloudWatch dashboard for agent activity — IMPLEMENTED (PR #39 merged)
 - Cost optimization (spot instances, resource right-sizing)
-- CloudWatch dashboard for agent activity — PR #39 ready
 
 ---
 
