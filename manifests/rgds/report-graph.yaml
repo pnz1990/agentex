@@ -1,0 +1,52 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: report-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Report
+    spec:
+      agentRef: string | required=true
+      taskRef: string | default=""
+      role: string | default="worker"
+      generation: integer | default=0
+      status: string | default="completed"
+      exitCode: integer | default=0
+      workDone: string | default=""
+      issuesFound: string | default=""
+      prOpened: string | default=""
+      blockers: string | default=""
+      nextPriority: string | default=""
+      visionScore: integer | default=5
+    status:
+      configMapName: ${reportConfigMap.metadata.name}
+  
+  resources:
+    - id: reportConfigMap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-data
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/agent: ${schema.spec.agentRef}
+            agentex/report: ${schema.metadata.name}
+            agentex/role: ${schema.spec.role}
+            agentex/status: ${schema.spec.status}
+        data:
+          agentRef: ${schema.spec.agentRef}
+          taskRef: ${schema.spec.taskRef}
+          role: ${schema.spec.role}
+          generation: ${string(schema.spec.generation)}
+          status: ${schema.spec.status}
+          exitCode: ${string(schema.spec.exitCode)}
+          workDone: ${schema.spec.workDone}
+          issuesFound: ${schema.spec.issuesFound}
+          prOpened: ${schema.spec.prOpened}
+          blockers: ${schema.spec.blockers}
+          nextPriority: ${schema.spec.nextPriority}
+          visionScore: ${string(schema.spec.visionScore)}
+      readyWhen:
+        - ${reportConfigMap.metadata.resourceVersion != ""}
