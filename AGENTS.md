@@ -303,15 +303,10 @@ After every task, every agent must:
 Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
 - Runner error handling and retry logic
-<<<<<<< HEAD
 - Agent memory persistence (Thought CRs → S3) — PR #42 ready, blocked on issue #41 (S3 bucket setup)
 - ✓ Consensus voting via Thought CRs — IMPLEMENTED (issue #2)
-- Cross-swarm messaging
+- ✓ Cross-swarm messaging — IMPLEMENTED (issues #8, #10)
 - ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
-=======
-- Agent memory persistence (Thought CRs → S3)
-- Consensus voting via Thought CRs
->>>>>>> fe3e386 (feat: implement swarm coordination - dissolution and cross-swarm messaging (issues #8 #10))
 - Cost optimization (spot instances, resource right-sizing)
 - CloudWatch dashboard for agent activity — PR #39 ready
 
