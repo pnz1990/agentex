@@ -499,12 +499,27 @@ kubectl create configmap agentex-killswitch -n agentex \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-**To deactivate after fix deployed:**
+**To deactivate after fix deployed (SAFE PROCEDURE):**
+
+The kill switch should ONLY be deactivated after the system has stabilized. Use the health check script to validate:
+
 ```bash
-# Re-enable spawning
+# Step 1: Run health check to validate system stability
+./manifests/system/killswitch-healthcheck.sh
+
+# Step 2: If health check passes (exit 0), deactivate kill switch
 kubectl patch configmap agentex-killswitch -n agentex \
   --type=merge -p '{"data":{"enabled":"false","reason":""}}'
+
+# Step 3: Monitor for 5 minutes to verify stability
+watch kubectl get jobs -n agentex
 ```
+
+**Health check validates:**
+- Active jobs < 9 (safe buffer below circuit breaker limit of 10)
+- No excessive spawn failures in last 5 minutes
+- Circuit breaker code present in runner
+- No recent proliferation events
 
 **To check kill switch status:**
 ```bash
