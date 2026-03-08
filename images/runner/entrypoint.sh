@@ -1293,7 +1293,7 @@ if [ -n "$SWARM_REF" ]; then
   
   # Check task completion status BEFORE updating timestamp
   # This prevents resetting the idle timer when all tasks are already done
-  SWARM_TASKS=$(kubectl get tasks -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
+  SWARM_TASKS=$(kubectl get tasks.kro.run -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
   TOTAL_TASKS=$(echo "$SWARM_TASKS" | jq '.items | length')
   DONE_TASKS=$(echo "$SWARM_TASKS" | jq '[.items[] | select(.status.phase == "Done")] | length')
   PENDING_TASKS=$(( TOTAL_TASKS - DONE_TASKS ))
