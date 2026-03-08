@@ -118,7 +118,8 @@ EOF
       
       # Issue #449: Verify spawn succeeded with clear diagnostics
       # Issue #474: Use .kro.run API group (not default agentex.io)
-      if kubectl get agent.kro.run "$next_agent" -n "$NAMESPACE" &>/dev/null; then
+      # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+      if kubectl_with_timeout 10 get agent.kro.run "$next_agent" -n "$NAMESPACE" &>/dev/null; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✓ Emergency Agent CR created: $next_agent" >&2
       else
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED - Agent CR not found: $next_agent" >&2
@@ -583,7 +584,8 @@ spawn_task_and_agent() {
     fi
     
     # Also check for active Task CRs with same githubIssue (work in-progress)
-    local existing_task=$(kubectl get tasks.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+    local existing_task=$(kubectl_with_timeout 10 get tasks.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
       jq -r --arg issue "$issue" '.items[] | 
         select(.spec.githubIssue == ($issue | tonumber) and 
                (.status.phase != "Done" and .status.phase != "Cancelled")) | 
@@ -755,9 +757,10 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
    select(.spec.agentRef != $name) |
    select((.status.readBy // "" | contains($name)) == false) |
    .metadata.name' \
-  2>/dev/null || true); do
+   2>/dev/null || true); do
   # Get current readBy value from ConfigMap and append this agent's name
-  CURRENT_READ_BY=$(kubectl get configmap "${thought_name}-thought" -n "$NAMESPACE" \
+  # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+  CURRENT_READ_BY=$(kubectl_with_timeout 10 get configmap "${thought_name}-thought" -n "$NAMESPACE" \
     -o jsonpath='{.data.readBy}' 2>/dev/null || echo "")
   if [ -z "$CURRENT_READ_BY" ]; then
     NEW_READ_BY="$AGENT_NAME"
@@ -841,7 +844,8 @@ fi
 
 # ── 6. Read Task CR ───────────────────────────────────────────────────────────
 log "Reading task CR..."
-TASK_JSON=$(kubectl get tasks.kro.run "$TASK_CR_NAME" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+# Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+TASK_JSON=$(kubectl_with_timeout 10 get tasks.kro.run "$TASK_CR_NAME" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
 TASK_TITLE=$(echo "$TASK_JSON" | jq -r '.spec.title // "No title"')
 TASK_DESC=$(echo "$TASK_JSON" | jq -r '.spec.description // ""')
 TASK_CONTEXT=$(echo "$TASK_JSON" | jq -r '.spec.context // ""')
@@ -1160,7 +1164,8 @@ PROMPT
 # This is a SECONDARY check before OpenCode execution to catch load spikes.
 # Issue #502: Early check at step 1.2 prevents most TOCTOU proliferation.
 # This check catches edge cases where load increased after agent startup.
-PRE_EXEC_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+# Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+PRE_EXEC_ACTIVE=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
 log "Pre-execution circuit breaker check: $PRE_EXEC_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
@@ -1208,7 +1213,8 @@ fi
 ESCALATED_ROLE=""
 
 # Check all Thought CRs posted by THIS agent during this run for structural blockers
-BLOCKER_THOUGHTS=$(kubectl get thoughts.kro.run -n "$NAMESPACE" \
+# Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+BLOCKER_THOUGHTS=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" \
   -l "agentex/agent=$AGENT_NAME" \
   -o json 2>/dev/null | jq -r \
   --arg name "$AGENT_NAME" \
@@ -1230,7 +1236,8 @@ fi
 
 # Check if THIS agent spawned a successor by filtering on the spawned-by label.
 # This is precise and avoids false positives from other agents' spawns.
-SUCCESSOR_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" \
+# Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+SUCCESSOR_AGENTS=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" \
   -l "agentex/spawned-by=$AGENT_NAME" \
   -o json 2>/dev/null || echo '{"items":[]}')
 SPAWNED_BY_ME=$(echo "$SUCCESSOR_AGENTS" | jq '.items | length' 2>/dev/null || echo "0")
@@ -1252,14 +1259,16 @@ else
   for agent_name in $(echo "$SUCCESSOR_AGENTS" | jq -r '.items[].metadata.name' 2>/dev/null || true); do
     # Check if Agent CR has status.jobName populated by kro
     # Issue #474: Use .kro.run API group (not default agentex.io)
-    JOB_NAME=$(kubectl get agent.kro.run "$agent_name" -n "$NAMESPACE" \
+    # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+    JOB_NAME=$(kubectl_with_timeout 10 get agent.kro.run "$agent_name" -n "$NAMESPACE" \
       -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     
     if [ -z "$JOB_NAME" ]; then
       log "WARNING: Agent CR $agent_name exists but status.jobName is empty (kro hasn't processed it yet)"
       # Give kro a moment to process the Agent CR (it may be in progress)
       sleep 5
-      JOB_NAME=$(kubectl get agent.kro.run "$agent_name" -n "$NAMESPACE" \
+      # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+      JOB_NAME=$(kubectl_with_timeout 10 get agent.kro.run "$agent_name" -n "$NAMESPACE" \
         -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     fi
     
@@ -1272,7 +1281,8 @@ else
     fi
     
     # Verify the Job actually exists
-    if kubectl get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
+    # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+    if kubectl_with_timeout 10 get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
       log "✓ Agent CR $agent_name → Job $JOB_NAME exists"
       JOBS_VERIFIED=$((JOBS_VERIFIED + 1))
     else
@@ -1293,9 +1303,10 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
 
   # EMERGENCY KILL SWITCH (issue #210): Check if all spawning is disabled
-  KILLSWITCH=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+  KILLSWITCH=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
   if [ "$KILLSWITCH" = "true" ]; then
-    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    KILLSWITCH_REASON=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
     log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning successor."
     post_thought "Kill switch active: $KILLSWITCH_REASON. Agent exiting without spawning successor to stop proliferation." "blocker" 10
     NEEDS_EMERGENCY_SPAWN=false
@@ -1371,7 +1382,8 @@ if [ -n "$SWARM_REF" ]; then
   log "Updating swarm state: $SWARM_REF"
   
   # Get current state
-  SWARM_STATE=$(kubectl get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+  # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+  SWARM_STATE=$(kubectl_with_timeout 10 get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
   CURRENT_TASKS=$(echo "$SWARM_STATE" | jq -r '.data.tasksCompleted // "0"')
   CURRENT_PHASE=$(echo "$SWARM_STATE" | jq -r '.data.phase // "Forming"')
   CURRENT_MEMBERS=$(echo "$SWARM_STATE" | jq -r '.data.memberAgents // ""')
@@ -1393,7 +1405,8 @@ if [ -n "$SWARM_REF" ]; then
   
   # Check task completion status BEFORE updating timestamp
   # This prevents resetting the idle timer when all tasks are already done
-  SWARM_TASKS=$(kubectl get tasks.kro.run -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
+  # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+  SWARM_TASKS=$(kubectl_with_timeout 10 get tasks.kro.run -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
   TOTAL_TASKS=$(echo "$SWARM_TASKS" | jq '.items | length')
   DONE_TASKS=$(echo "$SWARM_TASKS" | jq '[.items[] | select(.status.phase == "Done")] | length')
   PENDING_TASKS=$(( TOTAL_TASKS - DONE_TASKS ))
@@ -1425,7 +1438,8 @@ if [ -n "$SWARM_REF" ]; then
     2>/dev/null || true
   
   # Re-fetch swarm state after patching to ensure dissolution check uses current data
-  SWARM_STATE=$(kubectl get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+  # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+  SWARM_STATE=$(kubectl_with_timeout 10 get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
   CURRENT_PHASE=$(echo "$SWARM_STATE" | jq -r '.data.phase // "Forming"')
   
   # Check for dissolution condition (only if not already disbanded)
