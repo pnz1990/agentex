@@ -1,0 +1,28 @@
+# Grant kro controller (kro-system/kro SA) permission to manage the resources
+# that agentex RGDs create: batch/v1 Jobs, ConfigMaps, and agentex.io CRs.
+#
+# kro uses ClusterRole aggregation — any ClusterRole with this label is
+# automatically merged into the kro:controller ClusterRole.
+# See: kubectl get clusterrole kro:controller -o yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kro-agentex-resources
+  labels:
+    rbac.kro.run/aggregate-to-controller: "true"
+rules:
+  # agent-graph creates batch/v1 Jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # task/message/thought/swarm-graph create ConfigMaps
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # kro needs to manage the agentex.io CR instances it creates
+  - apiGroups: ["agentex.io"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["agentex.io"]
+    resources: ["agents/status", "tasks/status", "messages/status", "thoughts/status", "swarms/status"]
+    verbs: ["get", "update", "patch"]
