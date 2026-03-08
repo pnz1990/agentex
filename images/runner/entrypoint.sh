@@ -156,43 +156,6 @@ EOF
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
 }
 
-# file_report() - Simplified wrapper around post_report() for automatic reporting
-# Used by step 11 post-results logic (lines 727, 734)
-# Usage: file_report <status> <work_done> <blockers> <vision_score>
-file_report() {
-  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-5}"
-  
-  # Automatically determine issues found and PR opened from git state
-  local issues_found=""
-  local pr_opened=""
-  
-  # Check if we're in a git repo and on a branch
-  if [ -d ".git" ]; then
-    # Extract issue numbers from branch name (e.g., issue-107-description -> #107)
-    local branch_name=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-    if [[ "$branch_name" =~ issue-([0-9]+) ]]; then
-      issues_found="#${BASH_REMATCH[1]}"
-    fi
-    
-    # Check if a PR was opened (search recent git history for PR references)
-    local pr_number=$(git log --oneline -10 2>/dev/null | grep -oP 'PR #\K[0-9]+' | head -1 || echo "")
-    if [ -n "$pr_number" ]; then
-      pr_opened="PR #${pr_number}"
-    fi
-  fi
-  
-  # Determine next priority based on status
-  local next_priority=""
-  if [ "$status" = "completed" ]; then
-    next_priority="Continue platform improvement loop"
-  else
-    next_priority="Investigate failure and retry"
-  fi
-  
-  # Call the full post_report() function
-  post_report "$vision_score" "$work_done" "$issues_found" "$pr_opened" "$blockers" "$next_priority" "$OPENCODE_EXIT"
-}
-
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -373,61 +336,30 @@ check_proposal_age() {
   return 0
 }
 
-# Check if spawning an agent of a given role is allowed under consensus rules.
-# This function is designed for OpenCode-driven spawns to check consensus BEFORE
-# creating Agent CRs, preventing proliferation at the source.
-# Usage: should_spawn_agent "planner"
-# Returns: "yes" (spawn allowed), "no" (spawn blocked), "pending" (proposal needs vote)
+# Check if spawning an agent of a given role is safe (issue #177)
+# Returns: 0 if safe to spawn, 1 if should check consensus first
+# Usage: if should_spawn_agent "worker"; then spawn_agent ...; fi
 should_spawn_agent() {
   local role="$1"
   
-  # Count ACTIVE agents of the target role (filter by .status.completionTime == null)
-  # This prevents counting completed/failed agents that are still in the cluster (issue #177)
+  # Count ACTIVE agents of the same role (with jobName AND without completionTime)
+  # This prevents false positives from ghost Agent CRs that kro failed to process (issue #189)
+  # Same fix as PR #172 applied to emergency perpetuation
   local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+    jq --arg role "$role" '
+      [.items[] | 
+       select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | 
+      length
+    ' 2>/dev/null || echo "0")
   
-  log "Spawn check: $running_agents ACTIVE $role agents currently running"
-  
-  # If < 3 agents of this role, allow spawn without consensus
-  if [ "$running_agents" -lt 3 ]; then
-    log "Spawn check: < 3 agents exist. Spawn allowed without consensus."
-    echo "yes"
-    return 0
-  fi
-  
-  # ≥3 agents exist - check consensus
-  log "Spawn check: ≥3 agents exist. Checking consensus..."
-  local motion_name="spawn-more-${role}-agents"
-  local consensus_result=$(check_consensus "$motion_name" "3/5")
-  
-  if [ "$consensus_result" = "yes" ]; then
-    log "Spawn check: Consensus APPROVED. Spawn allowed."
-    echo "yes"
-    return 0
-  elif [ "$consensus_result" = "no" ]; then
-    log "Spawn check: Consensus REJECTED. Spawn BLOCKED."
-    echo "no"
-    return 0
+  if [ "$running_agents" -ge 3 ]; then
+    log "should_spawn_agent: $running_agents agents with role=$role exist (threshold: 3)"
+    echo "$running_agents"
+    return 1  # Consensus required
   else
-    # Consensus pending - check proposal age
-    local proposal_age=$(check_proposal_age "$motion_name")
-    
-    if [ "$proposal_age" -ge 9999 ]; then
-      # No proposal exists - OpenCode agent should create one
-      log "Spawn check: No consensus proposal exists. Agent should create proposal."
-      echo "pending"
-      return 0
-    elif [ "$proposal_age" -lt 300 ]; then
-      # Proposal < 5 minutes old - allow spawn (liveness > consensus)
-      log "Spawn check: Proposal age ${proposal_age}s (< 5 min). Allowing spawn for liveness."
-      echo "yes"
-      return 0
-    else
-      # Proposal > 5 minutes old and still pending - BLOCK spawn
-      log "Spawn check: Proposal age ${proposal_age}s (> 5 min). Spawn BLOCKED - consensus stalled."
-      echo "no"
-      return 0
-    fi
+    log "should_spawn_agent: $running_agents agents with role=$role exist (safe to spawn)"
+    echo "$running_agents"
+    return 0  # Safe to spawn
   fi
 }
 
@@ -436,11 +368,22 @@ should_spawn_agent() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # GLOBAL CIRCUIT BREAKER (issue #149): Hard limit to prevent catastrophic proliferation
+  # Count TOTAL active agents (without completionTime). If >= 20, BLOCK all spawns.
+  local total_active=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null or .status.completionTime == "")] | length' 2>/dev/null || echo "0")
+  
+  if [ "$total_active" -ge 20 ]; then
+    log "CIRCUIT BREAKER TRIGGERED: $total_active active agents (limit: 20). BLOCKING spawn to prevent system overload."
+    post_thought "Circuit breaker activated: $total_active active agents exceed safety limit. Spawn blocked. System may need human intervention." "blocker" 10
+    return 1  # Hard block - too many agents
+  fi
+  
   # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
-  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
-  # This prevents false positives from completed/failed agents that are still in the cluster (issue #154).
-  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
+  # Must check jobs.status.active == 1 to only count running pods.
+  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${role}" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
@@ -1024,10 +967,11 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
-  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
-  # This prevents false positives from completed/failed agents that are still in the cluster.
-  RUNNING_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
+  # Agent CRs are removed once Jobs complete, so counting them gives false negatives.
+  # Must check jobs.status.active == 1 to only count running pods.
+  RUNNING_AGENTS=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${NEXT_ROLE}" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
   CONSENSUS_REQUIRED=false
   if [ "$RUNNING_AGENTS" -ge 3 ]; then
