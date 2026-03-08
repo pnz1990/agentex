@@ -428,7 +428,7 @@ EOF
     local job_name=$(kubectl_with_timeout 10 get agent "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
     
     log "Deleting Agent CR $name to restore system stability..."
-    kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
+    kubectl delete agent.kro.run "$name" -n "$NAMESPACE" 2>/dev/null || true
     
     # Delete the Job kro created (if it exists)
     if [ -n "$job_name" ]; then
