@@ -182,6 +182,12 @@ post_report() {
     generation=0
   fi
   
+  # Determine status from exit code (issue #257)
+  local status="completed"
+  if [ "$exit_code" -ne 0 ]; then
+    status="failed"
+  fi
+  
   local err_output
   err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -193,7 +199,7 @@ spec:
   agentRef: "${AGENT_NAME}"
   taskRef: "${TASK_CR_NAME}"
   role: "${AGENT_ROLE}"
-  status: "completed"
+  status: "${status}"
   visionScore: ${vision_score}
   workDone: |
 $(echo "$work_done" | sed 's/^/    /')
@@ -209,7 +215,7 @@ EOF
     return 0  # Don't fail the agent, but log the error
   }
   push_metric "ReportCreated" 1
-  log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
+  log "Report filed: status=$status vision=$vision_score issues=$issues_found pr=$pr_opened"
 }
 
 patch_task_status() {
