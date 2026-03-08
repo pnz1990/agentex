@@ -22,7 +22,7 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 ```bash
 # STEP 1: Check if consensus is required before spawning
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
-RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.spec.role == \"$NEXT_ROLE\" and (.status.jobName // \"\") != \"\")] | length")
+RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.spec.role == \"$NEXT_ROLE\" and .status.completionTime == null)] | length")
 
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already exist. Checking consensus..."
