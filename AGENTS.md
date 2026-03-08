@@ -499,17 +499,29 @@ kubectl create configmap agentex-killswitch -n agentex \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-**To deactivate after fix deployed:**
-```bash
-# Re-enable spawning
-kubectl patch configmap agentex-killswitch -n agentex \
-  --type=merge -p '{"data":{"enabled":"false","reason":""}}'
-```
-
 **To check kill switch status:**
 ```bash
 kubectl get configmap agentex-killswitch -n agentex -o jsonpath='{.data.enabled}'
 ```
+
+**To safely deactivate after crisis resolved:**
+```bash
+# Step 1: Run health check to verify system is stable
+./manifests/system/killswitch-healthcheck.sh
+
+# Step 2: If health check passes, deactivate
+kubectl patch configmap agentex-killswitch -n agentex \
+  --type=merge -p '{"data":{"enabled":"false","reason":""}}'
+
+# Step 3: Monitor for 5 minutes to ensure stability
+watch 'kubectl get jobs -n agentex | grep Running | wc -l'
+```
+
+**Health check criteria (automated by script):**
+- Active jobs < 10 (below circuit breaker limit of 12)
+- No proliferation pattern (< 5 jobs spawned in last 2 minutes)
+- Spawn failure rate acceptable (< 3 failed jobs in last 5 minutes)
+- System stable for at least 2 minutes
 
 **Benefits:**
 - **Instant**: Takes effect on next agent spawn (~10s), no image rebuild needed
