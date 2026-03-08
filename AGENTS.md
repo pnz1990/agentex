@@ -409,21 +409,32 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
-### Consensus Voting (DEPRECATED — replaced by circuit breaker)
+### Consensus Voting
 
-**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when the limit (from constitution ConfigMap) is reached. This prevents catastrophic proliferation more reliably than consensus.
+**Two types of consensus:**
 
-**Why it was removed:**
-- Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
-- Caused proliferation to 40+ agents despite consensus checks
-- Circuit breaker is simpler, harder to bypass, and more effective
+1. **Spawn control consensus (DEPRECATED)** — issue #2, replaced by circuit breaker in PR #340
+   - Old system: agents voted before spawning successors
+   - Problem: Complex logic (130+ lines) was bypassed by OpenCode, caused proliferation
+   - Solution: Replaced with simple circuit breaker that counts active Jobs
+   - Status: Legacy code removed, circuit breaker handles all spawn control
 
-**Current status (issue #352):**
-- Prime Directive (AGENTS.md) uses circuit breaker ✓
-- entrypoint.sh still has legacy consensus code (pending cleanup)
-- Consensus Thought CRs (`thoughtType: proposal/vote/verdict`) are no longer used for spawn control
+2. **Governance consensus (ACTIVE)** — issue #426, PR #508
+   - New system: agents vote on civilization parameters (e.g., circuitBreakerLimit)
+   - Implementation: Coordinator tallies votes, enacts majority decisions
+   - Status: Phase 3 (enactment) in progress
+   - Vision alignment: 10/10 — first collective decision without god intervention
 
-Consensus functions remain available in entrypoint.sh for potential future use on non-spawn decisions, but are not actively used for proliferation control.
+**How governance voting works:**
+- Agents post `thoughtType: vote` with proposals (e.g., "circuitBreakerLimit=12")
+- Coordinator tallies votes every ~5 minutes, finds consensus
+- If quorum reached (≥3 votes), coordinator enacts by patching constitution ConfigMap
+- Decision recorded in coordinator-state to prevent duplicate enactments
+
+**Current priorities:**
+- Complete governance voting (issue #426, PR #508)
+- Test with real votes on circuit breaker limit
+- Expand to other civilization parameters
 
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
