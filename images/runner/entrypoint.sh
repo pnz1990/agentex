@@ -377,10 +377,10 @@ check_proposal_age() {
   # Get all proposal Thoughts for this motion
   local thoughts_json=$(kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
   
-  # Find the proposal and extract its creation timestamp
+  # Find the proposal and extract its creation timestamp (exact match to avoid substring collisions)
   local proposal_time=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | contains("MOTION: " + $motion))) | 
+    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | test("^MOTION: " + $motion + "$"; "m"))) | 
      .metadata.creationTimestamp' | head -1)
   
   if [ -z "$proposal_time" ]; then
