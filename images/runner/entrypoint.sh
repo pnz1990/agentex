@@ -373,6 +373,73 @@ check_proposal_age() {
   return 0
 }
 
+# Check if spawning an agent of a given role is allowed (consensus check).
+# Usage: should_spawn_agent "planner"
+# Returns: "yes" (ok to spawn), "no" (blocked by consensus), "pending" (waiting for consensus)
+# This function implements consensus logic for NORMAL OpenCode-driven spawns (issue #137, #177).
+# Emergency perpetuation has its own embedded consensus check (lines 967-1016).
+should_spawn_agent() {
+  local role="$1"
+  
+  # Count ACTIVE agents of the same role (filter by completionTime == null)
+  # This is the critical fix from issue #177 - PRs #161 and #168 were missing this filter
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  
+  # If < 3 agents exist, spawning is always allowed (no consensus needed)
+  if [ "$running_agents" -lt 3 ]; then
+    log "Spawn check: $running_agents $role agents active (< 3). Spawning allowed without consensus."
+    echo "yes"
+    return 0
+  fi
+  
+  # ≥ 3 agents exist - consensus required
+  log "Spawn check: $running_agents $role agents active (≥ 3). Consensus check required."
+  
+  local motion_name="spawn-more-${role}-agents"
+  local consensus_result=$(check_consensus "$motion_name" "3/5")
+  
+  if [ "$consensus_result" = "yes" ]; then
+    log "Spawn check: Consensus APPROVED for spawning $role agent"
+    echo "yes"
+    return 0
+  elif [ "$consensus_result" = "no" ]; then
+    log "Spawn check: Consensus REJECTED for spawning $role agent"
+    echo "no"
+    return 0
+  else
+    # Consensus pending - check proposal age
+    local proposal_age=$(check_proposal_age "$motion_name")
+    
+    if [ "$proposal_age" -ge 9999 ]; then
+      # No proposal exists - create one and vote yes
+      log "Spawn check: Creating new consensus proposal for spawning $role agent"
+      local deadline=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+      propose_motion "$motion_name" \
+        "Spawn additional $role agent. Currently $running_agents ACTIVE agents exist with this role." \
+        "3/5" \
+        "$deadline"
+      cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
+      
+      # Allow spawn because proposal is brand new (< 1 second old)
+      log "Spawn check: Consensus proposal created. Spawning (grace period: proposal is fresh)."
+      echo "yes"
+      return 0
+    elif [ "$proposal_age" -lt 300 ]; then
+      # Proposal exists and is < 5 minutes old - allow spawn (grace period for voting)
+      log "Spawn check: Consensus pending but recent (age=${proposal_age}s < 300s). Spawning for liveness."
+      cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
+      echo "yes"
+      return 0
+    else
+      # Proposal is stale (≥ 5 minutes old) - block spawn
+      log "Spawn check: Consensus pending and STALE (age=${proposal_age}s ≥ 300s). BLOCKING spawn to prevent proliferation."
+      echo "pending"
+      return 0
+    fi
+  fi
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {

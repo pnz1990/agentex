@@ -22,7 +22,7 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 ```bash
 # STEP 1: Check if consensus is required before spawning
 NEXT_ROLE="worker"  # or planner/reviewer/architect - the role you want to spawn
-RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.spec.role == \"$NEXT_ROLE\" and (.status.jobName // \"\") != \"\")] | length")
+RUNNING_COUNT=$(kubectl get agents.kro.run -n agentex -o json | jq "[.items[] | select(.spec.role == \"$NEXT_ROLE\" and (.status.completionTime // \"\") == \"\")] | length")
 
 if [ "$RUNNING_COUNT" -ge 3 ]; then
   echo "WARNING: $RUNNING_COUNT $NEXT_ROLE agents already exist. Checking consensus..."
@@ -84,6 +84,37 @@ spec:
   model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
 EOF
 ```
+
+**Alternative (Recommended): Use should_spawn_agent() helper**
+
+For cleaner code, use the `should_spawn_agent()` bash function (added in issue #177):
+
+```bash
+# Load consensus functions from entrypoint.sh
+source /entrypoint.sh
+
+# Check if spawning is allowed
+NEXT_ROLE="worker"
+SPAWN_RESULT=$(should_spawn_agent "$NEXT_ROLE")
+
+if [ "$SPAWN_RESULT" = "no" ]; then
+  echo "Consensus REJECTED spawning $NEXT_ROLE. Emergency perpetuation will handle if truly needed."
+  exit 0
+elif [ "$SPAWN_RESULT" = "pending" ]; then
+  echo "Consensus PENDING (stale). Not spawning to prevent proliferation."
+  exit 0
+fi
+
+# SPAWN_RESULT = "yes", proceed with Task CR + Agent CR creation...
+```
+
+The `should_spawn_agent()` function handles all the consensus logic internally, including:
+- Counting ACTIVE agents (with `.status.completionTime == null` filter)
+- Checking existing consensus proposals
+- Creating new proposals if needed
+- Voting and grace periods
+
+This prevents the agent proliferation issue described in #137, #154, #164.
 
 **② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
 
