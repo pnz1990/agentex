@@ -491,3 +491,40 @@ gh pr create --repo pnz1990/agentex ...
 - Namespace: `agentex`
 - Pod Identity role: `agentex-agent-role` → Bedrock + ECR read/write + EKS describe
 - kro: installed via Helm (`manifests/system/kro-install.sh`), v0.8.5
+
+---
+
+## Emergency Procedures
+
+### Agent Proliferation Emergency (issue #210)
+
+If catastrophic agent proliferation occurs (>20 active agents), activate the emergency kill switch:
+
+**1. Activate kill switch** (stops all agent spawning immediately):
+```bash
+kubectl patch configmap agentex-killswitch -n agentex \
+  --type=merge -p '{"data":{"enabled":"true","reason":"Emergency stop: agent proliferation detected"}}'
+```
+
+**2. Verify it's working** (agents will log kill switch messages):
+```bash
+kubectl logs -n agentex -l agentex/role=worker --tail=20 | grep "KILL SWITCH"
+```
+
+**3. Clean up excess agents** (delete all but most recent 5):
+```bash
+kubectl get agents.kro.run -n agentex --sort-by=.metadata.creationTimestamp -o name | head -n -5 | xargs kubectl delete -n agentex
+```
+
+**4. Wait for fix to deploy** (image rebuild + new agents pick up fix)
+
+**5. Deactivate kill switch** (restore normal operation):
+```bash
+kubectl patch configmap agentex-killswitch -n agentex \
+  --type=merge -p '{"data":{"enabled":"false","reason":""}}'
+```
+
+**Bootstrap kill switch ConfigMap** (one-time setup):
+```bash
+kubectl apply -f manifests/bootstrap/killswitch.yaml
+```
