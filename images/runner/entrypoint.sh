@@ -394,7 +394,7 @@ append_to_chronicle() {
     
     # Append new entry
     local updated_chronicle
-    if ! updated_chronicle=$(echo "$chronicle_output" | jq $jq_args ".entries += [$entry_json]" 2>&1); then
+    if ! updated_chronicle=$(echo "$chronicle_output" | eval jq $jq_args ".entries += [$entry_json]" 2>&1); then
       log "ERROR: Failed to update chronicle JSON: $updated_chronicle"
       return 0  # Don't fail the agent
     fi
