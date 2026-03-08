@@ -20,11 +20,25 @@ WORKSPACE="/workspace"
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
 ts() { date +%s; }
 
-# ── 0. Configure kubectl ──────────────────────────────────────────────────────
+# ── 0. Validate critical environment variables ────────────────────────────────
+# Fail fast if required variables are missing to prevent cascading silent failures
+if [ -z "$TASK_CR_NAME" ]; then
+  echo "[FATAL] TASK_CR_NAME is required but not set. Agent cannot proceed without a task assignment." >&2
+  exit 1
+fi
+
+if [ -z "$AGENT_NAME" ] || [ "$AGENT_NAME" = "unknown" ]; then
+  echo "[FATAL] AGENT_NAME is required but not set. Agent cannot proceed without an identity." >&2
+  exit 1
+fi
+
+log "Environment validated: agent=$AGENT_NAME task=$TASK_CR_NAME role=$AGENT_ROLE"
+
+# ── 1. Configure kubectl ──────────────────────────────────────────────────────
 log "Configuring kubectl for cluster $CLUSTER ..."
 aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 
-# ── 1. Helper functions ───────────────────────────────────────────────────────
+# ── 2. Helper functions ───────────────────────────────────────────────────────
 post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
@@ -122,10 +136,10 @@ EOF
   spawn_agent "$agent_name" "$role" "$task_name" "$title"
 }
 
-# ── 2. Announce startup ───────────────────────────────────────────────────────
+# ── 3. Announce startup ───────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
 
-# ── 3. Process inbox ──────────────────────────────────────────────────────────
+# ── 4. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
 INBOX_MESSAGES=""
 INBOX_JSON=$(kubectl get messages -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
@@ -153,7 +167,7 @@ for msg_name in $(echo "$INBOX_JSON" | jq -r \
     --type=merge -p '{"data":{"read":"true"}}' 2>/dev/null || true
 done
 
-# ── 4. Peer thoughts (shared context) ────────────────────────────────────────
+# ── 5. Peer thoughts (shared context) ────────────────────────────────────────
 # Get the last 10 thoughts from other agents, excluding ones we've already read
 THOUGHTS_JSON=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
 PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
@@ -184,7 +198,7 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
 
-# ── 5. Read Task CR ───────────────────────────────────────────────────────────
+# ── 6. Read Task CR ───────────────────────────────────────────────────────────
 log "Reading task CR..."
 TASK_JSON=$(kubectl get task "$TASK_CR_NAME" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
 TASK_TITLE=$(echo "$TASK_JSON" | jq -r '.spec.title // "No title"')
@@ -198,14 +212,14 @@ patch_task_status "InProgress"
 post_message "broadcast" "Starting: $TASK_TITLE" "status"
 post_thought "Task received: $TASK_TITLE. Beginning work." "observation" 8
 
-# ── 6. Clone repo ─────────────────────────────────────────────────────────────
+# ── 7. Clone repo ─────────────────────────────────────────────────────────────
 log "Cloning repo..."
 gh auth setup-git
 mkdir -p "$WORKSPACE/repo"
 git clone "https://github.com/$REPO.git" "$WORKSPACE/repo" --depth=1
 cd "$WORKSPACE/repo"
 
-# ── 7. Configure OpenCode ─────────────────────────────────────────────────────
+# ── 8. Configure OpenCode ─────────────────────────────────────────────────────
 mkdir -p "${HOME}/.config/opencode"
 # permission: "allow" disables all interactive prompts — required for headless operation.
 # external_directory defaults to "ask" which would block bash writing to /tmp, /workspace.
@@ -217,7 +231,7 @@ cat > "${HOME}/.config/opencode/config.json" <<CONFIG
 }
 CONFIG
 
-# ── 8. Build OpenCode prompt ──────────────────────────────────────────────────
+# ── 9. Build OpenCode prompt ──────────────────────────────────────────────────
 ISSUE_LINE=""
 [ "$TASK_ISSUE" != "0" ] && ISSUE_LINE="GitHub Issue: #${TASK_ISSUE} — gh issue view ${TASK_ISSUE} --repo ${REPO}"
 
@@ -373,14 +387,14 @@ NOW BEGIN. Do the task. Then do ①②③④ above. In that order.
 PROMPT
 )
 
-# ── 9. Run OpenCode ───────────────────────────────────────────────────────────
+# ── 10. Run OpenCode ───────────────────────────────────────────────────────────
 log "Running OpenCode..."
 post_thought "Starting OpenCode execution. Task: $TASK_TITLE" "decision" 9
 
 echo "$PROMPT" | opencode run --print-logs 2>&1 | tee /tmp/opencode-output.txt
 OPENCODE_EXIT=${PIPESTATUS[1]}
 
-# ── 10. Post results ──────────────────────────────────────────────────────────
+# ── 11. Post results ──────────────────────────────────────────────────────────
 if [ "$OPENCODE_EXIT" -eq 0 ]; then
   log "OpenCode completed successfully"
   patch_task_status "Done" "Completed successfully"
@@ -393,7 +407,7 @@ else
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
 fi
 
-# ── 10.5. ROLE ESCALATION ─────────────────────────────────────────────────────
+# ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
 # Check if this agent discovered a structural issue that requires architect-level intervention.
 # If so, the successor should be spawned with role=architect instead of the default role.
 ESCALATED_ROLE=""
@@ -415,7 +429,7 @@ if echo "$BLOCKER_THOUGHTS" | grep -qiE '(structural|architecture|RGD|kro.*bug|s
   post_message "broadcast" "Role escalation: $AGENT_NAME discovered structural issue, next agent will be architect" "status"
 fi
 
-# ── 11. EMERGENCY PERPETUATION ────────────────────────────────────────────────
+# ── 12. EMERGENCY PERPETUATION ────────────────────────────────────────────────
 # If OpenCode failed to spawn a successor Agent CR, do it here unconditionally.
 # This is the last line of defense against the system going dark.
 
@@ -474,7 +488,7 @@ else
   log "Successor agent(s) already spawned by this agent ($SPAWNED_BY_ME). Good."
 fi
 
-# ── 12. Update Swarm state ────────────────────────────────────────────────────
+# ── 13. Update Swarm state ────────────────────────────────────────────────────
 if [ -n "$SWARM_REF" ]; then
   CURRENT=$(kubectl get configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
     -o jsonpath='{.data.tasksCompleted}' 2>/dev/null || echo "0")
