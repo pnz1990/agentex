@@ -630,7 +630,7 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
 
-# ── 4b. S3 Historical Thoughts (long-term memory) ─────────────────────────────
+# ── 5b. S3 Historical Thoughts (long-term memory) ─────────────────────────────
 # Supplement in-cluster thoughts with recent historical thoughts from S3
 # This provides context across cluster restarts and preserves institutional memory
 if aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
