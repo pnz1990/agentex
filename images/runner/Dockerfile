@@ -1,5 +1,6 @@
 FROM ubuntu:24.04
 
+# Image version: 2026-03-08-r2 (force rebuild after CRD schema changes in PR #134)
 ARG KUBECTL_VERSION=1.31.0
 ARG GH_VERSION=2.63.2
 ARG OPENCODE_VERSION=latest
