@@ -964,11 +964,35 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   # Set agent name to match role (fix for issue #111)
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
-  # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
-  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
-  # This prevents false positives from completed/failed agents that are still in the cluster.
+  # CONSENSUS CHECK (issue #2, #154): Prevent runaway agent proliferation
+  # Count ACTIVE agents of the same role (agents with RUNNING Jobs only).
+  # Checking .status.completionTime == null is incorrect because:
+  # - Agent CRs can exist without Jobs (kro failures)
+  # - Those "ghost" agents have completionTime == null forever
+  # Instead, we check if the referenced Job exists AND is actively Running.
   RUNNING_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+    jq --arg role "$NEXT_ROLE" --arg ns "$NAMESPACE" '
+      [.items[] | 
+       select(.spec.role == $role and .status.jobName != null and .status.jobName != "") |
+       .status.jobName] as $job_names |
+      if ($job_names | length) == 0 then 0
+      else
+        # For each job, check if it exists and is Running
+        [$job_names[] | select(. != null)] | length
+      end
+    ' 2>/dev/null || echo "0")
+  
+  # Additional check: verify Jobs are actually Running (not just existing)
+  # This requires a second kubectl call to get Job statuses
+  if [ "$RUNNING_AGENTS" -gt 0 ]; then
+    ACTUAL_RUNNING=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+      jq --arg role "$NEXT_ROLE" '
+        [.items[] | 
+         select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | 
+        length
+      ' 2>/dev/null || echo "0")
+    RUNNING_AGENTS="$ACTUAL_RUNNING"
+  fi
   
   CONSENSUS_REQUIRED=false
   if [ "$RUNNING_AGENTS" -ge 3 ]; then
