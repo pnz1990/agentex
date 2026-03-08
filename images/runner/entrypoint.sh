@@ -116,6 +116,129 @@ push_metric() {
     2>/dev/null || true
 }
 
+# ── Consensus Protocol Functions ──────────────────────────────────────────────
+# These functions implement consensus voting via Thought CRs (issue #2).
+# Agents can propose motions, vote on proposals, and check if consensus is reached.
+
+# Propose a motion that requires consensus approval.
+# Usage: propose_motion "motion-name" "Motion text" "3/5" "deadline-timestamp"
+# Creates a Thought CR with thoughtType=proposal
+propose_motion() {
+  local motion_name="$1" motion_text="$2" threshold="$3" deadline="$4"
+  local proposal_content="MOTION: ${motion_name}
+THRESHOLD: ${threshold}
+DEADLINE: ${deadline}
+TEXT: ${motion_text}"
+  
+  post_thought "$proposal_content" "proposal" 9
+  log "Consensus proposal created: $motion_name (threshold=$threshold deadline=$deadline)"
+}
+
+# Cast a vote on a consensus proposal.
+# Usage: cast_vote "motion-name" "yes|no" "reason for vote"
+# Creates a Thought CR with thoughtType=vote
+cast_vote() {
+  local motion_name="$1" vote="$2" reason="$3"
+  local vote_content="MOTION: ${motion_name}
+VOTE: ${vote}
+REASON: ${reason}
+CAST_BY: ${AGENT_NAME}"
+  
+  post_thought "$vote_content" "vote" 9
+  log "Consensus vote cast: motion=$motion_name vote=$vote"
+}
+
+# Check if consensus has been reached for a proposal.
+# Usage: check_consensus "motion-name" "3/5"
+# Returns: "yes" (consensus reached), "no" (consensus failed), "pending" (still open)
+# Optionally posts a verdict Thought CR if threshold is met
+check_consensus() {
+  local motion_name="$1" threshold="$2"
+  local required_yes="${threshold%/*}"
+  local total_votes="${threshold#*/}"
+  
+  # Get all proposal and vote Thoughts for this motion
+  local thoughts_json=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  
+  # Find the proposal
+  local proposal=$(echo "$thoughts_json" | jq -r \
+    --arg motion "$motion_name" \
+    '.items[] | select(.spec.thoughtType == "proposal" and (.spec.content | contains("MOTION: " + $motion))) | 
+     .metadata.name' | head -1)
+  
+  if [ -z "$proposal" ]; then
+    log "Consensus check: motion '$motion_name' not found"
+    echo "pending"
+    return 0
+  fi
+  
+  # Count yes and no votes
+  local yes_votes=$(echo "$thoughts_json" | jq -r \
+    --arg motion "$motion_name" \
+    '.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+     .spec.agentRef' | wc -l)
+  
+  local no_votes=$(echo "$thoughts_json" | jq -r \
+    --arg motion "$motion_name" \
+    '.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+     .spec.agentRef' | wc -l)
+  
+  log "Consensus check: motion=$motion_name yes=$yes_votes no=$no_votes threshold=$threshold"
+  
+  # Check if consensus threshold is met
+  if [ "$yes_votes" -ge "$required_yes" ]; then
+    # Post verdict Thought if not already posted
+    local existing_verdict=$(echo "$thoughts_json" | jq -r \
+      --arg motion "$motion_name" \
+      '.items[] | select(.spec.thoughtType == "verdict" and (.spec.content | contains("MOTION: " + $motion))) | 
+       .metadata.name' | head -1)
+    
+    if [ -z "$existing_verdict" ]; then
+      local verdict_content="MOTION: ${motion_name}
+RESULT: APPROVED
+YES_VOTES: ${yes_votes}
+NO_VOTES: ${no_votes}
+THRESHOLD: ${threshold}
+TALLIED_BY: ${AGENT_NAME}
+TALLIED_AT: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      post_thought "$verdict_content" "verdict" 10
+      log "Consensus REACHED: motion=$motion_name approved with $yes_votes/$total_votes votes"
+    fi
+    echo "yes"
+    return 0
+  fi
+  
+  # Check if consensus is impossible (too many no votes)
+  local remaining_voters=$((total_votes - yes_votes - no_votes))
+  local max_possible_yes=$((yes_votes + remaining_voters))
+  
+  if [ "$max_possible_yes" -lt "$required_yes" ]; then
+    # Post rejection verdict if not already posted
+    local existing_verdict=$(echo "$thoughts_json" | jq -r \
+      --arg motion "$motion_name" \
+      '.items[] | select(.spec.thoughtType == "verdict" and (.spec.content | contains("MOTION: " + $motion))) | 
+       .metadata.name' | head -1)
+    
+    if [ -z "$existing_verdict" ]; then
+      local verdict_content="MOTION: ${motion_name}
+RESULT: REJECTED
+YES_VOTES: ${yes_votes}
+NO_VOTES: ${no_votes}
+THRESHOLD: ${threshold}
+TALLIED_BY: ${AGENT_NAME}
+TALLIED_AT: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      post_thought "$verdict_content" "verdict" 10
+      log "Consensus FAILED: motion=$motion_name rejected (impossible to reach threshold)"
+    fi
+    echo "no"
+    return 0
+  fi
+  
+  log "Consensus PENDING: motion=$motion_name (need $required_yes yes votes, have $yes_votes)"
+  echo "pending"
+  return 0
+}
+
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
@@ -589,12 +712,50 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     esac
   fi
 
-  spawn_task_and_agent \
-    "$NEXT_TASK" \
-    "$NEXT_AGENT" \
-    "$NEXT_ROLE" \
-    "Self-improvement cycle: audit and improve agentex platform" \
-    "You are a $NEXT_ROLE agent in the agentex self-improvement loop.
+  # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
+  # Count running agents of the same role. If >= 3, require consensus before spawning.
+  RUNNING_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role)] | length' 2>/dev/null || echo "0")
+  
+  CONSENSUS_REQUIRED=false
+  if [ "$RUNNING_AGENTS" -ge 3 ]; then
+    log "Consensus check: $RUNNING_AGENTS agents with role=$NEXT_ROLE already exist"
+    CONSENSUS_REQUIRED=true
+    
+    # Check if a proposal already exists for spawning more agents of this role
+    MOTION_NAME="spawn-more-${NEXT_ROLE}-agents"
+    CONSENSUS_RESULT=$(check_consensus "$MOTION_NAME" "3/5")
+    
+    if [ "$CONSENSUS_RESULT" = "yes" ]; then
+      log "Consensus APPROVED: spawn additional $NEXT_ROLE agent"
+    elif [ "$CONSENSUS_RESULT" = "no" ]; then
+      log "Consensus REJECTED: NOT spawning additional $NEXT_ROLE agent (proliferation prevented)"
+      post_thought "Emergency spawn blocked by consensus: $RUNNING_AGENTS $NEXT_ROLE agents already running, consensus rejected spawning more." "blocker" 5
+      # Don't spawn - consensus rejected it
+      NEEDS_EMERGENCY_SPAWN=false
+    else
+      # Consensus pending - create proposal and vote yes (this agent believes it's necessary)
+      log "Consensus PENDING: creating proposal for spawning $NEXT_ROLE agent"
+      DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+      propose_motion "$MOTION_NAME" \
+        "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
+        "3/5" \
+        "$DEADLINE"
+      cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+      
+      log "Consensus proposal created. Spawning anyway (urgent: maintain liveness)."
+      # Note: We spawn anyway in this case because maintaining liveness is critical.
+      # Other agents can vote and future spawns will see the consensus result.
+    fi
+  fi
+
+  if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
+    spawn_task_and_agent \
+      "$NEXT_TASK" \
+      "$NEXT_AGENT" \
+      "$NEXT_ROLE" \
+      "Self-improvement cycle: audit and improve agentex platform" \
+      "You are a $NEXT_ROLE agent in the agentex self-improvement loop.
 Your predecessor was $AGENT_NAME (role=$AGENT_ROLE, task=$TASK_CR_NAME).
 
 Do the following:
@@ -606,10 +767,15 @@ Do the following:
 6. SPAWN YOUR OWN SUCCESSOR before exiting (see Prime Directive in your prompt)
 
 The system must never idle. You are responsible for keeping it alive." \
-    "M" \
-    "0"
+      "M" \
+      "0"
 
-  log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
+    if [ "$CONSENSUS_REQUIRED" = true ]; then
+      log "Emergency successor spawned (with consensus check): Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"
+    else
+      log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
+    fi
+  fi
 fi
 
 # ── 13. Update Swarm state ────────────────────────────────────────────────────

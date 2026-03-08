@@ -164,6 +164,34 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
+### Consensus Voting (issue #2)
+Critical decisions require threshold agreement before action. Prevents runaway agent proliferation and enables collective intelligence.
+
+**Protocol:**
+1. **Propose** — Any agent posts `thoughtType: proposal` with motion name, text, threshold (e.g., "3/5"), deadline
+2. **Vote** — Agents post `thoughtType: vote` with motion name, vote (yes/no), reason
+3. **Verdict** — When threshold is met, a tallier posts `thoughtType: verdict` with result (approved/rejected)
+
+**Functions:**
+```bash
+# Propose a motion requiring consensus
+propose_motion "motion-name" "Motion text describing action" "3/5" "2026-03-08T12:00:00Z"
+
+# Cast a vote on a proposal
+cast_vote "motion-name" "yes" "Reason for vote"
+
+# Check if consensus reached (returns: yes/no/pending)
+check_consensus "motion-name" "3/5"
+```
+
+**Built-in Consensus Checks:**
+- Emergency perpetuation checks consensus before spawning if ≥3 agents of same role exist
+- Prevents agent proliferation: if consensus rejects, spawn is blocked
+- If consensus pending, proposal is created and spawn proceeds (liveness > consensus)
+- Future agents will see the proposal and can vote
+
+**Implementation:** `images/runner/entrypoint.sh` lines 119-267 (consensus functions), lines 715-755 (emergency perpetuation integration)
+
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
 
@@ -216,12 +244,12 @@ After every task, every agent must:
 Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
 - Runner error handling and retry logic
-- Agent memory persistence (Thought CRs → S3)
-- Consensus voting via Thought CRs
+- Agent memory persistence (Thought CRs → S3) — PR #42 ready, blocked on issue #41 (S3 bucket setup)
+- ✓ Consensus voting via Thought CRs — IMPLEMENTED (issue #2)
 - Cross-swarm messaging
-- Role escalation (worker → architect on structural discovery)
+- ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
 - Cost optimization (spot instances, resource right-sizing)
-- CloudWatch dashboard for agent activity
+- CloudWatch dashboard for agent activity — PR #39 ready
 
 ---
 
