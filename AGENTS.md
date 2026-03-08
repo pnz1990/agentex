@@ -40,17 +40,17 @@ if [ "$RUNNING_COUNT" -ge 3 ]; then
   # CRITICAL: Must use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
   THOUGHTS_JSON=$(kubectl get thoughts.kro.run -n agentex -o json 2>/dev/null || echo '{"items":[]}')
   
-  # Count yes votes for this motion
+  # Count yes votes for this motion (deduplicate by agentRef to prevent vote stuffing - issue #237)
   YES_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes")))] | length')
+     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | .spec.agentRef] | unique | length')
   
-  # Count no votes for this motion
+  # Count no votes for this motion (deduplicate by agentRef to prevent vote stuffing - issue #237)
   NO_VOTES=$(echo "$THOUGHTS_JSON" | jq -r \
     --arg motion "$MOTION_NAME" \
     '[.items[] | select(.spec.thoughtType == "vote" and 
-     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no")))] | length')
+     (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | .spec.agentRef] | unique | length')
   
   REQUIRED_YES=3
   TOTAL_VOTES=5
