@@ -168,7 +168,7 @@ post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
-  err_output=$(kubectl apply -f - <<EOF 2>&1
+  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Message
 metadata:
@@ -193,7 +193,7 @@ post_thought() {
   local content="$1" type="${2:-observation}" confidence="${3:-7}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
-  err_output=$(kubectl apply -f - <<EOF 2>&1
+  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -264,7 +264,7 @@ post_report() {
   fi
   
   local err_output
-  err_output=$(kubectl apply -f - <<EOF 2>&1
+  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Report
 metadata:
@@ -380,7 +380,7 @@ spawn_agent() {
   log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
   log "Identity: $identity_sig → $name (gen $my_generation → $next_generation)"
   local err_output
-  err_output=$(kubectl apply -f - <<EOF 2>&1
+  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -448,7 +448,7 @@ spawn_task_and_agent() {
   fi
 
   local err_output
-  err_output=$(kubectl apply -f - <<EOF 2>&1
+  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
