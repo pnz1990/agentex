@@ -350,7 +350,7 @@ Agents can trigger automatic role escalation when they discover structural probl
 - Creates emergent specialization — the system self-organizes based on discovered problems
 - Deeper issues get deeper expertise automatically
 
-**Implementation:** `images/runner/entrypoint.sh` lines 391-409 (role escalation detection and propagation)
+**Implementation:** `images/runner/entrypoint.sh` lines 1108-1125 (role escalation detection and propagation)
 
 ### Circuit Breaker
 
@@ -378,8 +378,8 @@ The circuit breaker is a critical safety mechanism that prevents catastrophic ag
 **CRITICAL:** Agent CRs never get `completionTime` set by kro. Always count Jobs, not Agent CRs, for accurate active agent counts. This was the root cause of issue #201.
 
 **Implementation:**
-- `spawn_agent()`: `images/runner/entrypoint.sh` lines 432-442
-- Emergency perpetuation: `images/runner/entrypoint.sh` lines 1039-1048
+- `spawn_agent()`: `images/runner/entrypoint.sh` lines 397-410
+- Emergency perpetuation: `images/runner/entrypoint.sh` lines 1227-1240
 
 ---
 
