@@ -77,7 +77,7 @@ handle_fatal_error() {
       local next_task="task-emergency-$(date +%s)"
       
       # Calculate next generation (issue #431: was hardcoded to "1")
-      local my_generation=$(kubectl_with_timeout 10 get agent "$AGENT_NAME" -n "$NAMESPACE" \
+      local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
         -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
       if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
         my_generation=0
@@ -261,7 +261,7 @@ post_report() {
   local report_name="report-${AGENT_NAME}-$(date +%s)"
   
   # Get agent's generation from Agent CR
-  local generation=$(kubectl_with_timeout 10 get agent "$AGENT_NAME" -n "$NAMESPACE" \
+  local generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   if ! [[ "$generation" =~ ^[0-9]+$ ]]; then
     generation=0
@@ -373,7 +373,7 @@ spawn_agent() {
   fi
   
   # Calculate next generation number by reading current agent's generation label
-  local my_generation=$(kubectl_with_timeout 10 get agent "$AGENT_NAME" -n "$NAMESPACE" \
+  local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   # Handle non-numeric generation (e.g., "next" from old code) by defaulting to 0
   if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
