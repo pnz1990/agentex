@@ -406,12 +406,14 @@ should_spawn_agent() {
 
   # Count running Jobs for this role (Jobs have reliable completionTime; Agent CRs do not).
   # A job is "active" if it has no completionTime and at least one active pod.
+  # This MUST match the check in spawn_agent() to maintain consistency (issue #308).
   local running_agents=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq --arg role "$role" '[.items[] | select(
       (.metadata.name | startswith($role)) and
       .status.completionTime == null and
       (.status.active // 0) > 0
     )] | length' 2>/dev/null || echo "0")
+
 
   if [ "$running_agents" -ge 3 ]; then
     log "should_spawn_agent: $running_agents active jobs with role=$role (threshold: 3)"
