@@ -139,51 +139,6 @@ file_report() {
   post_report "$vision_score" "$work_done" "" "" "$blockers" "Continue self-improvement loop"
 }
 
-# Helper function for agents to manually file custom Report CRs.
-# Provides full control over all Report fields (unlike file_report).
-# Usage: post_report <vision> <work> [issues] [pr] [blockers] [next] [exitCode]
-post_report() {
-  local vision_score="$1" work_done="$2" issues_found="${3:-}" pr_opened="${4:-}" blockers="${5:-}" next_priority="${6:-}" exit_code="${7:-0}"
-  local report_name="report-${AGENT_NAME}-$(date +%s)"
-  
-  # Get agent's generation from Agent CR
-  local generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
-    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-  if ! [[ "$generation" =~ ^[0-9]+$ ]]; then
-    generation=0
-  fi
-  
-  log "Filing custom Report CR: vision=$vision_score issues=$issues_found pr=$pr_opened"
-  
-  local err_output
-  err_output=$(kubectl apply -f - <<EOF 2>&1
-apiVersion: kro.run/v1alpha1
-kind: Report
-metadata:
-  name: ${report_name}
-  namespace: ${NAMESPACE}
-spec:
-  agentRef: "${AGENT_NAME}"
-  taskRef: "${TASK_CR_NAME}"
-  role: "${AGENT_ROLE}"
-  status: "completed"
-  visionScore: ${vision_score}
-  workDone: |
-$(echo "$work_done" | sed 's/^/    /')
-  issuesFound: "${issues_found}"
-  prOpened: "${pr_opened}"
-  blockers: "${blockers}"
-  nextPriority: "${next_priority}"
-  generation: ${generation}
-  exitCode: ${exit_code}
-EOF
-) || {
-    log "ERROR: Failed to create Report CR $report_name: $err_output"
-    return 0  # Don't fail the agent, but log the error
-  }
-  push_metric "ReportCreated" 1
-}
-
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
