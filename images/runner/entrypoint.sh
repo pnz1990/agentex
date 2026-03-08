@@ -87,6 +87,26 @@ EOF
     return 0  # Don't fail the agent, but log the error
   }
   push_metric "ThoughtCreated" 1
+
+  # Persist thought to S3 for long-term memory (survives cluster restarts)
+  # Check if bucket exists before attempting write
+  if aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
+    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local s3_key="${AGENT_NAME}-${thought_name}.json"
+    
+    # Create JSON document with full thought metadata
+    cat <<JSON | aws s3 cp - "s3://agentex-thoughts/${s3_key}" --content-type application/json 2>/dev/null || true
+{
+  "name": "${thought_name}",
+  "agentRef": "${AGENT_NAME}",
+  "taskRef": "${TASK_CR_NAME}",
+  "thoughtType": "${type}",
+  "confidence": ${confidence},
+  "timestamp": "${timestamp}",
+  "content": $(echo "$content" | jq -Rs .)
+}
+JSON
+  fi
 }
 
 # File a Report CR for god-observer to synthesize system state.
@@ -280,6 +300,50 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
   kubectl patch configmap "${thought_name}-thought" -n "$NAMESPACE" \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
+
+# ── 4b. S3 Historical Thoughts (long-term memory) ─────────────────────────────
+# Supplement in-cluster thoughts with recent historical thoughts from S3
+# This provides context across cluster restarts and preserves institutional memory
+if aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
+  S3_THOUGHTS=""
+  
+  # Get the 20 most recent thought files from S3 (sorted by modification time)
+  S3_FILES=$(aws s3 ls s3://agentex-thoughts/ --recursive 2>/dev/null | \
+    sort -k1,2 | tail -20 | awk '{print $4}' || true)
+  
+  # Read each thought file and format for display (exclude our own thoughts)
+  for s3_key in $S3_FILES; do
+    THOUGHT_DATA=$(aws s3 cp "s3://agentex-thoughts/${s3_key}" - 2>/dev/null || echo "{}")
+    
+    # Extract fields and format like in-cluster thoughts
+    THOUGHT_AGENT=$(echo "$THOUGHT_DATA" | jq -r '.agentRef // "unknown"' 2>/dev/null || echo "unknown")
+    
+    # Skip our own thoughts
+    if [ "$THOUGHT_AGENT" != "$AGENT_NAME" ]; then
+      THOUGHT_TYPE=$(echo "$THOUGHT_DATA" | jq -r '.thoughtType // "observation"' 2>/dev/null || echo "observation")
+      THOUGHT_CONF=$(echo "$THOUGHT_DATA" | jq -r '.confidence // 7' 2>/dev/null || echo "7")
+      THOUGHT_CONTENT=$(echo "$THOUGHT_DATA" | jq -r '.content // ""' 2>/dev/null || echo "")
+      
+      if [ -n "$THOUGHT_CONTENT" ]; then
+        S3_THOUGHTS="${S3_THOUGHTS}[${THOUGHT_AGENT}/${THOUGHT_TYPE}/c=${THOUGHT_CONF}] (S3): ${THOUGHT_CONTENT}
+"
+      fi
+    fi
+  done
+  
+  # Combine in-cluster and S3 thoughts (prioritize in-cluster as they're more recent)
+  if [ -n "$S3_THOUGHTS" ]; then
+    if [ -n "$PEER_THOUGHTS" ]; then
+      PEER_THOUGHTS="${PEER_THOUGHTS}
+
+=== S3 HISTORICAL CONTEXT ===
+${S3_THOUGHTS}"
+    else
+      PEER_THOUGHTS="=== S3 HISTORICAL CONTEXT ===
+${S3_THOUGHTS}"
+    fi
+  fi
+fi
 
 # ── 6. Read Task CR ───────────────────────────────────────────────────────────
 log "Reading task CR..."
