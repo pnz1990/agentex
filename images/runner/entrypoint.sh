@@ -820,17 +820,31 @@ else
     
     if [ -z "$JOB_NAME" ]; then
       log "WARNING: Agent CR $agent_name exists but status.jobName is empty (kro hasn't processed it yet)"
-      # Give kro a moment to process the Agent CR (it may be in progress)
-      sleep 5
-      JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
-        -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+      # Give kro time to process the Agent CR - retry with backoff (issue #406)
+      # Under load, kro can take >5s to create Jobs. Use 15s grace period with 3s intervals.
+      MAX_WAIT=15
+      INTERVAL=3
+      ELAPSED=0
+      
+      while [ $ELAPSED -lt $MAX_WAIT ]; do
+        sleep $INTERVAL
+        ELAPSED=$((ELAPSED + INTERVAL))
+        JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+          -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+        
+        if [ -n "$JOB_NAME" ]; then
+          log "✓ kro created Job after ${ELAPSED}s: $JOB_NAME"
+          break
+        fi
+        log "Still waiting for kro to process Agent CR $agent_name (${ELAPSED}s/${MAX_WAIT}s elapsed)..."
+      done
     fi
     
     if [ -z "$JOB_NAME" ]; then
-      log "ERROR: Agent CR $agent_name still has no Job after 5s wait. kro may be down or RGD is broken."
+      log "ERROR: Agent CR $agent_name still has no Job after 15s wait. kro may be down or RGD is broken."
       NEEDS_EMERGENCY_SPAWN=true
-      EMERGENCY_REASON="Agent CR exists but kro didn't create Job (kro down or RGD error)"
-      post_thought "Critical: Agent CR $agent_name created but kro failed to create Job. Possible kro failure or RGD syntax error." "blocker" 2
+      EMERGENCY_REASON="Agent CR exists but kro didn't create Job after 15s (kro down or RGD error)"
+      post_thought "Critical: Agent CR $agent_name created but kro failed to create Job after 15s wait. Possible kro failure or RGD syntax error." "blocker" 2
       break
     fi
     
