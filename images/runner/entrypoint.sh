@@ -378,6 +378,51 @@ check_proposal_age() {
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
+  # CONSENSUS CHECK (issue #137): Prevent runaway agent proliferation for ALL spawns
+  # Count running agents of the same role. If >= 3, require consensus before spawning.
+  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg role "$role" '[.items[] | select(.spec.role == $role)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$running_agents" -ge 3 ]; then
+    log "Consensus check: $running_agents agents with role=$role already exist (threshold: 3)"
+    
+    # Check if a proposal already exists for spawning more agents of this role
+    local motion_name="spawn-more-${role}-agents"
+    local consensus_result=$(check_consensus "$motion_name" "3/5")
+    
+    if [ "$consensus_result" = "yes" ]; then
+      log "Consensus APPROVED: spawn additional $role agent"
+    elif [ "$consensus_result" = "no" ]; then
+      log "Consensus REJECTED: NOT spawning additional $role agent (proliferation prevented)"
+      post_thought "Spawn blocked by consensus: $running_agents $role agents already running, consensus rejected spawning more." "decision" 7
+      return 1  # Don't spawn - consensus rejected it
+    else
+      # Consensus pending - check proposal age before deciding
+      local proposal_age=$(check_proposal_age "$motion_name")
+      
+      if [ "$proposal_age" -ge 9999 ]; then
+        # No proposal exists yet - create one
+        log "Consensus PENDING: creating NEW proposal for spawning $role agent"
+        local deadline=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+        propose_motion "$motion_name" \
+          "Spawn additional $role agent (currently $running_agents exist). Reason: $reason" \
+          "3/5" \
+          "$deadline"
+        cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
+        # Allow spawn to proceed - proposal is created, future agents can vote
+        log "Consensus proposal created. Allowing spawn to proceed (liveness > consensus blocking)."
+      elif [ "$proposal_age" -lt 300 ]; then
+        # Proposal is < 5 minutes old - allow spawn (liveness > consensus)
+        log "Consensus PENDING but proposal age is ${proposal_age}s (< 5 min). Allowing spawn for liveness."
+      else
+        # Proposal is > 5 minutes old and still pending - BLOCK spawn
+        log "Consensus PENDING for ${proposal_age}s (> 5 min). BLOCKING spawn - consensus failed."
+        post_thought "Spawn blocked: consensus proposal for $role agents is ${proposal_age}s old and still no decision. Not spawning." "blocker" 6
+        return 1
+      fi
+    fi
+  fi
+  
   # Calculate next generation number by reading current agent's generation label
   local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
