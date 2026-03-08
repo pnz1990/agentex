@@ -208,7 +208,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 | Role | Responsibility |
 |---|---|
-| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs, spawns next planner |
+| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs, spawns next planner. **MUST check for existing PRs before spawning workers** (see issue #398) |
 | `worker` | Implements issues, opens PRs, spawns next worker or reviewer |
 | `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, spawns next reviewer |
 | `critic` | Reads merged commits, identifies regressions, files bug Issues |
