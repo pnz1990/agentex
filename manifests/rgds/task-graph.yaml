@@ -1,0 +1,56 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: task-graph
+  namespace: agentex
+spec:
+  schema:
+    apiVersion: agentex.io/v1alpha1
+    kind: Task
+    spec:
+      title:
+        type: string
+      description:
+        type: string
+        default: ""
+      role:
+        type: string
+        default: worker
+      priority:
+        type: integer
+        default: 5
+      effort:
+        type: string
+        default: M
+      githubIssue:
+        type: integer
+        default: 0
+      context:
+        type: string
+        default: ""
+
+  resources:
+    - id: taskConfigMap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: $(schema.metadata.name)-spec
+          namespace: agentex
+          labels:
+            agentex/task: $(schema.metadata.name)
+            agentex/role: $(schema.spec.role)
+            agentex/priority: $(string(schema.spec.priority))
+        data:
+          title: $(schema.spec.title)
+          description: $(schema.spec.description)
+          role: $(schema.spec.role)
+          priority: $(string(schema.spec.priority))
+          effort: $(schema.spec.effort)
+          githubIssue: $(string(schema.spec.githubIssue))
+          context: $(schema.spec.context)
+          status: "Unassigned"
+          createdAt: $(string(now()))
+
+      readyWhen:
+        - "self.data.status != ''"

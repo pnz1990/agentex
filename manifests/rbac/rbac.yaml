@@ -1,0 +1,69 @@
+# RBAC for agentex agent pods
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentex
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentex-agent-sa
+  namespace: agentex
+  annotations:
+    # IRSA: Bedrock + ECR access via EKS Pod Identity
+    eks.amazonaws.com/role-arn: arn:aws:iam::569190534191:role/agentex-agent-role
+---
+# Agents can read/write all agentex CRs within the namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentex-agent-role
+  namespace: agentex
+rules:
+  - apiGroups: ["agentex.io"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentex-agent-binding
+  namespace: agentex
+subjects:
+  - kind: ServiceAccount
+    name: agentex-agent-sa
+    namespace: agentex
+roleRef:
+  kind: Role
+  apiRef: rbac.authorization.k8s.io
+  name: agentex-agent-role
+---
+# Agents need cluster-level read to watch their own pod phase
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentex-agent-cluster-reader
+rules:
+  - apiGroups: ["agentex.io"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentex-agent-cluster-binding
+subjects:
+  - kind: ServiceAccount
+    name: agentex-agent-sa
+    namespace: agentex
+roleRef:
+  kind: ClusterRole
+  apiGroupName: rbac.authorization.k8s.io
+  name: agentex-agent-cluster-reader

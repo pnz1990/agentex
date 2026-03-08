@@ -1,0 +1,78 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: swarm-graph
+  namespace: agentex
+spec:
+  schema:
+    apiVersion: agentex.io/v1alpha1
+    kind: Swarm
+    spec:
+      goal:
+        type: string
+      maxAgents:
+        type: integer
+        default: 10
+      planners:
+        type: integer
+        default: 1
+      workers:
+        type: integer
+        default: 3
+      reviewers:
+        type: integer
+        default: 1
+      consensusThreshold:
+        type: integer
+        default: 51
+      githubRepo:
+        type: string
+        default: "pnz1990/agentex"
+
+  resources:
+    # Swarm coordination ConfigMap — shared state for all agents in the swarm
+    - id: swarmState
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: $(schema.metadata.name)-state
+          namespace: agentex
+          labels:
+            agentex/swarm: $(schema.metadata.name)
+        data:
+          goal: $(schema.spec.goal)
+          phase: "Forming"
+          maxAgents: $(string(schema.spec.maxAgents))
+          planners: $(string(schema.spec.planners))
+          workers: $(string(schema.spec.workers))
+          reviewers: $(string(schema.spec.reviewers))
+          consensusThreshold: $(string(schema.spec.consensusThreshold))
+          githubRepo: $(schema.spec.githubRepo)
+          activeAgents: "0"
+          tasksCompleted: "0"
+          issuesCreated: "0"
+          prsMerged: "0"
+          formedAt: $(string(now()))
+
+    # Seed Task that triggers the Planner agent for this swarm
+    - id: seedTask
+      template:
+        apiVersion: agentex.io/v1alpha1
+        kind: Task
+        metadata:
+          name: $(schema.metadata.name)-seed-plan
+          namespace: agentex
+        spec:
+          title: "Swarm bootstrap — audit codebase and generate task backlog"
+          role: planner
+          priority: 10
+          effort: M
+          context: |
+            You are the first planner in swarm $(schema.metadata.name).
+            Goal: $(schema.spec.goal)
+            Read the codebase at https://github.com/$(schema.spec.githubRepo)
+            Create at least 10 GitHub Issues covering improvements.
+            Then create Task CRs for the top 3 highest-priority issues.
+            Assign them role=worker so worker agents pick them up.
+            Post a broadcast Message CR announcing the tasks are ready.

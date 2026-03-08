@@ -1,0 +1,94 @@
+# Bootstrap: creates the Seed Agent that starts the entire system
+# Apply this once: kubectl apply -f manifests/bootstrap/seed-agent.yaml
+---
+# Seed Task: instructs the seed agent to bootstrap the swarm
+apiVersion: agentex.io/v1alpha1
+kind: Task
+metadata:
+  name: seed-bootstrap
+  namespace: agentex
+spec:
+  title: "Bootstrap agentex — spawn first planner and worker agents"
+  role: seed
+  priority: 10
+  effort: S
+  context: |
+    You are the Seed agent. Your only job is to bootstrap the system and then exit.
+
+    Steps:
+    1. Create a Planner Task CR:
+       kubectl apply -f - <<EOF
+       apiVersion: agentex.io/v1alpha1
+       kind: Task
+       metadata:
+         name: task-planner-001
+         namespace: agentex
+       spec:
+         title: "Initial codebase audit — generate improvement backlog"
+         role: planner
+         priority: 10
+         effort: M
+         context: |
+           Audit the agentex codebase at https://github.com/pnz1990/agentex
+           Read ALL files in manifests/, images/, infra/, and AGENTS.md
+           Create at least 15 GitHub Issues covering:
+           - RGD improvements (readyWhen, error handling, resource limits)
+           - Agent runner improvements (retry logic, output parsing, message handling)
+           - New agent roles or capabilities
+           - Security improvements (RBAC, secret handling)
+           - Observability (CloudWatch metrics, log patterns)
+           - Self-improvement opportunities
+           After creating issues, create Task CRs for top 5 and post broadcast message.
+       EOF
+
+    2. Create a Worker Task CR:
+       kubectl apply -f - <<EOF
+       apiVersion: agentex.io/v1alpha1
+       kind: Task
+       metadata:
+         name: task-worker-001
+         namespace: agentex
+       spec:
+         title: "Pick up first available worker task from backlog"
+         role: worker
+         priority: 5
+         effort: M
+         context: |
+           Check for open GitHub Issues at https://github.com/pnz1990/agentex
+           Pick the highest priority unassigned issue.
+           Implement it using isolated clone pattern:
+             mkdir -p /workspace/issue-N
+             git clone https://github.com/pnz1990/agentex /workspace/issue-N
+           Open PR, post completion Message CR, create follow-up Task.
+       EOF
+
+    3. Create a Swarm CR to coordinate them:
+       kubectl apply -f - <<EOF
+       apiVersion: agentex.io/v1alpha1
+       kind: Swarm
+       metadata:
+         name: swarm-alpha
+         namespace: agentex
+       spec:
+         goal: "Improve the agentex platform's own agent orchestration capabilities"
+         maxAgents: 10
+         planners: 2
+         workers: 5
+         reviewers: 1
+         consensusThreshold: 51
+       EOF
+
+    4. Post a broadcast Message announcing bootstrap is complete.
+    5. Patch your own Task status to Done.
+    6. Exit.
+---
+# Seed Agent CR — apply this to start the system
+apiVersion: agentex.io/v1alpha1
+kind: Agent
+metadata:
+  name: seed-001
+  namespace: agentex
+spec:
+  role: seed
+  taskRef: seed-bootstrap
+  priority: 10

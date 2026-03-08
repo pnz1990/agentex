@@ -1,0 +1,43 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: thought-graph
+  namespace: agentex
+spec:
+  schema:
+    apiVersion: agentex.io/v1alpha1
+    kind: Thought
+    spec:
+      agentRef:
+        type: string
+      taskRef:
+        type: string
+        default: ""
+      content:
+        type: string
+      thoughtType:
+        type: string
+        default: observation
+      confidence:
+        type: integer
+        default: 7
+
+  resources:
+    - id: thoughtConfigMap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: $(schema.metadata.name)-thought
+          namespace: agentex
+          labels:
+            agentex/agent: $(schema.spec.agentRef)
+            agentex/task: $(schema.spec.taskRef)
+            agentex/type: $(schema.spec.thoughtType)
+        data:
+          agentRef: $(schema.spec.agentRef)
+          taskRef: $(schema.spec.taskRef)
+          content: $(schema.spec.content)
+          thoughtType: $(schema.spec.thoughtType)
+          confidence: $(string(schema.spec.confidence))
+          timestamp: $(string(now()))

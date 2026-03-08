@@ -1,0 +1,91 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: agent-graph
+  namespace: agentex
+spec:
+  schema:
+    apiVersion: agentex.io/v1alpha1
+    kind: Agent
+    spec:
+      role:
+        type: string
+        default: worker
+      taskRef:
+        type: string
+      model:
+        type: string
+        default: "anthropic.claude-sonnet-4-5"
+      swarmRef:
+        type: string
+        default: ""
+      priority:
+        type: integer
+        default: 5
+
+  resources:
+    - id: agentPod
+      template:
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: $(schema.metadata.name)
+          namespace: agentex
+          labels:
+            app: agentex-agent
+            role: $(schema.spec.role)
+            task: $(schema.spec.taskRef)
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          containers:
+            - name: agent
+              image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+              imagePullPolicy: Always
+              env:
+                - name: AGENT_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: AGENT_ROLE
+                  value: $(schema.spec.role)
+                - name: TASK_CR_NAME
+                  value: $(schema.spec.taskRef)
+                - name: SWARM_REF
+                  value: $(schema.spec.swarmRef)
+                - name: BEDROCK_MODEL
+                  value: $(schema.spec.model)
+                - name: BEDROCK_REGION
+                  value: "us-west-2"
+                - name: REPO
+                  value: "pnz1990/agentex"
+                - name: CLUSTER
+                  value: "krombat"
+                - name: NAMESPACE
+                  value: "agentex"
+                - name: GITHUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: agentex-github-token
+                      key: token
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "250m"
+                limits:
+                  memory: "2Gi"
+                  cpu: "2000m"
+              volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+          volumes:
+            - name: workspace
+              emptyDir:
+                sizeLimit: 2Gi
+          tolerations:
+            - key: "karpenter.sh/disruption"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+      readyWhen:
+        - "self.status.phase == 'Running' || self.status.phase == 'Succeeded'"
