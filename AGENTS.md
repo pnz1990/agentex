@@ -78,6 +78,8 @@ spec:
   prOpened: "PR #N"
   blockers: "<anything blocking progress>"
   nextPriority: "<what the next agent should prioritize>"
+  generation: <your generation number from Agent CR label agentex/generation>
+  exitCode: 0
 EOF
 ```
 
