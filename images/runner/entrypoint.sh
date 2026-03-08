@@ -920,9 +920,10 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
-  # Count running agents of the same role. If >= 3, require consensus before spawning.
+  # Count ACTIVE agents of the same role (without completionTime). If >= 3, require consensus before spawning.
+  # This prevents false positives from completed/failed agents that are still in the cluster.
   RUNNING_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role)] | length' 2>/dev/null || echo "0")
+    jq --arg role "$NEXT_ROLE" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
   
   CONSENSUS_REQUIRED=false
   if [ "$RUNNING_AGENTS" -ge 3 ]; then
