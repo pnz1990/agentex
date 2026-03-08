@@ -47,6 +47,8 @@ spec:
           tasksCompleted: "0"
           issuesCreated: "0"
           prsMerged: "0"
+          lastActivityTimestamp: ""
+          memberAgents: ""
 
     # ── Planner Agent Job ────────────────────────────────────────────────────
     # Spawned immediately when the Swarm is created.

@@ -182,12 +182,17 @@ metadata:
   namespace: agentex
 spec:
   from: planner-001
-  to: worker-003          # or "broadcast" for all agents
+  to: worker-003          # or "broadcast" for all agents, or "swarm:<name>" for swarm-wide
   thread: task-042
   body: |
     Task 42 is ready. File: manifests/rgds/agent-graph.yaml
     Branch: issue-42-agent-readywhen
 ```
+
+**Message targets:**
+- `<agent-name>`: Direct message to a specific agent
+- `broadcast`: All agents in the namespace receive it
+- `swarm:<swarm-name>`: All agents that are members of the specified swarm
 
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
@@ -222,6 +227,33 @@ check_consensus "motion-name" "3/5"
 
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
+
+---
+
+## Swarm Coordination
+
+Swarms enable groups of agents to collaborate on complex goals:
+
+**Lifecycle:**
+1. **Forming** — Swarm CR created, planner spawns, workers join
+2. **Active** — Workers execute tasks, update swarm state
+3. **Disbanded** — All tasks complete + 5min idle → automatic dissolution
+
+**Dissolution conditions:**
+- All swarm tasks have `phase: Done`
+- No new tasks created in last 5 minutes
+- System broadcasts dissolution message and marks swarm `phase: Disbanded`
+
+**Cross-swarm messaging:**
+- Agents can send messages to `swarm:<name>` (e.g., `swarm:memory`, `swarm:consensus`)
+- Only agents with `SWARM_REF=<name>` receive swarm-targeted messages
+- Enables coordination between different swarms working on related goals
+
+**State tracking** (ConfigMap `<swarm>-state`):
+- `memberAgents`: Comma-separated list of agents that joined
+- `tasksCompleted`: Number of tasks finished by swarm members
+- `lastActivityTimestamp`: Last time an agent updated swarm state
+- `phase`: Forming → Active → Disbanded
 
 ---
 
@@ -272,10 +304,15 @@ After every task, every agent must:
 Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
 - Runner error handling and retry logic
+<<<<<<< HEAD
 - Agent memory persistence (Thought CRs → S3) — PR #42 ready, blocked on issue #41 (S3 bucket setup)
 - ✓ Consensus voting via Thought CRs — IMPLEMENTED (issue #2)
 - Cross-swarm messaging
 - ✓ Role escalation (worker → architect on structural discovery) — IMPLEMENTED (issue #7)
+=======
+- Agent memory persistence (Thought CRs → S3)
+- Consensus voting via Thought CRs
+>>>>>>> fe3e386 (feat: implement swarm coordination - dissolution and cross-swarm messaging (issues #8 #10))
 - Cost optimization (spot instances, resource right-sizing)
 - CloudWatch dashboard for agent activity — PR #39 ready
 
