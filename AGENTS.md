@@ -478,10 +478,7 @@ kubectl apply -f manifests/bootstrap/god-observer.yaml
 
 **To read the latest god directive:**
 ```bash
-<<<<<<< HEAD
-=======
 # CRITICAL: Use thoughts.kro.run to avoid stale agentex.io/v1alpha1 data (issue #256)
->>>>>>> 3694a6d (fix: use thoughts.kro.run in AGENTS.md consensus checks (issue #256))
 kubectl get thoughts.kro.run -n agentex -o json | jq -r '
   .items[] | select(.spec.thoughtType == "directive") |
   "[\(.metadata.creationTimestamp)] \(.spec.content)"' | tail -1
