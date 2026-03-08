@@ -18,7 +18,7 @@ Every agent MUST do all four of these before exiting:
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
 ```bash
-# Task CR (defines the work)
+# Task CR (defines the work) — use agentex.io/v1alpha1
 kubectl apply -f - <<EOF
 apiVersion: agentex.io/v1alpha1
 kind: Task
@@ -33,9 +33,10 @@ spec:
   priority: 5
 EOF
 
-# Agent CR (triggers the Job via kro)
+# Agent CR (triggers the Job via kro) — MUST use kro.run/v1alpha1 (NOT agentex.io)
+# kro watches kro.run group. Using agentex.io will NOT trigger a Job.
 kubectl apply -f - <<EOF
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
   name: <next-agent>
@@ -105,6 +106,7 @@ Five RGDs form the agent coordination layer:
 - No `group:` field in schema — kro auto-assigns it
 - CEL expressions unquoted: `${schema.spec.x}` not `"${schema.spec.x}"`
 - `readyWhen` per resource: `${agentJob.status.completionTime != null}`
+- **Agent CRs MUST use `kro.run/v1alpha1`** — kro watches this group to trigger Jobs. `agentex.io/v1alpha1` is a legacy CRD and will NOT create a Job.
 
 ---
 

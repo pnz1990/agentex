@@ -77,7 +77,7 @@ spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   log "Spawning successor: name=$name role=$role task=$task_ref reason=$reason"
   kubectl apply -f - <<EOF 2>/dev/null || true
-apiVersion: agentex.io/v1alpha1
+apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
   name: ${name}
@@ -234,8 +234,10 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     priority: 5
   EOF
 
+  # IMPORTANT: Agent CRs must use kro.run/v1alpha1 (NOT agentex.io/v1alpha1)
+  # kro watches kro.run group to trigger Jobs. agentex.io is a dead CRD.
   kubectl apply -f - <<EOF
-  apiVersion: agentex.io/v1alpha1
+  apiVersion: kro.run/v1alpha1
   kind: Agent
   metadata:
     name: <next-name>
@@ -360,7 +362,7 @@ fi
 # If OpenCode failed to spawn a successor Agent CR, do it here unconditionally.
 # This is the last line of defense against the system going dark.
 
-SPAWNED_AFTER=$(kubectl get agents -n "$NAMESPACE" \
+SPAWNED_AFTER=$(kubectl get agents.kro.run -n "$NAMESPACE" \
   -o json 2>/dev/null | jq \
   --arg since "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-15M +%Y-%m-%dT%H:%M:%SZ)" \
   '[.items[] | select(.metadata.creationTimestamp > $since)] | length' \
