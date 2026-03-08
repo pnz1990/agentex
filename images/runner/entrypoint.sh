@@ -439,13 +439,66 @@ fi
 
 # Check if THIS agent spawned a successor by filtering on the spawned-by label.
 # This is precise and avoids false positives from other agents' spawns.
-SPAWNED_BY_ME=$(kubectl get agents.kro.run -n "$NAMESPACE" \
+SUCCESSOR_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" \
   -l "agentex/spawned-by=$AGENT_NAME" \
-  -o json 2>/dev/null | jq '.items | length' 2>/dev/null || echo "0")
+  -o json 2>/dev/null || echo '{"items":[]}')
+SPAWNED_BY_ME=$(echo "$SUCCESSOR_AGENTS" | jq '.items | length' 2>/dev/null || echo "0")
+
+NEEDS_EMERGENCY_SPAWN=false
+EMERGENCY_REASON=""
 
 if [ "$SPAWNED_BY_ME" -eq 0 ]; then
   log "WARNING: No successor Agent CR created. Activating emergency perpetuation."
+  NEEDS_EMERGENCY_SPAWN=true
+  EMERGENCY_REASON="No Agent CR created"
   post_thought "Emergency perpetuation triggered — OpenCode did not spawn a successor." "blocker" 3
+else
+  # Agent CR(s) exist, but verify kro actually created Job(s) for them
+  # Issue #54: Agent CR can exist but kro may fail to create the Job
+  log "Found $SPAWNED_BY_ME successor Agent CR(s). Verifying Jobs were created by kro..."
+  
+  JOBS_VERIFIED=0
+  for agent_name in $(echo "$SUCCESSOR_AGENTS" | jq -r '.items[].metadata.name' 2>/dev/null || true); do
+    # Check if Agent CR has status.jobName populated by kro
+    JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+      -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+    
+    if [ -z "$JOB_NAME" ]; then
+      log "WARNING: Agent CR $agent_name exists but status.jobName is empty (kro hasn't processed it yet)"
+      # Give kro a moment to process the Agent CR (it may be in progress)
+      sleep 5
+      JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+        -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+    fi
+    
+    if [ -z "$JOB_NAME" ]; then
+      log "ERROR: Agent CR $agent_name still has no Job after 5s wait. kro may be down or RGD is broken."
+      NEEDS_EMERGENCY_SPAWN=true
+      EMERGENCY_REASON="Agent CR exists but kro didn't create Job (kro down or RGD error)"
+      post_thought "Critical: Agent CR $agent_name created but kro failed to create Job. Possible kro failure or RGD syntax error." "blocker" 2
+      break
+    fi
+    
+    # Verify the Job actually exists
+    if kubectl get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
+      log "✓ Agent CR $agent_name → Job $JOB_NAME exists"
+      JOBS_VERIFIED=$((JOBS_VERIFIED + 1))
+    else
+      log "ERROR: Agent CR $agent_name has status.jobName=$JOB_NAME but Job doesn't exist"
+      NEEDS_EMERGENCY_SPAWN=true
+      EMERGENCY_REASON="Job referenced by Agent CR doesn't exist"
+      post_thought "Critical: Agent CR $agent_name references Job $JOB_NAME but Job not found. kro may have failed." "blocker" 2
+      break
+    fi
+  done
+  
+  if [ "$JOBS_VERIFIED" -gt 0 ] && [ "$NEEDS_EMERGENCY_SPAWN" = false ]; then
+    log "Successor verification passed: $JOBS_VERIFIED Job(s) confirmed. No emergency perpetuation needed."
+  fi
+fi
+
+if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
+  log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
 
   TS=$(ts)
   NEXT_TASK="task-continue-${TS}"
@@ -487,9 +540,7 @@ The system must never idle. You are responsible for keeping it alive." \
     "M" \
     "0"
 
-  log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE"
-else
-  log "Successor agent(s) already spawned by this agent ($SPAWNED_BY_ME). Good."
+  log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
 fi
 
 # ── 12. Update Swarm state ────────────────────────────────────────────────────
