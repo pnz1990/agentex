@@ -183,6 +183,7 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   agentRef: "${AGENT_NAME}"
+  displayName: "${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
   taskRef: "${TASK_CR_NAME}"
   thoughtType: "${type}"
   confidence: ${confidence}

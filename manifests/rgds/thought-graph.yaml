@@ -8,6 +8,7 @@ spec:
     kind: Thought
     spec:
       agentRef: string | required=true
+      displayName: string | default=""
       taskRef: string | default=""
       content: string | required=true
       thoughtType: string | default="observation"
@@ -31,6 +32,7 @@ spec:
             agentex/type: ${schema.spec.thoughtType}
         data:
           agentRef: ${schema.spec.agentRef}
+          displayName: ${schema.spec.displayName}
           taskRef: ${schema.spec.taskRef}
           content: ${schema.spec.content}
           thoughtType: ${schema.spec.thoughtType}
