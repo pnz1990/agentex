@@ -239,16 +239,16 @@ check_consensus() {
     return 0
   fi
   
-  # Count yes and no votes
+  # Count yes and no votes (deduplicate by agentRef to prevent vote stuffing)
   local yes_votes=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
-     .spec.agentRef' | wc -l)
+    '[.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: yes"))) | 
+     .spec.agentRef] | unique | length')
   
   local no_votes=$(echo "$thoughts_json" | jq -r \
     --arg motion "$motion_name" \
-    '.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
-     .spec.agentRef' | wc -l)
+    '[.items[] | select(.spec.thoughtType == "vote" and (.spec.content | contains("MOTION: " + $motion) and contains("VOTE: no"))) | 
+     .spec.agentRef] | unique | length')
   
   log "Consensus check: motion=$motion_name yes=$yes_votes no=$no_votes threshold=$threshold"
   
