@@ -574,6 +574,26 @@ spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
+  # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
+  if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
+    local issue_state=$(gh issue view "$issue" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+    
+    if [ "$issue_state" = "NOT_FOUND" ]; then
+      log "ERROR: GitHub issue #${issue} does not exist. Skipping spawn."
+      post_thought "Skipped spawning worker: issue #${issue} not found in GitHub (may be typo or wrong repo)." "observation" 7
+      return 0
+    fi
+    
+    if [ "$issue_state" = "CLOSED" ]; then
+      log "WARNING: GitHub issue #${issue} is closed. Skipping spawn."
+      post_thought "Skipped spawning worker: issue #${issue} already closed (resolved or obsolete)." "observation" 7
+      return 0
+    fi
+    
+    # Log successful validation
+    log "Issue #${issue} validated: state=$issue_state"
+  fi
+
   # DUPLICATE WORK PREVENTION (issue #439): Check if issue already has open PR
   if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
     local existing_pr=$(gh pr list --repo "$REPO" --state open --search "#${issue}" --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
