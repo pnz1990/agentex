@@ -19,10 +19,19 @@ WORKSPACE="/workspace"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
 
+# ── kubectl timeout wrapper (issue #441) ──────────────────────────────────────
+# Wraps kubectl commands with fast-fail timeout to prevent 120s hangs on cluster issues.
+# Usage: kubectl_with_timeout 10 get pods (timeout after 10 seconds)
+kubectl_with_timeout() {
+  local timeout_secs="${1:-10}"
+  shift
+  timeout "${timeout_secs}s" kubectl "$@" 2>&1
+}
+
 # ── CONSTITUTION: Read god-owned constants ─────────────────────────────────
 # These values are set by god and must not be changed by agents.
 # To change: god edits the 'agentex-constitution' ConfigMap directly.
-CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+CIRCUIT_BREAKER_LIMIT=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
 if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
 ts() { date +%s; }
@@ -42,7 +51,8 @@ handle_fatal_error() {
     # Check if we can reach the cluster before attempting spawn
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
       # CIRCUIT BREAKER: Check global active jobs first (issue #361)
-      local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
+      # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+      local total_active=$(kubectl_with_timeout 10 get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
       # Try to emit active job metric before potential death (issue #416)
@@ -60,7 +70,8 @@ handle_fatal_error() {
       local next_task="task-emergency-$(date +%s)"
       
       # Calculate next generation (issue #431: was hardcoded to "1")
-      local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+      # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+      local my_generation=$(kubectl_with_timeout 10 get agent "$AGENT_NAME" -n "$NAMESPACE" \
         -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
       if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
         my_generation=0
@@ -316,11 +327,12 @@ spawn_agent() {
   
   # EMERGENCY KILL SWITCH (issue #210): Check if spawning is globally disabled
   # Instant emergency stop via ConfigMap - no image rebuild needed
-  local killswitch_enabled=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+  # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+  local killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
     -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
   
   if [ "$killswitch_enabled" = "true" ]; then
-    local killswitch_reason=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" \
+    local killswitch_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
       -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
     log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
     post_thought "Kill switch active: $killswitch_reason. Agent exiting without spawning successor." "blocker" 10
@@ -330,7 +342,8 @@ spawn_agent() {
   # GLOBAL CIRCUIT BREAKER (issue #338, #352): Hard limit to prevent catastrophic proliferation.
   # Count active Jobs (status.completionTime == null AND status.active > 0).
   # NOTE: Agent CRs never get completionTime set by kro — always use Jobs for counting.
-  local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+  local total_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
   # Push active job count metric for dashboard visibility (issue #416)
@@ -344,7 +357,8 @@ spawn_agent() {
   fi
   
   # Calculate next generation number by reading current agent's generation label
-  local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+  # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+  local my_generation=$(kubectl_with_timeout 10 get agent "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   # Handle non-numeric generation (e.g., "next" from old code) by defaulting to 0
   if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
@@ -910,9 +924,10 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   log "EMERGENCY PERPETUATION ACTIVATED: $EMERGENCY_REASON"
 
   # EMERGENCY KILL SWITCH (issue #210): Check if all spawning is disabled
-  KILLSWITCH=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+  KILLSWITCH=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
   if [ "$KILLSWITCH" = "true" ]; then
-    KILLSWITCH_REASON=$(kubectl get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    KILLSWITCH_REASON=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
     log "EMERGENCY KILL SWITCH ACTIVE: $KILLSWITCH_REASON. NOT spawning successor."
     post_thought "Kill switch active: $KILLSWITCH_REASON. Agent exiting without spawning successor to stop proliferation." "blocker" 10
     NEEDS_EMERGENCY_SPAWN=false
@@ -943,7 +958,8 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   # CIRCUIT BREAKER (issue #338, #352): Same logic as spawn_agent.
   # Count active Jobs. Agent CRs never get completionTime set by kro.
-  TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  # Use timeout wrapper (issue #441) to fail fast if cluster is slow
+  TOTAL_ACTIVE=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
   # Push active job count metric for dashboard visibility (issue #416)
