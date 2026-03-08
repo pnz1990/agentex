@@ -69,6 +69,7 @@ spec:
         spec:
           ttlSecondsAfterFinished: 3600
           backoffLimit: 0
+          activeDeadlineSeconds: 3600  # force termination after 1 hour — prevents stuck swarm planners from consuming resources indefinitely
           template:
             metadata:
               labels:
