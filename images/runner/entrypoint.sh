@@ -318,6 +318,23 @@ EOF
     log "ERROR: System perpetuation may be broken. Emergency spawn may trigger."
     return 0  # Don't fail immediately - let emergency spawn handle it
   }
+  
+  # POST-SPAWN VERIFICATION (issue #364): TOCTOU race condition mitigation
+  # Re-check circuit breaker after spawn. If we raced and exceeded limit, delete the Agent CR.
+  # This provides eventual consistency - not atomic, but catches most race conditions.
+  sleep 1  # Brief delay to let API server state stabilize
+  local post_spawn_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$post_spawn_active" -gt 10 ]; then
+    log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: 10). TOCTOU race detected!"
+    log "Deleting Agent CR $name to restore system stability..."
+    kubectl delete agent "$name" -n "$NAMESPACE" 2>/dev/null || true
+    post_thought "TOCTOU race: deleted Agent $name after detecting $post_spawn_active active jobs (limit: 10)" "blocker" 8
+    return 1
+  fi
+  
+  log "Post-spawn verification passed: $post_spawn_active active jobs (limit: 10)"
 }
 
 # Create a Task CR and immediately spawn an Agent to work it.
