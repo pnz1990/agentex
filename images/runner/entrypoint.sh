@@ -802,7 +802,10 @@ if aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
   S3_THOUGHTS=""
   
   # Get the 20 most recent thought files from S3 (sorted by modification time)
+  # Filter to only thought files (exclude chronicle.json, identities/*.json, etc.)
+  # Thought files follow pattern: <agent>-thought-<timestamp>.json (from post_thought line 241)
   S3_FILES=$(aws s3 ls s3://agentex-thoughts/ --recursive 2>/dev/null | \
+    grep -E '\-thought-.*\.json$' | \
     sort -k1,2 | tail -20 | awk '{print $4}' || true)
   
   # Read each thought file and format for display (exclude our own thoughts)
