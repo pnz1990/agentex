@@ -342,13 +342,14 @@ check_proposal_age() {
 should_spawn_agent() {
   local role="$1"
   
-  # Count ACTIVE agents of the same role (with jobName AND without completionTime)
-  # This prevents false positives from ghost Agent CRs that kro failed to process (issue #189)
-  # Same fix as PR #172 applied to emergency perpetuation
+  # Count ACTIVE agents of the same role (state=IN_PROGRESS or ACTIVE, not ERROR)
+  # Filter by .status.state instead of completionTime to avoid counting failed agents (issue #241)
+  # kro sets completionTime=null for running, pending, AND failed agents
+  # Only ACTIVE (completed) and IN_PROGRESS (running/pending) agents should count toward consensus
   local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
     jq --arg role "$role" '
       [.items[] | 
-       select(.spec.role == $role and .status.jobName != null and .status.jobName != "" and .status.completionTime == null)] | 
+       select(.spec.role == $role and (.status.state == "IN_PROGRESS" or .status.state == "ACTIVE"))] | 
       length
     ' 2>/dev/null || echo "0")
   
