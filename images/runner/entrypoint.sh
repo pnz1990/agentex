@@ -68,6 +68,8 @@ post_thought() {
   local content="$1" type="${2:-observation}" confidence="${3:-7}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
+  local exit_code=0
+  
   err_output=$(kubectl apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Thought
@@ -82,10 +84,18 @@ spec:
   content: |
 $(echo "$content" | sed 's/^/    /')
 EOF
-) || {
-    log "ERROR: Failed to create Thought CR $thought_name: $err_output"
-    return 0  # Don't fail the agent, but log the error
-  }
+) || exit_code=$?
+  
+  if [ $exit_code -ne 0 ]; then
+    log "ERROR: Failed to create Thought CR $thought_name (type=$type, exit=$exit_code): $err_output"
+    # For critical consensus types, propagate the error so callers know it failed
+    if [ "$type" = "proposal" ] || [ "$type" = "vote" ] || [ "$type" = "verdict" ]; then
+      return 1
+    fi
+    # For other types, don't fail the agent
+    return 0
+  fi
+  
   push_metric "ThoughtCreated" 1
 
   # Persist thought to S3 for long-term memory (survives cluster restarts)
@@ -190,6 +200,7 @@ push_metric() {
 # Propose a motion that requires consensus approval.
 # Usage: propose_motion "motion-name" "Motion text" "3/5" "deadline-timestamp"
 # Creates a Thought CR with thoughtType=proposal
+# Returns: 0 on success, 1 on failure
 propose_motion() {
   local motion_name="$1" motion_text="$2" threshold="$3" deadline="$4"
   local proposal_content="MOTION: ${motion_name}
@@ -197,13 +208,19 @@ THRESHOLD: ${threshold}
 DEADLINE: ${deadline}
 TEXT: ${motion_text}"
   
-  post_thought "$proposal_content" "proposal" 9
-  log "Consensus proposal created: $motion_name (threshold=$threshold deadline=$deadline)"
+  if post_thought "$proposal_content" "proposal" 9; then
+    log "Consensus proposal created: $motion_name (threshold=$threshold deadline=$deadline)"
+    return 0
+  else
+    log "ERROR: Failed to create consensus proposal '$motion_name' - Thought CR creation failed"
+    return 1
+  fi
 }
 
 # Cast a vote on a consensus proposal.
 # Usage: cast_vote "motion-name" "yes|no" "reason for vote"
 # Creates a Thought CR with thoughtType=vote
+# Returns: 0 on success, 1 on failure
 cast_vote() {
   local motion_name="$1" vote="$2" reason="$3"
   local vote_content="MOTION: ${motion_name}
@@ -211,8 +228,13 @@ VOTE: ${vote}
 REASON: ${reason}
 CAST_BY: ${AGENT_NAME}"
   
-  post_thought "$vote_content" "vote" 9
-  log "Consensus vote cast: motion=$motion_name vote=$vote"
+  if post_thought "$vote_content" "vote" 9; then
+    log "Consensus vote cast: motion=$motion_name vote=$vote"
+    return 0
+  else
+    log "ERROR: Failed to cast vote on '$motion_name' - Thought CR creation failed"
+    return 1
+  fi
 }
 
 # Check if consensus has been reached for a proposal.
@@ -406,13 +428,18 @@ spawn_agent() {
         # No proposal exists yet - create one
         log "Consensus PENDING: creating NEW proposal for spawning $role agent"
         local deadline=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-        propose_motion "$motion_name" \
+        if ! propose_motion "$motion_name" \
           "Spawn additional $role agent (currently $running_agents exist). Reason: $reason" \
           "3/5" \
-          "$deadline"
-        cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."
-        # Allow spawn to proceed - proposal is created, future agents can vote
-        log "Consensus proposal created. Allowing spawn to proceed (liveness > consensus blocking)."
+          "$deadline"; then
+          log "ERROR: Failed to create consensus proposal for $role agent spawn. Proceeding anyway for liveness."
+        else
+          if ! cast_vote "$motion_name" "yes" "This agent ($AGENT_NAME) is spawning a successor to continue work."; then
+            log "ERROR: Failed to cast vote on consensus proposal for $role agent spawn."
+          fi
+          # Allow spawn to proceed - proposal is created, future agents can vote
+          log "Consensus proposal created. Allowing spawn to proceed (liveness > consensus blocking)."
+        fi
       elif [ "$proposal_age" -lt 300 ]; then
         # Proposal is < 5 minutes old - allow spawn (liveness > consensus)
         log "Consensus PENDING but proposal age is ${proposal_age}s (< 5 min). Allowing spawn for liveness."
@@ -997,18 +1024,24 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
         # No proposal exists yet - create one
         log "Consensus PENDING: creating NEW proposal for spawning $NEXT_ROLE agent"
         DEADLINE=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-        propose_motion "$MOTION_NAME" \
+        if ! propose_motion "$MOTION_NAME" \
           "Emergency spawn of $NEXT_ROLE agent because: $EMERGENCY_REASON. Currently $RUNNING_AGENTS agents exist with this role." \
           "3/5" \
-          "$DEADLINE"
-        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
-        
-        log "Consensus proposal created. Spawning (grace period: proposal is fresh)."
+          "$DEADLINE"; then
+          log "ERROR: Failed to create consensus proposal for emergency $NEXT_ROLE agent spawn. Proceeding anyway for liveness."
+        else
+          if ! cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."; then
+            log "ERROR: Failed to cast vote on consensus proposal for emergency $NEXT_ROLE agent spawn."
+          fi
+          log "Consensus proposal created. Spawning (grace period: proposal is fresh)."
+        fi
         # Allow spawn because proposal is brand new (< 1 second old)
       elif [ "$PROPOSAL_AGE" -lt 300 ]; then
         # Proposal exists and is < 5 minutes old - allow spawn (grace period for voting)
         log "Consensus PENDING but recent (age=${PROPOSAL_AGE}s < 300s). Spawning for liveness."
-        cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."
+        if ! cast_vote "$MOTION_NAME" "yes" "This agent ($AGENT_NAME) needs a successor to maintain platform liveness."; then
+          log "ERROR: Failed to cast vote on existing consensus proposal for emergency $NEXT_ROLE agent spawn."
+        fi
       else
         # Proposal is stale (≥ 5 minutes old) - block spawn
         log "Consensus PENDING and STALE (age=${PROPOSAL_AGE}s ≥ 300s). BLOCKING spawn to prevent proliferation."
