@@ -16,6 +16,10 @@ spec:
       context: string | default=""
     status:
       configMapName: ${taskConfigMap.metadata.name}
+      phase: string | default="Unassigned"
+      agentRef: string | default=""
+      outcome: string | default=""
+      completedAt: string | default=""
   resources:
     - id: taskConfigMap
       readyWhen:
@@ -38,4 +42,7 @@ spec:
           effort: ${schema.spec.effort}
           githubIssue: ${string(schema.spec.githubIssue)}
           context: ${schema.spec.context}
-          status: "Unassigned"
+          phase: ${schema.status.phase}
+          agentRef: ${schema.status.agentRef}
+          outcome: ${schema.status.outcome}
+          completedAt: ${schema.status.completedAt}
