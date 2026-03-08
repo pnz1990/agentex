@@ -68,8 +68,12 @@ handle_fatal_error() {
       local next_generation=$((my_generation + 1))
       
       # Inline emergency spawn (don't call functions that might fail)
-      # Use || true to prevent trap recursion if kubectl fails
-      kubectl apply -f - <<EOF 2>/dev/null || true
+      # Capture errors to log file for debugging (issue #449)
+      local spawn_log="/tmp/emergency-spawn-${AGENT_NAME}.log"
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Emergency spawn attempt for $next_agent" > "$spawn_log"
+      
+      # Create Task CR
+      if kubectl apply -f - <<EOF 2>&1 | tee -a "$spawn_log"
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -82,7 +86,14 @@ spec:
   effort: M
   priority: 10
 EOF
-      kubectl apply -f - <<EOF 2>/dev/null || true
+      then
+        echo "✓ Task CR created: $next_task" | tee -a "$spawn_log" >&2
+      else
+        echo "✗ Task CR creation FAILED" | tee -a "$spawn_log" >&2
+      fi
+      
+      # Create Agent CR
+      if kubectl apply -f - <<EOF 2>&1 | tee -a "$spawn_log"
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -97,7 +108,20 @@ spec:
   taskRef: $next_task
   model: ${BEDROCK_MODEL}
 EOF
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn attempted: $next_agent" >&2
+      then
+        echo "✓ Agent CR created: $next_agent" | tee -a "$spawn_log" >&2
+      else
+        echo "✗ Agent CR creation FAILED" | tee -a "$spawn_log" >&2
+      fi
+      
+      # Verify Agent CR was created (5s grace period for kro)
+      sleep 5
+      if kubectl get agent "$next_agent" -n "$NAMESPACE" &>/dev/null; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✓ Emergency spawn SUCCESS: $next_agent (log: $spawn_log)" >&2
+      else
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED: Agent CR not found after 5s (log: $spawn_log)" >&2
+        cat "$spawn_log" >&2 2>/dev/null || true
+      fi
     fi
   fi
 }
