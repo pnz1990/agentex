@@ -933,15 +933,8 @@ if [ -n "$SWARM_REF" ]; then
   # Increment tasks completed
   NEW_TASKS=$(( CURRENT_TASKS + 1 ))
   
-  # Update last activity timestamp
-  TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  
-  # Patch swarm state
-  kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
-    --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
-    2>/dev/null || true
-  
   # Check for dissolution condition (only if not already disbanded)
+  # IMPORTANT: Check this BEFORE updating timestamp to avoid resetting idle timer
   if [ "$CURRENT_PHASE" != "Disbanded" ]; then
     # Get all tasks associated with this swarm
     SWARM_TASKS=$(kubectl get tasks -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
@@ -951,6 +944,24 @@ if [ -n "$SWARM_REF" ]; then
     
     log "Swarm $SWARM_REF: $DONE_TASKS/$TOTAL_TASKS tasks done, $PENDING_TASKS pending"
     
+    # Update timestamp only if there are still pending tasks
+    # This prevents resetting the idle timer when all tasks are complete
+    if [ "$PENDING_TASKS" -gt 0 ]; then
+      TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    else
+      # All tasks done - preserve old timestamp to allow idle timer to accumulate
+      TIMESTAMP=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
+      if [ -z "$TIMESTAMP" ]; then
+        # First time seeing all tasks done - set timestamp now
+        TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      fi
+    fi
+    
+    # Patch swarm state (moved here so we have correct timestamp)
+    kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+      --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
+      2>/dev/null || true
+    
     # Dissolution condition: all tasks done AND no activity for 5 minutes
     if [ "$PENDING_TASKS" -eq 0 ] && [ "$TOTAL_TASKS" -gt 0 ]; then
       LAST_ACTIVITY=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
@@ -958,6 +969,8 @@ if [ -n "$SWARM_REF" ]; then
         LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null || echo 0)
         NOW_EPOCH=$(date +%s)
         IDLE_SECONDS=$(( NOW_EPOCH - LAST_EPOCH ))
+        
+        log "Swarm $SWARM_REF idle check: ${IDLE_SECONDS}s since last activity (threshold: 300s)"
         
         # 300 seconds = 5 minutes idle threshold
         if [ "$IDLE_SECONDS" -gt 300 ]; then
@@ -975,6 +988,12 @@ if [ -n "$SWARM_REF" ]; then
         fi
       fi
     fi
+  else
+    # Swarm already disbanded - just update task count (no timestamp change needed)
+    TIMESTAMP=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
+    kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+      --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\"}}" \
+      2>/dev/null || true
   fi
 fi
 
