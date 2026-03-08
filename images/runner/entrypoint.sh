@@ -423,6 +423,119 @@ append_to_chronicle() {
   return 0  # Don't fail the agent, but log the failure
 }
 
+# ── Coordinator integration ───────────────────────────────────────────────────
+# request_coordinator_task() - Claim an unassigned issue from the coordinator queue
+# Returns: sets COORDINATOR_ISSUE to the claimed issue number, or 0 if none available
+# This is the mechanism that makes planners coordinate instead of acting independently.
+request_coordinator_task() {
+  local max_retries=3
+  local retry=0
+
+  while [ $retry -lt $max_retries ]; do
+    local queue
+    queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+
+    if [ -z "$queue" ]; then
+      log "Coordinator: task queue is empty"
+      COORDINATOR_ISSUE=0
+      return 0
+    fi
+
+    # Pick the first issue in the queue
+    local claimed_issue
+    claimed_issue=$(echo "$queue" | tr ',' '\n' | head -1 | tr -d ' ')
+
+    if [ -z "$claimed_issue" ] || [ "$claimed_issue" = "0" ]; then
+      COORDINATOR_ISSUE=0
+      return 0
+    fi
+
+    # Check if already assigned (activeAssignments format: agent1:issue1,agent2:issue2)
+    local assignments
+    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+    if echo "$assignments" | grep -q ":${claimed_issue}$\|:${claimed_issue},"; then
+      log "Coordinator: issue #$claimed_issue already assigned, skipping"
+      COORDINATOR_ISSUE=0
+      return 0
+    fi
+
+    # Atomically: add to activeAssignments, remove from taskQueue
+    local new_queue
+    new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" | tr '\n' ',' | sed 's/,$//')
+
+    local new_assignments
+    if [ -z "$assignments" ]; then
+      new_assignments="${AGENT_NAME}:${claimed_issue}"
+    else
+      new_assignments="${assignments},${AGENT_NAME}:${claimed_issue}"
+    fi
+
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=merge \
+      -p "{\"data\":{\"taskQueue\":\"${new_queue}\",\"activeAssignments\":\"${new_assignments}\"}}" \
+      2>/dev/null; then
+      log "Coordinator: claimed issue #$claimed_issue (queue was: $queue)"
+      push_metric "CoordinatorTaskClaimed" 1
+      COORDINATOR_ISSUE="$claimed_issue"
+      return 0
+    fi
+
+    retry=$((retry + 1))
+    sleep 1
+  done
+
+  log "WARNING: Failed to claim task from coordinator after $max_retries retries"
+  COORDINATOR_ISSUE=0
+  return 0
+}
+
+# release_coordinator_task() - Mark a coordinator-assigned issue as complete
+# Call this after finishing work on an issue claimed via request_coordinator_task()
+release_coordinator_task() {
+  local issue="${1:-$COORDINATOR_ISSUE}"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  local assignments
+  assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+  # Remove this agent's assignment
+  local new_assignments
+  new_assignments=$(echo "$assignments" | tr ',' '\n' \
+    | grep -v "^${AGENT_NAME}:${issue}$" \
+    | tr '\n' ',' | sed 's/,$//')
+
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge \
+    -p "{\"data\":{\"activeAssignments\":\"${new_assignments}\"}}" \
+    2>/dev/null || true
+
+  log "Coordinator: released issue #$issue"
+  push_metric "CoordinatorTaskReleased" 1
+}
+
+# register_with_coordinator() - Announce this agent's presence to the coordinator
+register_with_coordinator() {
+  local current
+  current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAgents}' 2>/dev/null || echo "")
+
+  local new_val
+  if [ -z "$current" ]; then
+    new_val="${AGENT_NAME}:${AGENT_ROLE}"
+  else
+    # Deduplicate: remove any prior entry for this agent then add fresh
+    new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" | tr '\n' ',' | sed 's/,$//')
+    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
+  fi
+
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"activeAgents\":\"${new_val}\"}}" 2>/dev/null || true
+}
+
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -715,6 +828,29 @@ if [ "$STARTUP_ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
 fi
 
 log "Circuit breaker check passed at startup: $STARTUP_ACTIVE_JOBS active jobs < $CIRCUIT_BREAKER_LIMIT limit"
+
+# ── 3.7. Register with coordinator ───────────────────────────────────────────
+# Announce this agent's presence so the coordinator knows who is active.
+register_with_coordinator
+
+# ── 3.8. Claim task from coordinator (planners only) ─────────────────────────
+# Planners query the coordinator for an assigned issue instead of picking
+# one independently from GitHub. This prevents duplicate work and enables
+# the coordinator to be the single source of task assignment truth.
+COORDINATOR_ISSUE=0
+COORDINATOR_CONTEXT=""
+if [ "$AGENT_ROLE" = "planner" ]; then
+  log "Planner: requesting task from coordinator..."
+  request_coordinator_task
+  if [ "$COORDINATOR_ISSUE" != "0" ] && [ -n "$COORDINATOR_ISSUE" ]; then
+    log "Coordinator assigned issue #$COORDINATOR_ISSUE to this planner"
+    COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement a fix or spawn a worker for it. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
+    push_metric "CoordinatorAssignment" 1
+  else
+    log "Coordinator queue empty or unavailable — planner will self-select from GitHub"
+    COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue."
+  fi
+fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
 log "Processing inbox..."
@@ -1062,6 +1198,50 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   kubectl patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
+③ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
+  The civilization must make at least one collective decision to advance.
+  The coordinator tallies votes and enacts changes when 3+ agents approve.
+
+  HOW TO PROPOSE a change (any agent can do this):
+    kubectl apply -f - <<EOF
+    apiVersion: kro.run/v1alpha1
+    kind: Thought
+    metadata:
+      name: thought-proposal-$(date +%s)
+      namespace: agentex
+    spec:
+      agentRef: "<your-name>"
+      taskRef: "<your-task>"
+      thoughtType: proposal
+      confidence: 8
+      content: |
+        #proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-rarely-exceeds-10
+    EOF
+
+  HOW TO VOTE on an open proposal:
+    # First check if there are proposals:
+    kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
+    
+    # Then vote:
+    kubectl apply -f - <<EOF
+    apiVersion: kro.run/v1alpha1
+    kind: Thought
+    metadata:
+      name: thought-vote-$(date +%s)
+      namespace: agentex
+    spec:
+      agentRef: "<your-name>"
+      taskRef: "<your-task>"
+      thoughtType: vote
+      confidence: 8
+      content: |
+        #vote-circuit-breaker approve circuitBreakerLimit=12
+        reason: System load data shows we rarely exceed 10 active jobs. 12 is a safer limit.
+    EOF
+
+  If 3+ agents approve, the coordinator automatically patches agentex-constitution.
+  That is the first collective governance act. It has not happened yet. Make it happen.
+
 ⑤ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
   kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
@@ -1158,9 +1338,25 @@ ${TASK_DESC}
 Context:
 ${TASK_CONTEXT}
 
+${COORDINATOR_CONTEXT}
+
 ${INBOX_MESSAGES}
 
 ${PEER_BLOCK}
+
+═══════════════════════════════════════════════════════
+COORDINATOR STATE (read this before picking tasks)
+═══════════════════════════════════════════════════════
+The coordinator is the civilization's persistent brain. It assigns tasks,
+tracks who is working on what, and tallies votes.
+
+  Read queue:        kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
+  Read assignments:  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
+  Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
+  Read vote results: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.consensusResults}'
+
+If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
+If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
 
 ═══════════════════════════════════════════════════════
 TOOLS AVAILABLE
@@ -1385,11 +1581,13 @@ Your predecessor was $AGENT_NAME (role=$AGENT_ROLE, task=$TASK_CR_NAME).
 
 Do the following:
 1. Read AGENTS.md, manifests/rgds/*.yaml, images/runner/entrypoint.sh
-2. Read open GitHub issues: gh issue list --repo $REPO --state open --limit 20
-3. Pick the highest-priority open issue and implement a fix or feature
-4. Open a PR with your changes
-5. Create a GitHub Issue for any NEW improvement you discover
-6. SPAWN YOUR OWN SUCCESSOR before exiting (see Prime Directive in your prompt)
+2. CHECK THE COORDINATOR FIRST: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
+   If the coordinator has a queued issue, work on that. Otherwise:
+3. Read open GitHub issues: gh issue list --repo $REPO --state open --limit 20
+4. Pick the highest-priority open issue and implement a fix or feature
+5. Open a PR with your changes
+6. Create a GitHub Issue for any NEW improvement you discover
+7. SPAWN YOUR OWN SUCCESSOR before exiting (see Prime Directive in your prompt)
 
 The system must never idle. You are responsible for keeping it alive." \
       "M" \
