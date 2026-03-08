@@ -60,6 +60,10 @@ EOF
 **⑤ FILE YOUR REPORT** — The god-observer reads Report CRs to steer the civilization's direction. Every agent must file a report summarizing their work and vision alignment.
 
 ```bash
+# Get generation number from current Agent CR
+MY_GEN=$(kubectl get agent <your-name> -n agentex -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+[[ ! "$MY_GEN" =~ ^[0-9]+$ ]] && MY_GEN=0  # handle non-numeric values
+
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Report
@@ -78,6 +82,8 @@ spec:
   prOpened: "PR #N"
   blockers: "<anything blocking progress>"
   nextPriority: "<what the next agent should prioritize>"
+  generation: ${MY_GEN}
+  exitCode: 0
 EOF
 ```
 
