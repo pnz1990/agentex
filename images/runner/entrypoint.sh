@@ -39,10 +39,10 @@ handle_fatal_error() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME:-unknown}] FATAL ERROR at line $line_num (exit $exit_code)" >&2
     
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
-    # Check if we can reach the cluster before attempting spawn
-    if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl cluster-info &>/dev/null; then
-      # CIRCUIT BREAKER: Check global active jobs first (issue #361)
-      local total_active=$(kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
+    # Check if we can reach the cluster before attempting spawn (with 5s timeout to prevent hangs, issue #430)
+    if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && timeout 5 kubectl cluster-info &>/dev/null; then
+      # CIRCUIT BREAKER: Check global active jobs first (issue #361, timeout added for #430)
+      local total_active=$(timeout 10 kubectl get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
       # Try to emit active job metric before potential death (issue #416)
@@ -59,8 +59,8 @@ handle_fatal_error() {
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
-      # Calculate next generation (issue #431: was hardcoded to "1")
-      local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+      # Calculate next generation (issue #431: was hardcoded to "1", timeout added for #430)
+      local my_generation=$(timeout 5 kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
         -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
       if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
         my_generation=0
@@ -232,8 +232,8 @@ post_report() {
   local vision_score="$1" work_done="$2" issues_found="${3:-}" pr_opened="${4:-}" blockers="${5:-}" next_priority="${6:-}" exit_code="${7:-0}"
   local report_name="report-${AGENT_NAME}-$(date +%s)"
   
-  # Get agent's generation from Agent CR
-  local generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+  # Get agent's generation from Agent CR (with timeout, issue #430)
+  local generation=$(timeout 5 kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   if ! [[ "$generation" =~ ^[0-9]+$ ]]; then
     generation=0
@@ -330,7 +330,8 @@ spawn_agent() {
   # GLOBAL CIRCUIT BREAKER (issue #338, #352): Hard limit to prevent catastrophic proliferation.
   # Count active Jobs (status.completionTime == null AND status.active > 0).
   # NOTE: Agent CRs never get completionTime set by kro — always use Jobs for counting.
-  local total_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  # Timeout added to prevent hangs when cluster is unreachable (issue #430).
+  local total_active=$(timeout 10 kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
   # Push active job count metric for dashboard visibility (issue #416)
@@ -343,8 +344,8 @@ spawn_agent() {
     return 1
   fi
   
-  # Calculate next generation number by reading current agent's generation label
-  local my_generation=$(kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
+  # Calculate next generation number by reading current agent's generation label (with timeout, issue #430)
+  local my_generation=$(timeout 5 kubectl get agent "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   # Handle non-numeric generation (e.g., "next" from old code) by defaulting to 0
   if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
@@ -386,8 +387,9 @@ EOF
   # POST-SPAWN VERIFICATION (issue #364): TOCTOU race condition mitigation
   # Re-check circuit breaker after spawn. If we raced and exceeded limit, delete the Agent CR.
   # This provides eventual consistency - not atomic, but catches most race conditions.
+  # Timeout added to prevent hangs (issue #430).
   sleep 1  # Brief delay to let API server state stabilize
-  local post_spawn_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  local post_spawn_active=$(timeout 10 kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
   
   if [ "$post_spawn_active" -gt "$CIRCUIT_BREAKER_LIMIT" ]; then
@@ -848,7 +850,8 @@ fi
 
 # Check if THIS agent spawned a successor by filtering on the spawned-by label.
 # This is precise and avoids false positives from other agents' spawns.
-SUCCESSOR_AGENTS=$(kubectl get agents.kro.run -n "$NAMESPACE" \
+# Timeout added to prevent hangs (issue #430).
+SUCCESSOR_AGENTS=$(timeout 10 kubectl get agents.kro.run -n "$NAMESPACE" \
   -l "agentex/spawned-by=$AGENT_NAME" \
   -o json 2>/dev/null || echo '{"items":[]}')
 SPAWNED_BY_ME=$(echo "$SUCCESSOR_AGENTS" | jq '.items | length' 2>/dev/null || echo "0")
@@ -868,15 +871,15 @@ else
   
   JOBS_VERIFIED=0
   for agent_name in $(echo "$SUCCESSOR_AGENTS" | jq -r '.items[].metadata.name' 2>/dev/null || true); do
-    # Check if Agent CR has status.jobName populated by kro
-    JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+    # Check if Agent CR has status.jobName populated by kro (with timeout, issue #430)
+    JOB_NAME=$(timeout 5 kubectl get agent "$agent_name" -n "$NAMESPACE" \
       -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     
     if [ -z "$JOB_NAME" ]; then
       log "WARNING: Agent CR $agent_name exists but status.jobName is empty (kro hasn't processed it yet)"
       # Give kro a moment to process the Agent CR (it may be in progress)
       sleep 5
-      JOB_NAME=$(kubectl get agent "$agent_name" -n "$NAMESPACE" \
+      JOB_NAME=$(timeout 5 kubectl get agent "$agent_name" -n "$NAMESPACE" \
         -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
     fi
     
@@ -888,8 +891,8 @@ else
       break
     fi
     
-    # Verify the Job actually exists
-    if kubectl get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
+    # Verify the Job actually exists (with timeout, issue #430)
+    if timeout 5 kubectl get job "$JOB_NAME" -n "$NAMESPACE" &>/dev/null; then
       log "✓ Agent CR $agent_name → Job $JOB_NAME exists"
       JOBS_VERIFIED=$((JOBS_VERIFIED + 1))
     else
@@ -943,7 +946,8 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   # CIRCUIT BREAKER (issue #338, #352): Same logic as spawn_agent.
   # Count active Jobs. Agent CRs never get completionTime set by kro.
-  TOTAL_ACTIVE=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+  # Timeout added to prevent hangs when cluster is unreachable (issue #430).
+  TOTAL_ACTIVE=$(timeout 10 kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
 
   # Push active job count metric for dashboard visibility (issue #416)
