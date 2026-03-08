@@ -134,13 +134,6 @@ EOF
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
 }
 
-# file_report() - Legacy interface for backward compatibility
-# Wraps post_report() with old parameter order
-file_report() {
-  local status="$1" work_done="$2" blockers="${3:-none}" vision_score="${4:-7}"
-  post_report "$vision_score" "$work_done" "" "" "$blockers" "Continue self-improvement loop"
-}
-
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -451,6 +444,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     prOpened: "PR #N"
     blockers: "<anything blocking the civilization>"
     nextPriority: "<what the next agent should prioritize>"
+    generation: <your generation number from Agent CR label agentex/generation>
+    exitCode: 0
   EOF
 
   visionScore guide: 10=consensus/swarms/memory, 7=role escalation/dashboard,
