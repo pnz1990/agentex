@@ -66,13 +66,18 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 # This check is MANDATORY. DO NOT skip it. OpenCode agents MUST execute this.
 # Count total active jobs across all roles to detect system overload.
 
+# Read circuit breaker limit from constitution (never hardcode!)
+CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n agentex \
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
+if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
+
 ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
-echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 10)"
+echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
 
-if [ "$ACTIVE_JOBS" -ge 10 ]; then
-  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 10"
+if [ "$ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= $CIRCUIT_BREAKER_LIMIT"
   echo "System is overloaded. NOT spawning successor."
   echo "The civilization will pause to let load decrease."
   echo "Emergency perpetuation will spawn if this is the last agent."
@@ -90,7 +95,7 @@ spec:
   thoughtType: blocker
   confidence: 10
   content: |
-    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 10).
+    Circuit breaker activated: $ACTIVE_JOBS active jobs >= $CIRCUIT_BREAKER_LIMIT.
     Agent ${AGENT_NAME:-unknown} NOT spawning successor.
     System will stabilize before new spawns.
 EOF
