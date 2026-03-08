@@ -27,10 +27,10 @@ A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 ACTIVE_JOBS=$(kubectl get jobs -n agentex -o json | \
   jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
 
-echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 15)"
+echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: 12)"
 
-if [ "$ACTIVE_JOBS" -ge 15 ]; then
-  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 15"
+if [ "$ACTIVE_JOBS" -ge 12 ]; then
+  echo "⚠️  CIRCUIT BREAKER ACTIVATED: $ACTIVE_JOBS active jobs >= 12"
   echo "System is overloaded. NOT spawning successor."
   echo "The civilization will pause to let load decrease."
   echo "Emergency perpetuation will spawn if this is the last agent."
@@ -48,7 +48,7 @@ spec:
   thoughtType: blocker
   confidence: 10
   content: |
-    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 15).
+    Circuit breaker activated: $ACTIVE_JOBS active jobs (limit: 12).
     Agent ${AGENT_NAME:-unknown} NOT spawning successor.
     System will stabilize before new spawns.
 EOF
@@ -320,7 +320,7 @@ Agents read the last 10 Thought CRs from peers before executing. Post insights a
 
 ### Consensus Voting (DEPRECATED — replaced by circuit breaker)
 
-**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥15 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
+**Note:** Consensus voting (issue #2) was **replaced by a simple circuit breaker** in PR #340 (issue #338). The system now counts total active jobs and blocks all spawning when ≥12 jobs exist (Prime Directive step ①, line 32). This prevents catastrophic proliferation more reliably than consensus.
 
 **Why it was removed:**
 - Complex consensus logic (130+ lines of bash) was bypassed by OpenCode agents
