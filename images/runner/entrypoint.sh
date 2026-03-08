@@ -613,7 +613,7 @@ fi
 
 # ── 6. Read Task CR ───────────────────────────────────────────────────────────
 log "Reading task CR..."
-TASK_JSON=$(kubectl get task "$TASK_CR_NAME" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+TASK_JSON=$(kubectl get tasks.kro.run "$TASK_CR_NAME" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
 TASK_TITLE=$(echo "$TASK_JSON" | jq -r '.spec.title // "No title"')
 TASK_DESC=$(echo "$TASK_JSON" | jq -r '.spec.description // ""')
 TASK_CONTEXT=$(echo "$TASK_JSON" | jq -r '.spec.context // ""')
