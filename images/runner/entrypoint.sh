@@ -287,6 +287,11 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   The improvement can be anything: RGD fix, runner logic, new capability,
   better error handling, cost reduction, security hardening.
 
+  ROLE ESCALATION: If you discover a structural/architectural problem with
+  the platform (RGD bugs, kro issues, system design flaws), post a Thought CR
+  with thoughtType=blocker mentioning "structural" or "architecture". The
+  runner will automatically escalate your successor to architect role.
+
 ③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
   Post a Thought CR with type=insight before exiting:
   kubectl apply -f - <<EOF
@@ -388,6 +393,28 @@ else
   post_thought "OpenCode exited $OPENCODE_EXIT. Activating emergency perpetuation." "observation" 4
 fi
 
+# ── 10.5. ROLE ESCALATION ─────────────────────────────────────────────────────
+# Check if this agent discovered a structural issue that requires architect-level intervention.
+# If so, the successor should be spawned with role=architect instead of the default role.
+ESCALATED_ROLE=""
+
+# Check all Thought CRs posted by THIS agent during this run for structural blockers
+BLOCKER_THOUGHTS=$(kubectl get thoughts -n "$NAMESPACE" \
+  -l "agentex.io/agent=$AGENT_NAME" \
+  -o json 2>/dev/null | jq -r \
+  --arg name "$AGENT_NAME" \
+  '.items[] | 
+   select(.spec.agentRef == $name and .spec.thoughtType == "blocker") |
+   .spec.content' 2>/dev/null || true)
+
+# Look for keywords that indicate structural problems requiring architecture changes
+if echo "$BLOCKER_THOUGHTS" | grep -qiE '(structural|architecture|RGD|kro.*bug|system.*design|breaking.*change)'; then
+  log "ROLE ESCALATION TRIGGERED: Structural issue detected in blocker thoughts"
+  ESCALATED_ROLE="architect"
+  post_thought "Role escalation triggered: worker → architect (structural issue found)" "decision" 9
+  post_message "broadcast" "Role escalation: $AGENT_NAME discovered structural issue, next agent will be architect" "status"
+fi
+
 # ── 11. EMERGENCY PERPETUATION ────────────────────────────────────────────────
 # If OpenCode failed to spawn a successor Agent CR, do it here unconditionally.
 # This is the last line of defense against the system going dark.
@@ -407,14 +434,20 @@ if [ "$SPAWNED_BY_ME" -eq 0 ]; then
   NEXT_AGENT="worker-${TS}"
 
   # Determine what the next agent should do:
-  # cycle through roles to ensure the platform keeps improving itself
-  case "$AGENT_ROLE" in
-    worker)    NEXT_ROLE="planner" ;;
-    planner)   NEXT_ROLE="worker" ;;
-    reviewer)  NEXT_ROLE="worker" ;;
-    architect) NEXT_ROLE="worker" ;;
-    *)         NEXT_ROLE="worker" ;;
-  esac
+  # If role escalation was triggered, use that; otherwise cycle through roles
+  if [ -n "$ESCALATED_ROLE" ]; then
+    NEXT_ROLE="$ESCALATED_ROLE"
+    log "Using escalated role: $NEXT_ROLE"
+  else
+    # Default role cycling to ensure the platform keeps improving itself
+    case "$AGENT_ROLE" in
+      worker)    NEXT_ROLE="planner" ;;
+      planner)   NEXT_ROLE="worker" ;;
+      reviewer)  NEXT_ROLE="worker" ;;
+      architect) NEXT_ROLE="worker" ;;
+      *)         NEXT_ROLE="worker" ;;
+    esac
+  fi
 
   spawn_task_and_agent \
     "$NEXT_TASK" \
