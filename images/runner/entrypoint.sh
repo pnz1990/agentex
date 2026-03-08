@@ -336,16 +336,17 @@ check_proposal_age() {
   return 0
 }
 
-# Check if spawning an agent of a given role is safe (issue #177)
+# Check if spawning an agent of a given role is safe (issue #177, #189)
 # Returns: 0 if safe to spawn, 1 if should check consensus first
 # Usage: if should_spawn_agent "worker"; then spawn_agent ...; fi
 should_spawn_agent() {
   local role="$1"
   
-  # Count ACTIVE agents of the same role (without completionTime)
-  # This prevents false positives from completed/failed agents (issue #154)
-  local running_agents=$(kubectl get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq --arg role "$role" '[.items[] | select(.spec.role == $role and .status.completionTime == null)] | length' 2>/dev/null || echo "0")
+  # Count ACTIVE JOBS (not Agent CRs) because kro cleans up completed Agent CRs.
+  # Must check jobs.status.active == 1 to only count running pods.
+  # This matches spawn_agent() logic and prevents false positives from ghost Agent CRs (issue #189).
+  local running_agents=$(kubectl get jobs -n "$NAMESPACE" -l "agentex/role=${role}" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 1)] | length' 2>/dev/null || echo "0")
   
   if [ "$running_agents" -ge 3 ]; then
     log "should_spawn_agent: $running_agents agents with role=$role exist (threshold: 3)"
