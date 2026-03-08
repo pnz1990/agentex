@@ -14,6 +14,7 @@ spec:
       confidence: integer | default=7
     status:
       configMapName: ${thoughtConfigMap.metadata.name}
+      readBy: ${thoughtConfigMap.data.readBy}
   resources:
     - id: thoughtConfigMap
       readyWhen:
@@ -34,3 +35,4 @@ spec:
           content: ${schema.spec.content}
           thoughtType: ${schema.spec.thoughtType}
           confidence: ${string(schema.spec.confidence)}
+          readBy: ""
