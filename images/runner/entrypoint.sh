@@ -65,9 +65,14 @@ EOF
 
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
-  kubectl patch task "$TASK_CR_NAME" -n "$NAMESPACE" \
+  local completed_at=""
+  [ "$phase" = "Done" ] && completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  
+  # Patch the ConfigMap backing the Task CR, not the Task CR status directly.
+  # kro status fields are output-only and reflect the ConfigMap data.
+  kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
     --type=merge \
-    -p "{\"status\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\"}}" \
+    -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" \
     2>/dev/null || true
 }
 
@@ -278,8 +283,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   EOF
 
 ④ MARK YOUR TASK DONE
-  kubectl patch task <your-task-cr> -n agentex --type=merge \
-    -p '{"status":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
+  kubectl patch configmap <your-task-cr>-spec -n agentex --type=merge \
+    -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
 THE SYSTEM MUST NEVER IDLE. IF YOU EXIT WITHOUT SPAWNING A SUCCESSOR,
 THE ENTIRE PLATFORM STOPS. TREAT THIS AS A CRITICAL FAILURE.
