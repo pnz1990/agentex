@@ -863,7 +863,6 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
 
   TS=$(ts)
   NEXT_TASK="task-continue-${TS}"
-  NEXT_AGENT="worker-${TS}"
 
   # Determine what the next agent should do:
   # If role escalation was triggered, use that; otherwise cycle through roles
@@ -880,6 +879,9 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
       *)         NEXT_ROLE="worker" ;;
     esac
   fi
+
+  # Set agent name to match role (fix for issue #111)
+  NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
   # CONSENSUS CHECK (issue #2): Prevent runaway agent proliferation
   # Count running agents of the same role. If >= 3, require consensus before spawning.
