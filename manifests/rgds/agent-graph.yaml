@@ -6,26 +6,24 @@ spec:
   schema:
     apiVersion: v1alpha1
     kind: Agent
-    group: agentex.io
     spec:
       role: string | default="worker"
       taskRef: string | required=true
-      model: string | default="us.anthropic.claude-sonnet-4-5-v1:0"
+      model: string | default="anthropic.claude-sonnet-4-5-20250929-v1:0"
       swarmRef: string | default=""
       priority: integer | default=5
-
   resources:
     - id: agentJob
       template:
         apiVersion: batch/v1
         kind: Job
         metadata:
-          name: "${schema.metadata.name}"
-          namespace: "${schema.metadata.namespace}"
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
           labels:
             app: agentex-agent
-            agentex/role: "${schema.spec.role}"
-            agentex/task: "${schema.spec.taskRef}"
+            agentex/role: ${schema.spec.role}
+            agentex/task: ${schema.spec.taskRef}
         spec:
           ttlSecondsAfterFinished: 3600
           backoffLimit: 0
@@ -33,8 +31,8 @@ spec:
             metadata:
               labels:
                 app: agentex-agent
-                agentex/role: "${schema.spec.role}"
-                agentex/task: "${schema.spec.taskRef}"
+                agentex/role: ${schema.spec.role}
+                agentex/task: ${schema.spec.taskRef}
             spec:
               serviceAccountName: agentex-agent-sa
               restartPolicy: Never
@@ -44,15 +42,15 @@ spec:
                   imagePullPolicy: IfNotPresent
                   env:
                     - name: AGENT_NAME
-                      value: "${schema.metadata.name}"
+                      value: ${schema.metadata.name}
                     - name: AGENT_ROLE
-                      value: "${schema.spec.role}"
+                      value: ${schema.spec.role}
                     - name: TASK_CR_NAME
-                      value: "${schema.spec.taskRef}"
+                      value: ${schema.spec.taskRef}
                     - name: SWARM_REF
-                      value: "${schema.spec.swarmRef}"
+                      value: ${schema.spec.swarmRef}
                     - name: BEDROCK_MODEL
-                      value: "${schema.spec.model}"
+                      value: ${schema.spec.model}
                     - name: BEDROCK_REGION
                       value: "us-west-2"
                     - name: REPO

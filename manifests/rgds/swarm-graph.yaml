@@ -6,7 +6,6 @@ spec:
   schema:
     apiVersion: v1alpha1
     kind: Swarm
-    group: agentex.io
     spec:
       goal: string | required=true
       maxAgents: integer | default=10
@@ -15,26 +14,25 @@ spec:
       reviewers: integer | default=1
       consensusThreshold: integer | default=51
       githubRepo: string | default="pnz1990/agentex"
-
   resources:
     - id: swarmState
       template:
         apiVersion: v1
         kind: ConfigMap
         metadata:
-          name: "${schema.metadata.name}-state"
-          namespace: "${schema.metadata.namespace}"
+          name: ${schema.metadata.name}-state
+          namespace: ${schema.metadata.namespace}
           labels:
-            agentex/swarm: "${schema.metadata.name}"
+            agentex/swarm: ${schema.metadata.name}
         data:
-          goal: "${schema.spec.goal}"
+          goal: ${schema.spec.goal}
           phase: "Forming"
-          maxAgents: "${string(schema.spec.maxAgents)}"
-          planners: "${string(schema.spec.planners)}"
-          workers: "${string(schema.spec.workers)}"
-          reviewers: "${string(schema.spec.reviewers)}"
-          consensusThreshold: "${string(schema.spec.consensusThreshold)}"
-          githubRepo: "${schema.spec.githubRepo}"
+          maxAgents: ${string(schema.spec.maxAgents)}
+          planners: ${string(schema.spec.planners)}
+          workers: ${string(schema.spec.workers)}
+          reviewers: ${string(schema.spec.reviewers)}
+          consensusThreshold: ${string(schema.spec.consensusThreshold)}
+          githubRepo: ${schema.spec.githubRepo}
           activeAgents: "0"
           tasksCompleted: "0"
           issuesCreated: "0"

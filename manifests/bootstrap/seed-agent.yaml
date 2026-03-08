@@ -1,94 +1,133 @@
-# Bootstrap: creates the Seed Agent that starts the entire system
-# Apply this once: kubectl apply -f manifests/bootstrap/seed-agent.yaml
----
-# Seed Task: instructs the seed agent to bootstrap the swarm
-apiVersion: agentex.io/v1alpha1
-kind: Task
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: seed-bootstrap
+  name: bootstrap-seed
   namespace: agentex
+  labels:
+    agentex/role: seed
 spec:
-  title: "Bootstrap agentex — spawn first planner and worker agents"
-  role: seed
-  priority: 10
-  effort: S
-  context: |
-    You are the Seed agent. Your only job is to bootstrap the system and then exit.
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        agentex/role: seed
+    spec:
+      serviceAccountName: agentex-agent-sa
+      restartPolicy: Never
+      containers:
+        - name: agent
+          image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AGENT_NAME
+              value: "bootstrap-seed"
+            - name: AGENT_ROLE
+              value: "seed"
+            - name: TASK_CR_NAME
+              value: "bootstrap"
+            - name: BEDROCK_MODEL
+              value: "anthropic.claude-sonnet-4-5-20250929-v1:0"
+            - name: BEDROCK_REGION
+              value: "us-west-2"
+            - name: REPO
+              value: "pnz1990/agentex"
+            - name: CLUSTER
+              value: "agentex"
+            - name: NAMESPACE
+              value: "agentex"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentex-github-token
+                  key: token
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [bootstrap-seed] $*"; }
 
-    Steps:
-    1. Create a Planner Task CR:
-       kubectl apply -f - <<EOF
-       apiVersion: agentex.io/v1alpha1
-       kind: Task
-       metadata:
-         name: task-planner-001
-         namespace: agentex
-       spec:
-         title: "Initial codebase audit — generate improvement backlog"
-         role: planner
-         priority: 10
-         effort: M
-         context: |
-           Audit the agentex codebase at https://github.com/pnz1990/agentex
-           Read ALL files in manifests/, images/, infra/, and AGENTS.md
-           Create at least 15 GitHub Issues covering:
-           - RGD improvements (readyWhen, error handling, resource limits)
-           - Agent runner improvements (retry logic, output parsing, message handling)
-           - New agent roles or capabilities
-           - Security improvements (RBAC, secret handling)
-           - Observability (CloudWatch metrics, log patterns)
-           - Self-improvement opportunities
-           After creating issues, create Task CRs for top 5 and post broadcast message.
-       EOF
+              log "Configuring kubectl..."
+              aws eks update-kubeconfig --name agentex --region us-west-2
+              kubectl get nodes
 
-    2. Create a Worker Task CR:
-       kubectl apply -f - <<EOF
-       apiVersion: agentex.io/v1alpha1
-       kind: Task
-       metadata:
-         name: task-worker-001
-         namespace: agentex
-       spec:
-         title: "Pick up first available worker task from backlog"
-         role: worker
-         priority: 5
-         effort: M
-         context: |
-           Check for open GitHub Issues at https://github.com/pnz1990/agentex
-           Pick the highest priority unassigned issue.
-           Implement it using isolated clone pattern:
-             mkdir -p /workspace/issue-N
-             git clone https://github.com/pnz1990/agentex /workspace/issue-N
-           Open PR, post completion Message CR, create follow-up Task.
-       EOF
+              log "Cloning agentex repo..."
+              gh auth setup-git
+              git clone https://github.com/pnz1990/agentex /workspace/repo --depth=1
+              cd /workspace/repo
 
-    3. Create a Swarm CR to coordinate them:
-       kubectl apply -f - <<EOF
-       apiVersion: agentex.io/v1alpha1
-       kind: Swarm
-       metadata:
-         name: swarm-alpha
-         namespace: agentex
-       spec:
-         goal: "Improve the agentex platform's own agent orchestration capabilities"
-         maxAgents: 10
-         planners: 2
-         workers: 5
-         reviewers: 1
-         consensusThreshold: 51
-       EOF
+              mkdir -p /root/.config/opencode
+              cat > /root/.config/opencode/config.json <<CONFIG
+              {
+                "model": "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"
+              }
+              CONFIG
 
-    4. Post a broadcast Message announcing bootstrap is complete.
-    5. Patch your own Task status to Done.
-    6. Exit.
----
-# Seed Agent CR — apply this to start the system
-apiVersion: agentex.io/v1alpha1
-kind: Agent
-metadata:
-  name: seed-001
-  namespace: agentex
-spec:
-  role: seed
-  taskRef: seed-bootstrap
-  priority: 10
+              log "Running OpenCode bootstrap agent..."
+              cat > /tmp/bootstrap-prompt.txt << 'PROMPT'
+              You are the bootstrap seed agent for the agentex platform.
+
+              You are running inside a Kubernetes Job on the agentex EKS cluster (us-west-2, account 569190534191).
+              You have kubectl, gh CLI (authenticated), aws CLI, git, opencode available.
+
+              Your job is to bootstrap the system and make it self-sustaining. Work through these steps:
+
+              STEP 1 — Read and understand the system
+              Read AGENTS.md, manifests/rgds/*.yaml, images/runner/entrypoint.sh, and .github/workflows/build-runner.yml
+
+              STEP 2 — Check and fix kro RGD health
+              Run: kubectl get rgd
+              Expected: 5 RGDs (agent-graph, task-graph, message-graph, thought-graph, swarm-graph) all in STATE=Active
+              If any are Inactive or blank state, diagnose the error:
+                kubectl describe rgd <name>
+              Fix the schema format if needed:
+              - kro v0.8.4 inline DSL: fieldName: type | default=value
+              - CEL expressions UNQUOTED: ${schema.spec.x} not "${schema.spec.x}"
+              - No group: field needed (kro auto-assigns kro.run)
+              Commit any fixes to a branch and open a PR.
+
+              STEP 3 — Create GitHub Issues for the backlog (at least 10)
+              Use: gh issue create --repo pnz1990/agentex --title "..." --body "..." --label "enhancement"
+              Topics to cover: RGD improvements, agent runner improvements, new agent roles,
+              observability, security, self-improvement loop, multi-agent coordination,
+              agent memory persistence, cost optimization, CI/CD improvements.
+              Save issue numbers for Step 4.
+
+              STEP 4 — Create Task CRs for top 3 issues (once RGDs are Active)
+              Check if Tasks CRD exists: kubectl get crd tasks.agentex.io 2>/dev/null
+              If CRD exists (kro registered it), create Task CRs:
+                kubectl apply -f - (with Task CR yaml for each top issue)
+              If CRD not yet registered, document in the status issue that kro is still warming up.
+
+              STEP 5 — Spawn planner Agent (if Agent CRD is Active)
+              Check: kubectl get crd agents.agentex.io 2>/dev/null
+              If Active, create:
+                kubectl apply -f - (with Agent CR yaml, role=planner, taskRef=task-planner-001)
+
+              STEP 6 — Post a status report as a GitHub Issue
+              Title: "Bootstrap complete — agentex system status [$(date -u +%Y-%m-%d)]"
+              Include: RGD states, issues created, tasks created, agents spawned, errors encountered.
+
+              IMPORTANT RULES:
+              - Never push directly to main — branch + PR for all code changes
+              - Always create at least one follow-up Task CR or GitHub Issue before exiting
+              - If something fails, document it in the status issue and continue with the next step
+              - The goal is a self-sustaining system — when you exit, work must continue
+              PROMPT
+
+              opencode run --print-logs < /tmp/bootstrap-prompt.txt
+              log "Bootstrap complete."
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 4Gi

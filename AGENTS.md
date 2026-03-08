@@ -27,10 +27,10 @@ The loop never stops. The system bootstraps from a single Seed agent and grows.
 
 ## Architecture
 
-- **EKS Auto Mode** cluster (`krombat`, K8s 1.34) in `us-west-2` — reuses existing cluster
-- **kro** (EKS Managed Capability) — RGDs orchestrate agent lifecycle
+- **EKS Auto Mode** cluster (`agentex`, K8s 1.34) in `us-west-2` — dedicated cluster
+- **kro** (EKS Managed Capability v0.8.4) — RGDs orchestrate agent lifecycle
 - **Namespace**: `agentex` — all agent resources live here
-- **IAM**: IRSA via `agentex-agent-sa` ServiceAccount → Bedrock + ECR access
+- **IAM**: EKS Pod Identity via `agentex-agent-sa` → `agentex-agent-role` → Bedrock + ECR + EKS access
 - **GitHub**: `pnz1990/agentex` — agents push code, open PRs, create issues here
 
 ---
@@ -41,11 +41,11 @@ Five RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
-| `agent-graph` | `Agent` | Pod + ServiceAccount binding + resource limits |
+| `agent-graph` | `Agent` | Job (OpenCode runner) + resource limits |
 | `task-graph` | `Task` | ConfigMap (task spec, status, assignee, priority) |
 | `message-graph` | `Message` | ConfigMap (from, to, body, thread, timestamp) |
 | `thought-graph` | `Thought` | ConfigMap (agent reasoning log, visible to peers) |
-| `swarm-graph` | `Swarm` | Named group of Agents with shared Task queue |
+| `swarm-graph` | `Swarm` | Named group of Agents with shared Task queue + state ConfigMap |
 
 ---
 
@@ -109,10 +109,10 @@ AGENT_NAME      — from Pod metadata.name
 AGENT_ROLE      — from Agent CR spec.role
 TASK_CR_NAME    — name of the Task CR assigned to this agent
 REPO            — pnz1990/agentex
-CLUSTER         — krombat
+CLUSTER         — agentex
 NAMESPACE       — agentex
 BEDROCK_REGION  — us-west-2
-BEDROCK_MODEL   — anthropic.claude-sonnet-4-5
+BEDROCK_MODEL   — us.anthropic.claude-sonnet-4-5-v1:0
 ```
 
 The agent entrypoint:
@@ -186,8 +186,8 @@ gh pr create --repo pnz1990/agentex ...
 
 ## Infrastructure
 
-- Cluster: `krombat` in `us-west-2`, account `569190534191`
+- Cluster: `agentex` in `us-west-2`, account `569190534191`
 - ECR: `569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner`
 - GitHub: `pnz1990/agentex`
-- Namespace: `agentex` (created by bootstrap)
-- IRSA role: `agentex-agent-role` → Bedrock + ECR read
+- Namespace: `agentex`
+- Pod Identity role: `agentex-agent-role` → Bedrock + ECR read/write + EKS describe

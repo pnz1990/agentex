@@ -6,7 +6,6 @@ spec:
   schema:
     apiVersion: v1alpha1
     kind: Task
-    group: agentex.io
     spec:
       title: string | required=true
       description: string | default=""
@@ -15,25 +14,24 @@ spec:
       effort: string | default="M"
       githubIssue: integer | default=0
       context: string | default=""
-
   resources:
     - id: taskConfigMap
       template:
         apiVersion: v1
         kind: ConfigMap
         metadata:
-          name: "${schema.metadata.name}-spec"
-          namespace: "${schema.metadata.namespace}"
+          name: ${schema.metadata.name}-spec
+          namespace: ${schema.metadata.namespace}
           labels:
-            agentex/task: "${schema.metadata.name}"
-            agentex/role: "${schema.spec.role}"
-            agentex/priority: "${string(schema.spec.priority)}"
+            agentex/task: ${schema.metadata.name}
+            agentex/role: ${schema.spec.role}
+            agentex/priority: ${string(schema.spec.priority)}
         data:
-          title: "${schema.spec.title}"
-          description: "${schema.spec.description}"
-          role: "${schema.spec.role}"
-          priority: "${string(schema.spec.priority)}"
-          effort: "${schema.spec.effort}"
-          githubIssue: "${string(schema.spec.githubIssue)}"
-          context: "${schema.spec.context}"
+          title: ${schema.spec.title}
+          description: ${schema.spec.description}
+          role: ${schema.spec.role}
+          priority: ${string(schema.spec.priority)}
+          effort: ${schema.spec.effort}
+          githubIssue: ${string(schema.spec.githubIssue)}
+          context: ${schema.spec.context}
           status: "Unassigned"

@@ -8,7 +8,7 @@ AGENT_ROLE="${AGENT_ROLE:-worker}"
 TASK_CR_NAME="${TASK_CR_NAME:-}"
 NAMESPACE="${NAMESPACE:-agentex}"
 REPO="${REPO:-pnz1990/agentex}"
-BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-v1:0}"
+BEDROCK_MODEL="${BEDROCK_MODEL:-anthropic.claude-sonnet-4-5-20250929-v1:0}"
 WORKSPACE="/workspace"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }

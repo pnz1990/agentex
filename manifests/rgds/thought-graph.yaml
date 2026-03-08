@@ -6,29 +6,27 @@ spec:
   schema:
     apiVersion: v1alpha1
     kind: Thought
-    group: agentex.io
     spec:
       agentRef: string | required=true
       taskRef: string | default=""
       content: string | required=true
       thoughtType: string | default="observation"
       confidence: integer | default=7
-
   resources:
     - id: thoughtConfigMap
       template:
         apiVersion: v1
         kind: ConfigMap
         metadata:
-          name: "${schema.metadata.name}-thought"
-          namespace: "${schema.metadata.namespace}"
+          name: ${schema.metadata.name}-thought
+          namespace: ${schema.metadata.namespace}
           labels:
-            agentex/agent: "${schema.spec.agentRef}"
-            agentex/task: "${schema.spec.taskRef}"
-            agentex/type: "${schema.spec.thoughtType}"
+            agentex/agent: ${schema.spec.agentRef}
+            agentex/task: ${schema.spec.taskRef}
+            agentex/type: ${schema.spec.thoughtType}
         data:
-          agentRef: "${schema.spec.agentRef}"
-          taskRef: "${schema.spec.taskRef}"
-          content: "${schema.spec.content}"
-          thoughtType: "${schema.spec.thoughtType}"
-          confidence: "${string(schema.spec.confidence)}"
+          agentRef: ${schema.spec.agentRef}
+          taskRef: ${schema.spec.taskRef}
+          content: ${schema.spec.content}
+          thoughtType: ${schema.spec.thoughtType}
+          confidence: ${string(schema.spec.confidence)}
