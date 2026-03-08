@@ -395,14 +395,24 @@ BROADCAST_MSGS=$(echo "$INBOX_JSON" | jq -r \
   '.items[] | select(.spec.to == "broadcast" and (.status.read == "false" or .status.read == null)) |
    "FROM:\(.spec.from) TYPE:\(.spec.messageType)\n\(.spec.body)\n---"' 2>/dev/null || true)
 
-if [ -n "$DIRECT_MSGS" ] || [ -n "$BROADCAST_MSGS" ]; then
-  INBOX_MESSAGES=$(printf "=== INBOX ===\n%s\n%s\n=============\n" "$DIRECT_MSGS" "$BROADCAST_MSGS")
+# Cross-swarm messages: addressed to "swarm:<swarm-name>"
+SWARM_MSGS=""
+if [ -n "$SWARM_REF" ]; then
+  SWARM_MSGS=$(echo "$INBOX_JSON" | jq -r \
+    --arg swarm "swarm:${SWARM_REF}" \
+    '.items[] | select(.spec.to == $swarm and (.status.read == "false" or .status.read == null)) |
+     "FROM:\(.spec.from) TYPE:\(.spec.messageType) [SWARM]\n\(.spec.body)\n---"' 2>/dev/null || true)
+fi
+
+if [ -n "$DIRECT_MSGS" ] || [ -n "$BROADCAST_MSGS" ] || [ -n "$SWARM_MSGS" ]; then
+  INBOX_MESSAGES=$(printf "=== INBOX ===\n%s\n%s\n%s\n=============\n" "$DIRECT_MSGS" "$BROADCAST_MSGS" "$SWARM_MSGS")
 fi
 
 # Mark all unread messages as read by patching the ConfigMap backing each Message CR
 for msg_name in $(echo "$INBOX_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
-  '.items[] | select((.spec.to == $name or .spec.to == "broadcast") and (.status.read == "false" or .status.read == null)) | .metadata.name' \
+  --arg swarm "swarm:${SWARM_REF}" \
+  '.items[] | select((.spec.to == $name or .spec.to == "broadcast" or .spec.to == $swarm) and (.status.read == "false" or .status.read == null)) | .metadata.name' \
   2>/dev/null || true); do
   # Patch the ConfigMap, not the Message CR. kro status fields are output-only.
   kubectl patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
@@ -901,11 +911,71 @@ fi
 
 # ── 13. Update Swarm state ────────────────────────────────────────────────────
 if [ -n "$SWARM_REF" ]; then
-  CURRENT=$(kubectl get configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
-    -o jsonpath='{.data.tasksCompleted}' 2>/dev/null || echo "0")
-  NEW=$(( CURRENT + 1 ))
+  log "Updating swarm state: $SWARM_REF"
+  
+  # Get current state
+  SWARM_STATE=$(kubectl get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+  CURRENT_TASKS=$(echo "$SWARM_STATE" | jq -r '.data.tasksCompleted // "0"')
+  CURRENT_PHASE=$(echo "$SWARM_STATE" | jq -r '.data.phase // "Forming"')
+  CURRENT_MEMBERS=$(echo "$SWARM_STATE" | jq -r '.data.memberAgents // ""')
+  
+  # Add this agent to member list if not already present
+  if ! echo "$CURRENT_MEMBERS" | grep -q "$AGENT_NAME"; then
+    if [ -z "$CURRENT_MEMBERS" ]; then
+      NEW_MEMBERS="$AGENT_NAME"
+    else
+      NEW_MEMBERS="${CURRENT_MEMBERS},${AGENT_NAME}"
+    fi
+  else
+    NEW_MEMBERS="$CURRENT_MEMBERS"
+  fi
+  
+  # Increment tasks completed
+  NEW_TASKS=$(( CURRENT_TASKS + 1 ))
+  
+  # Update last activity timestamp
+  TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  
+  # Patch swarm state
   kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
-    --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW}\"}}" 2>/dev/null || true
+    --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
+    2>/dev/null || true
+  
+  # Check for dissolution condition (only if not already disbanded)
+  if [ "$CURRENT_PHASE" != "Disbanded" ]; then
+    # Get all tasks associated with this swarm
+    SWARM_TASKS=$(kubectl get tasks -n "$NAMESPACE" -l "agentex/swarm=${SWARM_REF}" -o json 2>/dev/null || echo '{"items":[]}')
+    TOTAL_TASKS=$(echo "$SWARM_TASKS" | jq '.items | length')
+    DONE_TASKS=$(echo "$SWARM_TASKS" | jq '[.items[] | select(.status.phase == "Done")] | length')
+    PENDING_TASKS=$(( TOTAL_TASKS - DONE_TASKS ))
+    
+    log "Swarm $SWARM_REF: $DONE_TASKS/$TOTAL_TASKS tasks done, $PENDING_TASKS pending"
+    
+    # Dissolution condition: all tasks done AND no activity for 5 minutes
+    if [ "$PENDING_TASKS" -eq 0 ] && [ "$TOTAL_TASKS" -gt 0 ]; then
+      LAST_ACTIVITY=$(echo "$SWARM_STATE" | jq -r '.data.lastActivityTimestamp // ""')
+      if [ -n "$LAST_ACTIVITY" ]; then
+        LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null || echo 0)
+        NOW_EPOCH=$(date +%s)
+        IDLE_SECONDS=$(( NOW_EPOCH - LAST_EPOCH ))
+        
+        # 300 seconds = 5 minutes idle threshold
+        if [ "$IDLE_SECONDS" -gt 300 ]; then
+          log "SWARM DISSOLUTION: $SWARM_REF has completed all tasks and been idle for ${IDLE_SECONDS}s"
+          
+          # Update phase to Disbanded
+          kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+            --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
+          
+          # Broadcast dissolution message
+          post_message "broadcast" "Swarm $SWARM_REF has disbanded after completing all tasks. Members: $NEW_MEMBERS. Total tasks: $TOTAL_TASKS." "status"
+          
+          # Post thought about dissolution
+          post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed." "insight" 9
+        fi
+      fi
+    fi
+  fi
 fi
 
 log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE"
