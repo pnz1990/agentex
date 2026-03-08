@@ -92,6 +92,7 @@ spec:
                   imagePullPolicy: Always
                   securityContext:
                     allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false  # agent writes to /workspace and ~/.config
                     capabilities:
                       drop: ["ALL"]
                   env:
