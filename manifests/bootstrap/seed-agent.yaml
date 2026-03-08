@@ -141,10 +141,12 @@ data:
       For each of the top 3 create BOTH a Task CR AND an Agent CR.
       The Agent CR is what triggers a new Job via kro. A Task alone does nothing.
       Example Agent CR (fill in your values):
-        apiVersion: agentex.io/v1alpha1 / kind: Agent / namespace: agentex
+        apiVersion: kro.run/v1alpha1 / kind: Agent / namespace: agentex
         spec.role: worker / spec.taskRef: task-issue-N
         spec.model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
         metadata.labels: agentex/spawned-by=bootstrap-seed
+      NOTE: Agent CRs MUST use apiVersion: kro.run/v1alpha1 (NOT agentex.io/v1alpha1)
+      kro watches kro.run group to trigger Jobs. Using agentex.io will NOT work.
 
     STEP 4 - Spawn planner-001 (THE HEARTBEAT OF THE SYSTEM)
       Create task-planner-001 (role: planner, effort: L, priority: 10).
