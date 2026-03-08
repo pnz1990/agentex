@@ -312,7 +312,9 @@ done
 
 # ── 5. Peer thoughts (shared context) ────────────────────────────────────────
 # Get the last 10 thoughts from other agents, excluding ones we've already read
-THOUGHTS_JSON=$(kubectl get thoughts -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+# CRITICAL: Must sort by creationTimestamp to get the actual LAST 10 thoughts
+# Bug #89: .items[-10:] on unsorted output may return random 10, not the latest 10
+THOUGHTS_JSON=$(kubectl get thoughts -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp -o json 2>/dev/null || echo '{"items":[]}')
 PEER_THOUGHTS=$(echo "$THOUGHTS_JSON" | jq -r \
   --arg name "$AGENT_NAME" \
   '.items[-10:] | .[] | 
