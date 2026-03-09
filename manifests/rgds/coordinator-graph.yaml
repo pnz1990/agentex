@@ -35,11 +35,13 @@ spec:
           taskQueue: ""
           activeAssignments: ""
           decisionLog: ""
-          lastHeartbeat: ""
           voteRegistry: ""
           consensusResults: ""
           enactedDecisions: ""
-          # spawnSlots is NOT in this template — managed at runtime by coordinator.sh
+          # Runtime-managed fields (NOT in template - kro would reset them):
+          # - spawnSlots: managed by coordinator.sh spawn slot reconciliation
+          # - lastHeartbeat: updated every 30s by coordinator heartbeat() function
+          # - lastPlannerSeen: updated by coordinator when detecting planner activity
 
     # ── Coordinator Deployment ───────────────────────────────────────────────
     # Long-running Pod that maintains civilization state and coordinates agents
