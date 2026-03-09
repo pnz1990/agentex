@@ -69,15 +69,13 @@ RUN NPM_DIR="$(npm root -g)/npm" \
     && echo '{"name":"patch","version":"1.0.0"}' > /tmp/npm-patch/package.json \
     && cd /tmp/npm-patch \
     && npm install --save-exact tar@7.5.11 minimatch@10.2.3 \
-    && echo "Installed tar: $(node -e 'console.log(require(\"/tmp/npm-patch/node_modules/tar/package.json\").version)')" \
-    && echo "Installed minimatch: $(node -e 'console.log(require(\"/tmp/npm-patch/node_modules/minimatch/package.json\").version)')" \
+    && echo "Installed tar: $(node -e 'console.log(require("/tmp/npm-patch/node_modules/tar/package.json").version)')" \
+    && echo "Installed minimatch: $(node -e 'console.log(require("/tmp/npm-patch/node_modules/minimatch/package.json").version)')" \
     && cp -r /tmp/npm-patch/node_modules/tar/. "${NPM_DIR}/node_modules/tar/" \
     && cp -r /tmp/npm-patch/node_modules/minimatch/. "${NPM_DIR}/node_modules/minimatch/" \
-    && echo "npm tar version after patch: $(node -e 'console.log(require(\"'${NPM_DIR}'/node_modules/tar/package.json\").version)')" \
-    && echo "npm minimatch version after patch: $(node -e 'console.log(require(\"'${NPM_DIR}'/node_modules/minimatch/package.json\").version)')" \
-    && rm -rf /tmp/npm-patch \
+    && cd / \
     && npm cache clean --force \
-    && rm -rf /root/.npm
+    && rm -rf /tmp/npm-patch /root/.npm
 
 # ubuntu:24.04 ships with user/group "ubuntu" at UID/GID 1000.
 # Rename it to "agentex" and set up the home directory.
