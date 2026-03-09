@@ -409,9 +409,12 @@ tally_and_enact_votes() {
         
         [ -z "$proposal_content" ] && continue
 
-        # Extract key=value pairs from proposal
+        # Extract key=value pairs from proposal declaration line only (issue #754)
+        # IMPORTANT: Only extract from first line to avoid picking up values from evidence/reasoning text
+        # Example: "#proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-at-limit-6"
+        # Should extract "circuitBreakerLimit=12" and "reason=...", NOT "limit-6" from later lines
         local kv_pairs
-        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        kv_pairs=$(echo "$proposal_content" | head -1 | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
