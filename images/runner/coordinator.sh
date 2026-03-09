@@ -355,6 +355,137 @@ reconcile_spawn_slots() {
     fi
 }
 
+# Sync constitution.yaml in git after governance enactment (issue #893)
+# When the coordinator patches the live ConfigMap, this function opens a PR
+# to update the source file so git repo stays in sync with cluster state.
+sync_constitution_to_git() {
+    local kv_pairs="$1"
+    local topic="$2"
+    local approve_votes="$3"
+    
+    echo "[$(date -u +%H:%M:%S)] Syncing constitution.yaml to git after governance enactment..."
+    
+    # Create temp workspace
+    local workspace
+    workspace=$(mktemp -d /tmp/constitution-sync-XXXXXX)
+    trap "rm -rf '$workspace'" RETURN
+    
+    cd "$workspace" || return 1
+    
+    # Clone repo
+    if ! git clone "https://github.com/${GITHUB_REPO}" repo 2>/dev/null; then
+        echo "[$(date -u +%H:%M:%S)] ERROR: Failed to clone ${GITHUB_REPO}"
+        return 1
+    fi
+    
+    cd repo || return 1
+    
+    # Configure git user
+    git config user.email "coordinator@agentex.io"
+    git config user.name "Agentex Coordinator"
+    
+    # Create branch
+    local branch_name="governance-enacted-${topic}-$(date +%s)"
+    git checkout -b "$branch_name" 2>/dev/null || return 1
+    
+    # Read current constitution ConfigMap from cluster
+    local current_cm
+    current_cm=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" -o json 2>/dev/null)
+    if [ -z "$current_cm" ]; then
+        echo "[$(date -u +%H:%M:%S)] ERROR: Could not read agentex-constitution ConfigMap"
+        return 1
+    fi
+    
+    # Update constitution.yaml data section to match cluster ConfigMap
+    # Strategy: Extract .data from ConfigMap JSON and rebuild YAML file
+    local constitution_file="manifests/system/constitution.yaml"
+    
+    # Preserve metadata section (lines 1-16) and rebuild data section from ConfigMap
+    head -16 "$constitution_file" > "${constitution_file}.new"
+    echo "data:" >> "${constitution_file}.new"
+    
+    # Extract each key=value from ConfigMap .data and format as YAML
+    echo "$current_cm" | jq -r '.data | to_entries[] | 
+        if (.value | contains("\n")) then
+            "  \(.key): |\n    \(.value | gsub("\n"; "\n    "))"
+        else
+            "  \(.key): \"\(.value)\""
+        end' >> "${constitution_file}.new"
+    
+    mv "${constitution_file}.new" "$constitution_file"
+    
+    # Check if there are changes
+    if ! git diff --quiet "$constitution_file"; then
+        git add "$constitution_file"
+        
+        # Build commit message
+        local commit_msg="chore: sync constitution.yaml with enacted governance decision
+
+Governance topic: ${topic}
+Enacted changes: ${kv_pairs}
+Vote count: ${approve_votes} approvals (threshold: ${VOTE_THRESHOLD})
+
+This commit syncs the git repo with the cluster ConfigMap after
+governance enactment. Without this sync, fresh installs would revert
+the civilization's collective decisions.
+
+Fixes #893"
+        
+        git commit -m "$commit_msg" 2>/dev/null || return 1
+        
+        # Push to remote
+        if git push -u origin "$branch_name" 2>/dev/null; then
+            echo "[$(date -u +%H:%M:%S)] ✓ Pushed branch $branch_name"
+            
+            # Create PR using gh CLI
+            if command -v gh &>/dev/null && [ -n "${GITHUB_TOKEN:-}" ]; then
+                gh pr create \
+                    --repo "${GITHUB_REPO}" \
+                    --title "chore: sync constitution.yaml with enacted governance ($topic)" \
+                    --body "## Governance Enactment Sync
+
+This PR syncs \`manifests/system/constitution.yaml\` with the live \`agentex-constitution\` ConfigMap after governance enactment.
+
+**Enacted changes:**
+\`\`\`
+${kv_pairs}
+\`\`\`
+
+**Governance details:**
+- Topic: \`${topic}\`
+- Vote count: ${approve_votes} approvals (threshold: ${VOTE_THRESHOLD})
+- Enactment timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+**Why this matters:**
+Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization.
+
+**Related:** Issue #893, Issue #891 (constitution drift detection)
+
+**Auto-merge eligible:** This is a data sync PR (not protected file) reflecting already-enacted governance. Safe to merge immediately." \
+                    --head "$branch_name" \
+                    --base main 2>/dev/null
+                
+                if [ $? -eq 0 ]; then
+                    echo "[$(date -u +%H:%M:%S)] ✓ PR created for constitution sync"
+                    push_metric "ConstitutionSyncSuccess" 1 "Count" "Topic=${topic}"
+                else
+                    echo "[$(date -u +%H:%M:%S)] WARNING: PR creation failed (gh CLI error)"
+                fi
+            else
+                echo "[$(date -u +%H:%M:%S)] WARNING: gh CLI not available, PR not created"
+            fi
+        else
+            echo "[$(date -u +%H:%M:%S)] ERROR: Failed to push branch $branch_name"
+            return 1
+        fi
+    else
+        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml (already synced)"
+    fi
+    
+    cd / && rm -rf "$workspace"
+    return 0
+}
+
 # Tally votes from Thought CRs and ENACT consensus when threshold reached
 # GENERIC GOVERNANCE ENGINE (issue #630) — handles ANY proposal topic
 tally_and_enact_votes() {
@@ -533,6 +664,10 @@ tally_and_enact_votes() {
                         -p "{\"data\":${patch_data}}" \
                         && echo "[$(date -u +%H:%M:%S)] ✓ Constitution patched: $kv_pairs" \
                         || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to patch constitution"
+                    
+                    # ISSUE #893: Sync constitution.yaml in git after enacting governance decision
+                    # This prevents git repo from drifting out of sync with cluster ConfigMap
+                    sync_constitution_to_git "$kv_pairs" "$topic" "$approve_votes"
                 fi
             fi
 
