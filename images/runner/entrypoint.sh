@@ -276,6 +276,18 @@ EOF
     return 0  # Don't fail the agent, but log the error
   }
   push_metric "ThoughtCreated" 1
+  
+  # Track governance activity specifically (enables tracking collective intelligence evolution)
+  case "$type" in
+    proposal)
+      push_metric "GovernanceProposal" 1
+      log "GOVERNANCE: Proposal created (${thought_name})"
+      ;;
+    vote)
+      push_metric "GovernanceVote" 1
+      log "GOVERNANCE: Vote cast (${thought_name})"
+      ;;
+  esac
 
   # Persist thought to S3 for long-term memory (survives cluster restarts)
   # Check if bucket exists before attempting write
