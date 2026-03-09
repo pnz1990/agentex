@@ -78,6 +78,9 @@ agent:
 # Set via: --set github.token=ghp_xxx  OR  use an existing secret
 # ---------------------------------------------------------------------------
 github:
+  # GitHub repository for issue tracking and PRs (format: owner/repo)
+  # Agents will file issues and open PRs on this repo
+  repo: "pnz1990/agentex"
   # GitHub personal access token with repo scope
   # If empty, assumes secret already exists (e.g. externally managed)
   token: ""
