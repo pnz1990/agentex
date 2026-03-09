@@ -11,6 +11,8 @@ AGENT_ROLE="${AGENT_ROLE:-worker}"
 TASK_CR_NAME="${TASK_CR_NAME:-}"
 SWARM_REF="${SWARM_REF:-}"
 NAMESPACE="${NAMESPACE:-agentex}"
+# Issue #937: Flag to distinguish circuit breaker block from fatal errors
+SPAWN_BLOCKED_BY_CIRCUIT_BREAKER="false"
 # DEPRECATED: REPO, CLUSTER, BEDROCK_REGION env vars — read from constitution instead (issue #819)
 # Keep as fallbacks for backward compatibility during migration
 REPO="${REPO:-}"  # Will be overridden by constitution.githubRepo
@@ -172,6 +174,13 @@ release_spawn_slot() {
 handle_fatal_error() {
   local exit_code=$1 line_num=$2
   
+  # Issue #937: Skip emergency perpetuation if spawn was blocked by circuit breaker
+  # Circuit breaker blocks are normal system behavior, not fatal errors
+  if [ "$SPAWN_BLOCKED_BY_CIRCUIT_BREAKER" = "true" ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME:-unknown}] Spawn blocked by circuit breaker - exiting cleanly (no emergency perpetuation)" >&2
+    exit 0
+  fi
+  
   # Only trigger on actual errors (not normal exit 0)
   if [ "$exit_code" -ne 0 ]; then
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME:-unknown}] FATAL ERROR at line $line_num (exit $exit_code)" >&2
@@ -185,6 +194,8 @@ handle_fatal_error() {
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Requesting spawn slot from atomic gate (bypass kill switch)..." >&2
       if ! request_spawn_slot "true"; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ATOMIC SPAWN GATE: spawn denied (system at capacity). Agent dying without successor." >&2
+        # Issue #937: Set flag so next error doesn't trigger emergency cascade
+        SPAWN_BLOCKED_BY_CIRCUIT_BREAKER="true"
         exit $exit_code
       fi
       
@@ -2852,7 +2863,8 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     # Issue #783: Emergency perpetuation MUST bypass kill switch to prevent civilization death
     # The kill switch is meant to stop proliferation (40+ agents), not recovery (1 emergency successor)
-    spawn_task_and_agent \
+    # Issue #937: Set flag if spawn fails due to circuit breaker, preventing cascade
+    if spawn_task_and_agent \
       "$NEXT_TASK" \
       "$NEXT_AGENT" \
       "$NEXT_ROLE" \
@@ -2877,9 +2889,13 @@ The system must never idle. You are responsible for keeping it alive." \
       "0" \
       "$SWARM_REF" \
       "true" \
-      "$([ "$NEXT_ROLE" = "worker" ] && echo "spot" || echo "on-demand")"  # Workers use spot for cost savings (issue #20)
-
-    log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
+      "$([ "$NEXT_ROLE" = "worker" ] && echo "spot" || echo "on-demand")"; then  # Workers use spot for cost savings (issue #20)
+      log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
+    else
+      # Issue #937: Emergency spawn blocked by circuit breaker - this is NOT a fatal error
+      log "Emergency spawn blocked by circuit breaker - system at capacity. Exiting cleanly without cascade."
+      SPAWN_BLOCKED_BY_CIRCUIT_BREAKER="true"
+    fi
   fi
 fi
 
