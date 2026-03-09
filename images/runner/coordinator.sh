@@ -128,9 +128,46 @@ log_decision() {
     echo "[$(date -u +%H:%M:%S)] Decision logged: $decision"
 }
 
-# Refresh task queue from open GitHub issues
+# Vision score priority matrix — maps issue labels to vision alignment scores.
+# Higher score = more aligned with the civilization's vision.
+# Coordinator uses this to sort the task queue, ensuring agents work on
+# the highest-impact issues first rather than picking arbitrarily.
+VISION_PRIORITY_LABELS=(
+    "collective-intelligence:10"
+    "debate:10"
+    "governance:9"
+    "identity:8"
+    "memory:8"
+    "coordinator:7"
+    "self-improvement:7"
+    "enhancement:5"
+    "bug:4"
+    "documentation:2"
+    "circuit-breaker:1"
+    "proliferation:1"
+)
+
+# Score an issue by its labels (returns highest matching score, default 5)
+score_issue() {
+    local issue_number="$1"
+    local labels
+    labels=$(gh issue view "$issue_number" --repo pnz1990/agentex \
+        --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+    
+    local best_score=5
+    for entry in "${VISION_PRIORITY_LABELS[@]}"; do
+        local label="${entry%%:*}"
+        local score="${entry##*:}"
+        if echo "$labels" | grep -qi "$label"; then
+            [ "$score" -gt "$best_score" ] && best_score="$score"
+        fi
+    done
+    echo "$best_score"
+}
+
+# Refresh task queue from open GitHub issues, sorted by vision priority score
 refresh_task_queue() {
-    echo "[$(date -u +%H:%M:%S)] Refreshing task queue from GitHub..."
+    echo "[$(date -u +%H:%M:%S)] Refreshing task queue from GitHub (vision-priority sorted)..."
 
     # Check if gh is available and authenticated
     if ! gh auth status &>/dev/null 2>&1; then
@@ -138,24 +175,46 @@ refresh_task_queue() {
         return 0
     fi
 
-    local issues
-    issues=$(gh issue list --repo pnz1990/agentex --state open --limit 50 --json number,labels \
-        2>/dev/null \
-        | jq -r '.[] | select(.labels[] | .name == "enhancement" or .name == "bug") | .number' \
-        | head -10 \
-        | tr '\n' ',' \
-        | sed 's/,$//') || true
+    local issues_json
+    issues_json=$(gh issue list --repo pnz1990/agentex --state open --limit 50 \
+        --json number,labels,title 2>/dev/null) || true
 
-    if [ -n "$issues" ]; then
+    [ -z "$issues_json" ] && return 0
+
+    # Build scored list: "score:number"
+    local scored_issues=""
+    local numbers
+    numbers=$(echo "$issues_json" | jq -r '.[] | select(.labels[] | .name == "enhancement" or .name == "bug") | .number' 2>/dev/null | head -20)
+
+    for num in $numbers; do
+        # Score based on labels already fetched (avoid extra API calls)
+        local labels
+        labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+        local best_score=5
+        for entry in "${VISION_PRIORITY_LABELS[@]}"; do
+            local label="${entry%%:*}"
+            local score="${entry##*:}"
+            if echo "$labels" | grep -qi "$label"; then
+                [ "$score" -gt "$best_score" ] && best_score="$score"
+            fi
+        done
+        scored_issues="${scored_issues}${best_score}:${num}\n"
+    done
+
+    if [ -n "$scored_issues" ]; then
+        # Sort by score descending, extract issue numbers
+        local sorted_issues
+        sorted_issues=$(printf "%b" "$scored_issues" | sort -t: -k1 -rn | cut -d: -f2 | tr '\n' ',' | sed 's/,$//')
+
         local current_queue
         current_queue=$(get_state "taskQueue")
-
-        # Merge new issues with existing queue (deduplicate, preserve order)
+        # Merge new issues with existing queue (deduplicate, preserve priority order)
         local merged_queue
-        merged_queue=$(echo "${current_queue},${issues}" | tr ',' '\n' | grep -v '^$' | sort -un | tr '\n' ',' | sed 's/,$//')
+        merged_queue=$(echo "${sorted_issues},${current_queue}" | tr ',' '\n' | grep -v '^$' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
 
         update_state "taskQueue" "$merged_queue"
-        echo "[$(date -u +%H:%M:%S)] Task queue: $merged_queue"
+        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted): $merged_queue"
     fi
 }
 
@@ -347,7 +406,64 @@ Constitution patched at ${ts}. All future agents will use limit=${proposed_value
     fi
 }
 
-# ── Main Loop ────────────────────────────────────────────────────────────────
+# Track debate activity — count debate threads, surface unresolved disagreements
+track_debate_activity() {
+    local all_cm
+    all_cm=$(kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
+            name: .metadata.name,
+            type: (.data.thoughtType // ""),
+            parent: (.data.parentRef // ""),
+            agent: (.data.agentRef // ""),
+            content: ((.data.content // "") | .[0:100])
+          }]' 2>/dev/null) || return 0
+
+    [ -z "$all_cm" ] || [ "$all_cm" = "null" ] || [ "$all_cm" = "[]" ] && return 0
+
+    # Count debate responses
+    local debate_count
+    debate_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate")] | length' 2>/dev/null || echo "0")
+
+    # Count unique debate threads (thoughts with a non-empty parentRef)
+    local thread_count
+    thread_count=$(echo "$all_cm" | jq '[.[] | select(.parent != "" and .parent != null)] | length' 2>/dev/null || echo "0")
+
+    # Find unresolved disagreements (debate thoughts with stance "disagree" that have no "synthesize" sibling)
+    local disagree_count
+    disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("disagree|DISAGREE"))] | length' 2>/dev/null || echo "0")
+    local synthesize_count
+    synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("synthesize|SYNTHESIZE|Synthesis"))] | length' 2>/dev/null || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] Debate stats: responses=$debate_count threads=$thread_count disagree=$disagree_count synthesize=$synthesize_count"
+
+    update_state "debateStats" "responses=${debate_count} threads=${thread_count} disagree=${disagree_count} synthesize=${synthesize_count}"
+    push_metric "DebateResponses" "$debate_count" "Count" "Component=Coordinator"
+    push_metric "DebateThreads" "$thread_count" "Count" "Component=Coordinator"
+
+    # If there are unresolved disagreements and no synthesis attempts, post a nudge
+    if [ "$disagree_count" -gt 0 ] && [ "$synthesize_count" -eq 0 ]; then
+        local existing_nudge
+        existing_nudge=$(get_state "lastDebateNudge")
+        local now_epoch
+        now_epoch=$(date +%s)
+        local nudge_epoch=0
+        [ -n "$existing_nudge" ] && nudge_epoch=$(date -d "$existing_nudge" +%s 2>/dev/null || echo "0")
+        local age=$(( now_epoch - nudge_epoch ))
+
+        # Nudge at most once per 10 minutes
+        if [ "$age" -gt 600 ]; then
+            post_coordinator_thought \
+"DEBATE NUDGE: There are $disagree_count unresolved disagreements in Thought CRs and 0 synthesis attempts.
+A third agent should read the debate chain and post a synthesis thought.
+Use: post_debate_response <parent_thought_name> \"Synthesis: ...\" synthesize 9
+The civilization needs mediators, not just voters." \
+                "insight"
+            update_state "lastDebateNudge" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        fi
+    fi
+}
+
+
 
 echo "Coordinator entering main loop..."
 update_state "phase" "Active"
@@ -395,6 +511,11 @@ while true; do
     # Every 3 iterations (~1.5 min): tally votes and potentially enact
     if [ $((iteration % 3)) -eq 0 ]; then
         tally_and_enact_votes
+    fi
+
+    # Every 6 iterations (~3 min): track debate activity and nudge if needed
+    if [ $((iteration % 6)) -eq 0 ]; then
+        track_debate_activity
     fi
 
     sleep "$HEARTBEAT_INTERVAL"
