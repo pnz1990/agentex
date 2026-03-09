@@ -83,10 +83,7 @@ spec:
                           name: agentex-constitution
                           key: githubRepo
                     - name: CLUSTER
-                      valueFrom:
-                        configMapKeyRef:
-                          name: agentex-constitution
-                          key: clusterName
+                      value: "agentex"
                     - name: NAMESPACE
                       value: "agentex"
                     - name: GITHUB_TOKEN_FILE
