@@ -597,9 +597,31 @@ while true; do
         cleanup_active_agents
     fi
 
-    # Every 4 iterations (~2 min): reconcile spawn slots against actual job count
-    # This recovers leaked slots when agents crash before releasing them
-    if [ $((iteration % 4)) -eq 0 ]; then
+    # ADAPTIVE SPAWN SLOT RECONCILIATION (issue #669)
+    # When system is near capacity, reconcile every cycle (~30s) to prevent proliferation bursts.
+    # When idle, reconcile every 4 iterations (~2 min) to reduce overhead.
+    # This prevents the 2-minute reconciliation gap from allowing 16+ agents when limit is 12.
+    
+    # Read current circuit breaker limit
+    local cb_limit
+    cb_limit=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
+    if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=12; fi
+    
+    # Count active jobs (fast check, only when needed)
+    local current_active
+    current_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "0")
+    
+    # Near capacity threshold: reconcile if within 3 slots of limit
+    local near_capacity_threshold=$((cb_limit - 3))
+    
+    if [ "$current_active" -ge "$near_capacity_threshold" ]; then
+        # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
+        reconcile_spawn_slots
+    elif [ $((iteration % 4)) -eq 0 ]; then
+        # IDLE: reconcile every 4 iterations (~2 min) as before
         reconcile_spawn_slots
     fi
 
