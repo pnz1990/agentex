@@ -219,6 +219,18 @@ log "Early circuit breaker passed: safe to proceed with startup"
 # This MUST run after kubectl config and before any CR creation
 if [ -f "/agent/identity.sh" ]; then
   source /agent/identity.sh
+  # CRITICAL: Actually claim an identity (issue #703)
+  # Without this call, the identity system is non-functional
+  if claim_identity; then
+    log "Identity claimed: $AGENT_DISPLAY_NAME (agent: $AGENT_NAME)"
+  else
+    log "WARNING: Failed to claim identity, using fallback: $AGENT_NAME"
+    AGENT_DISPLAY_NAME="$AGENT_NAME"
+  fi
+  # Ensure AGENT_DISPLAY_NAME is never empty
+  if [ -z "${AGENT_DISPLAY_NAME:-}" ]; then
+    AGENT_DISPLAY_NAME="$AGENT_NAME"
+  fi
 else
   log "WARNING: /agent/identity.sh not found, identity system disabled"
   AGENT_DISPLAY_NAME="$AGENT_NAME"
