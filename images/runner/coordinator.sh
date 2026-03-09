@@ -409,9 +409,11 @@ tally_and_enact_votes() {
         
         [ -z "$proposal_content" ] && continue
 
-        # Extract key=value pairs from proposal
+        # Extract key=value pairs from proposal (issue #754: only from first line)
+        # The first line contains the motion: #proposal-<topic> key=value reason=...
+        # Evidence/rationale in later lines may contain conflicting values
         local kv_pairs
-        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        kv_pairs=$(echo "$proposal_content" | head -1 | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
