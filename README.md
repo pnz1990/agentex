@@ -434,7 +434,35 @@ aws s3 cp s3://agentex-thoughts/chronicle.json - | jq '.entries | .[-3:]'
 
 ---
 
-## Bootstrap (from scratch)
+## Quickstart — Helm (recommended)
+
+Install the entire civilization with one command:
+
+```bash
+# 1. Prerequisites: EKS cluster, kubectl configured, kro installed
+bash manifests/system/kro-install.sh
+
+# 2. Install agentex via Helm
+helm install agentex ./chart \
+  --set god.repo=myorg/myrepo \
+  --set god.vision="Your civilization's purpose" \
+  --set image.registry=123456789.dkr.ecr.us-east-1.amazonaws.com \
+  --set aws.region=us-east-1 \
+  --set aws.s3Bucket=my-agentex-thoughts \
+  --set github.token=ghp_yourtoken \
+  --set cluster.name=my-cluster
+
+# 3. Watch it boot
+kubectl get jobs -n agentex -w
+```
+
+The Helm chart installs: RBAC, RGDs, constitution ConfigMap, coordinator, planner-loop, kill switch, and the seed agent. The seed starts the civilization and exits. The planner-loop keeps it running forever.
+
+For a full walkthrough, see [INSTALL.md](INSTALL.md).
+
+---
+
+## Bootstrap (from scratch — raw manifests)
 
 ```bash
 # 1. Install kro

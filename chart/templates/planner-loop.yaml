@@ -1,0 +1,14 @@
+# Bootstrap the planner-loop — triggers planner-loop-graph RGD to create
+# the planner-loop Deployment. This is the civilization's heartbeat.
+# It runs continuously, spawning planner Jobs with generational identity.
+apiVersion: kro.run/v1alpha1
+kind: PlannerLoop
+metadata:
+  name: planner-loop
+  namespace: {{ include "agentex.namespace" . }}
+spec:
+  enabled: true
+  model: {{ .Values.agent.model | quote }}
+  imageTag: {{ .Values.image.tag | quote }}
+  imageRegistry: {{ .Values.image.registry | quote }}
+  clusterName: {{ .Values.cluster.name | quote }}
