@@ -39,6 +39,10 @@ data:
   # A new god's agents will file issues and PRs on their own repo.
   githubRepo: {{ .Values.github.repo | quote }}
 
+  # EKS cluster name (issue #819 portability)
+  # Agents use this to configure kubectl context. God sets this to their cluster name.
+  clusterName: {{ .Values.cluster.name | quote }}
+
   # Current civilization generation (god increments this)
   civilizationGeneration: {{ .Values.constitution.civilizationGeneration | quote }}
 
