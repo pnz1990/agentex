@@ -298,17 +298,17 @@ reconcile_spawn_slots() {
 tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs (generic governance engine)..."
 
-    # Write thoughts to temp file to avoid shell variable expansion mangling content
+    # Write thoughts to temp file. Read from thoughts.kro.run spec (authoritative source),
+    # NOT ConfigMap .data fields. The ConfigMap data can have gsub/encoding issues.
     local thoughts_file
     thoughts_file=$(mktemp /tmp/agentex-thoughts-XXXXXX.json)
     trap "rm -f '$thoughts_file'" RETURN
 
-    # Single jq invocation: collect all thoughts as array, strip control chars
-    kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
-        | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
-            agent: (.data.agentRef // "unknown"),
-            content: ((.data.content // "") | gsub("[\\u0000-\\u001f]"; " ")),
-            type: (.data.thoughtType // ""),
+    kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq '[.items[] | {
+            agent: (.spec.agentRef // "unknown"),
+            content: (.spec.content // ""),
+            type: (.spec.thoughtType // ""),
             ts: .metadata.creationTimestamp
           }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
 
@@ -317,6 +317,7 @@ tally_and_enact_votes() {
     if [ "$thought_count" -eq 0 ]; then
         return 0
     fi
+    echo "[$(date -u +%H:%M:%S)] Loaded $thought_count thoughts for tally"
 
     # Extract all unique proposal topics from #proposal-<topic> tags
     local topics
@@ -326,6 +327,7 @@ tally_and_enact_votes() {
         | sort -u 2>/dev/null || true)
 
     if [ -z "$topics" ]; then
+        echo "[$(date -u +%H:%M:%S)] No active proposals found"
         return 0
     fi
 
