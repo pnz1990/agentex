@@ -275,7 +275,49 @@ spec:
     BODY
     )"
 
-    ## STEP 7 — SPAWN THE NEXT GOD DELEGATE
+    ## STEP 7 — WRITE TO THE CIVILIZATION CHRONICLE
+
+    The chronicle is the civilization's permanent memory, written ONLY by the god-delegate.
+    Agents read it at startup for historical context. You write one entry per run.
+    Cap at 20 entries — oldest entries are dropped when the cap is exceeded.
+
+      CHRONICLE_ENTRY_ERA="Generation ${MY_GEN} Assessment"
+      CHRONICLE_ENTRY_PERIOD="god-delegate-$(printf "%03d" ${MY_GEN}) ($(date -u '+%Y-%m-%d'))"
+
+      # Download current chronicle (or start fresh)
+      CURRENT_CHRONICLE=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null || echo '{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}')
+      if [ -z "$CURRENT_CHRONICLE" ]; then
+        CURRENT_CHRONICLE='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
+      fi
+
+      # Count active agents and recent PRs for the summary
+      ACTIVE_JOBS=$(kubectl get jobs -n agentex --no-headers 2>/dev/null | grep -v "Complete\|Failed" | wc -l | tr -d ' ')
+      RECENT_PRS=$(gh pr list --repo pnz1990/agentex --state merged --limit 5 --json number --jq 'length' 2>/dev/null || echo "0")
+
+      # Build and upload updated chronicle (capped at 20 entries)
+      NEW_CHRONICLE=$(echo "$CURRENT_CHRONICLE" | jq \
+        --arg era "$CHRONICLE_ENTRY_ERA" \
+        --arg period "$CHRONICLE_ENTRY_PERIOD" \
+        --arg summary "God-delegate generation ${MY_GEN} completed assessment. Active jobs: ${ACTIVE_JOBS}. Recent PRs merged: ${RECENT_PRS}. Top priority: see latest [GOD-REPORT] GitHub issue and directive Thought CR for this generation." \
+        --arg lesson "Read the god-delegate directive Thought CR for this generation to understand the civilization's current priority and what work was injected." \
+        --arg gen "${MY_GEN}" \
+        '.entries += [{
+          "era": $era,
+          "period": $period,
+          "summary": $summary,
+          "lessonLearned": $lesson,
+          "generation": ($gen | tonumber)
+        }] | .entries = (.entries | sort_by(.generation // 0) | .[-20:]) | .civilizationAge = ("Generation " + $gen)' \
+        2>/dev/null)
+
+      if [ -n "$NEW_CHRONICLE" ]; then
+        echo "$NEW_CHRONICLE" | aws s3 cp - s3://agentex-thoughts/chronicle.json \
+          --content-type application/json 2>/dev/null && \
+          echo "Chronicle updated (generation ${MY_GEN}, capped at 20 entries)" || \
+          echo "WARNING: Failed to update chronicle"
+      fi
+
+    ## STEP 8 — SPAWN THE NEXT GOD DELEGATE
 
     NEXT_GEN=$((MY_GEN + 1))
     NEXT_TS=$(date +%s)
