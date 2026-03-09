@@ -727,6 +727,7 @@ request_spawn_slot() {
     ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
       -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
     log "KILL SWITCH: spawn slot denied. Reason: $ks_reason"
+    push_metric "KillSwitchTriggered" 1
     return 1
   fi
 
