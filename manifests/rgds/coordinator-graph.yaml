@@ -108,6 +108,10 @@ spec:
                       value: ${schema.metadata.namespace}
                     - name: GITHUB_TOKEN_FILE
                       value: "/var/secrets/github/token"
+                  ports:
+                    - name: health
+                      containerPort: 8080
+                      protocol: TCP
                   resources:
                     requests:
                       memory: "256Mi"
@@ -116,17 +120,21 @@ spec:
                       memory: "512Mi"
                       cpu: "500m"
                   livenessProbe:
-                    exec:
-                      command: ["/bin/sh", "-c", "test -f /tmp/coordinator-alive"]
-                    initialDelaySeconds: 30
-                    periodSeconds: 60
+                    httpGet:
+                      path: /health
+                      port: health
+                      scheme: HTTP
+                    initialDelaySeconds: 60
+                    periodSeconds: 30
                     timeoutSeconds: 5
                     failureThreshold: 3
                   readinessProbe:
-                    exec:
-                      command: ["/bin/sh", "-c", "test -f /tmp/coordinator-ready"]
-                    initialDelaySeconds: 10
-                    periodSeconds: 30
+                    httpGet:
+                      path: /health
+                      port: health
+                      scheme: HTTP
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
                     timeoutSeconds: 5
                     failureThreshold: 2
                   volumeMounts:
