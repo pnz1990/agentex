@@ -63,36 +63,82 @@ handle_fatal_error() {
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn (with timeout)
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && timeout 10s kubectl cluster-info &>/dev/null; then
-      # CIRCUIT BREAKER: Check global active jobs first (issue #361)
-      local total_active=$(kubectl_with_timeout 10 get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
       
-      # Try to emit active job metric before potential death (issue #416)
-      aws cloudwatch put-metric-data --namespace Agentex --metric-name ActiveJobs --value "$total_active" --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
-      
-      if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. NOT spawning emergency successor." >&2
-        # Try to emit metric before death (may fail if AWS/kubectl unavailable)
-        aws cloudwatch put-metric-data --namespace Agentex --metric-name CircuitBreakerTriggered --value 1 --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
+      # CRITICAL FIX: Check kill switch first (before any spawn logic)
+      local killswitch_enabled
+      killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+        -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+      if [ "$killswitch_enabled" = "true" ]; then
+        local ks_reason
+        ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+          -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] KILL SWITCH ACTIVE: $ks_reason. NOT spawning emergency successor." >&2
         exit $exit_code
       fi
       
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < $CIRCUIT_BREAKER_LIMIT)..." >&2
-      local next_agent="${AGENT_ROLE}-$(date +%s)"
-      local next_task="task-emergency-$(date +%s)"
+      # CRITICAL FIX: Use atomic spawn gate (issue #519) to prevent TOCTOU proliferation.
+      # The error trap previously bypassed request_spawn_slot(), allowing proliferation
+      # even when the circuit breaker limit was reached.
       
-      # Calculate next generation (issue #431: was hardcoded to "1")
-      local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-        -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-      if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
-        my_generation=0
+      # Try to acquire spawn slot atomically from coordinator
+      local spawn_allowed=false
+      local slots
+      slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+      
+      if [ -n "$slots" ] && [[ "$slots" =~ ^[0-9]+$ ]]; then
+        # Coordinator is available - use atomic CAS to acquire slot
+        if [ "$slots" -le 0 ]; then
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ATOMIC SPAWN GATE: 0 slots available. NOT spawning emergency successor." >&2
+          aws cloudwatch put-metric-data --namespace Agentex --metric-name CircuitBreakerTriggered --value 1 --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
+          exit $exit_code
+        fi
+        
+        # Atomically decrement spawn slots
+        local new_slots=$((slots - 1))
+        if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+          --type=json \
+          -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+          2>/dev/null; then
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Spawn slot acquired: ${slots} → ${new_slots}" >&2
+          spawn_allowed=true
+        else
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ATOMIC SPAWN GATE: CAS failed (concurrent modification). NOT spawning." >&2
+          exit $exit_code
+        fi
+      else
+        # Coordinator unavailable - fall back to direct job count (fail-open for early boot)
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] WARNING: Coordinator spawnSlots unavailable, using fallback circuit breaker" >&2
+        local total_active=$(kubectl_with_timeout 10 get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
+          jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+        
+        aws cloudwatch put-metric-data --namespace Agentex --metric-name ActiveJobs --value "$total_active" --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
+        
+        if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] FALLBACK CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. NOT spawning." >&2
+          aws cloudwatch put-metric-data --namespace Agentex --metric-name CircuitBreakerTriggered --value 1 --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
+          exit $exit_code
+        fi
+        spawn_allowed=true
       fi
-      local next_generation=$((my_generation + 1))
       
-      # Inline emergency spawn (don't call functions that might fail)
-      # Use || true to prevent trap recursion if kubectl fails
-      # Issue #449: Capture stderr+stdout to log file for debugging
-      kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+      if [ "$spawn_allowed" = true ]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (spawn gate passed)..." >&2
+        local next_agent="${AGENT_ROLE}-$(date +%s)"
+        local next_task="task-emergency-$(date +%s)"
+        
+        # Calculate next generation (issue #431: was hardcoded to "1")
+        local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+          -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+        if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
+          my_generation=0
+        fi
+        local next_generation=$((my_generation + 1))
+        
+        # Inline emergency spawn (don't call functions that might fail)
+        # Use || true to prevent trap recursion if kubectl fails
+        # Issue #449: Capture stderr+stdout to log file for debugging
+        kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -105,7 +151,7 @@ spec:
   effort: M
   priority: 10
 EOF
-      kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+        kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -120,16 +166,24 @@ spec:
   taskRef: $next_task
   model: ${BEDROCK_MODEL}
 EOF
-      
-      # Issue #449: Verify spawn succeeded with clear diagnostics
-      # Issue #474: Use .kro.run API group (not default agentex.io)
-      # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
-      if kubectl_with_timeout 10 get agent.kro.run "$next_agent" -n "$NAMESPACE" &>/dev/null; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✓ Emergency Agent CR created: $next_agent" >&2
-      else
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED - Agent CR not found: $next_agent" >&2
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn logs:" >&2
-        cat /tmp/emergency-spawn.log >&2 2>/dev/null || echo "(no log file)" >&2
+        
+        # Issue #449: Verify spawn succeeded with clear diagnostics
+        # Issue #474: Use .kro.run API group (not default agentex.io)
+        # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+        if kubectl_with_timeout 10 get agent.kro.run "$next_agent" -n "$NAMESPACE" &>/dev/null; then
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✓ Emergency Agent CR created: $next_agent" >&2
+        else
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED - Agent CR not found: $next_agent" >&2
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn logs:" >&2
+          cat /tmp/emergency-spawn.log >&2 2>/dev/null || echo "(no log file)" >&2
+          # Release slot if spawn failed (when coordinator is available)
+          if [ -n "$slots" ] && [[ "$slots" =~ ^[0-9]+$ ]]; then
+            kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+              --type=json \
+              -p "[{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"}]" \
+              2>/dev/null || true
+          fi
+        fi
       fi
     fi
   fi
