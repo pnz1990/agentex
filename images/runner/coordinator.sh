@@ -69,13 +69,15 @@ push_metric() {
 update_state() {
     local field="$1"
     local value="$2"
-    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" \
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
         --type=merge -p "{\"data\":{\"$field\":\"$value\"}}" 2>/dev/null || true
 }
 
 get_state() {
     local field="$1"
-    kubectl get configmap "$STATE_CM" -n "$NAMESPACE" \
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
         -o jsonpath="{.data.$field}" 2>/dev/null || echo ""
 }
 
@@ -303,12 +305,14 @@ cleanup_active_agents() {
 # This function resets spawnSlots = max(0, circuitBreakerLimit - activeJobs).
 reconcile_spawn_slots() {
     local limit
-    limit=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
         -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then limit=12; fi
 
     local active_jobs
-    active_jobs=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
         2>/dev/null || echo "0")
 
@@ -344,7 +348,8 @@ tally_and_enact_votes() {
     thoughts_file=$(mktemp /tmp/agentex-thoughts-XXXXXX.json)
     trap "rm -f '$thoughts_file'" RETURN
 
-    kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
         | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
             agent: (.data.agentRef // "unknown"),
             content: (.data.content // ""),
@@ -452,7 +457,8 @@ tally_and_enact_votes() {
                 patch_data="${patch_data}}"
 
                 if [ "$patched" = true ]; then
-                    kubectl patch configmap agentex-constitution -n "$NAMESPACE" \
+                    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+                    kubectl_with_timeout 10 patch configmap agentex-constitution -n "$NAMESPACE" \
                         --type=merge \
                         -p "{\"data\":${patch_data}}" \
                         && echo "[$(date -u +%H:%M:%S)] ✓ Constitution patched: $kv_pairs" \
@@ -497,7 +503,8 @@ Vision score: 9/10 — prioritize implementation."
 # Track debate activity — count debate threads, surface unresolved disagreements
 track_debate_activity() {
     local all_cm
-    all_cm=$(kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    all_cm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
         | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
             name: .metadata.name,
             type: (.data.thoughtType // ""),
