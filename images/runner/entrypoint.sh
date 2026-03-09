@@ -853,10 +853,13 @@ release_coordinator_task() {
     | grep -v "^${AGENT_NAME}:${issue}$" \
     | tr '\n' ',' | sed 's/,$//')
 
-  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+  local err_output
+  if ! err_output=$(kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
     --type=merge \
-    -p "{\"data\":{\"activeAssignments\":\"${new_assignments}\"}}" \
-    2>/dev/null || true
+    -p "{\"data\":{\"activeAssignments\":\"${new_assignments}\"}}" 2>&1); then
+    log "WARNING: Failed to release task assignment for issue #$issue: $err_output"
+    return 1
+  fi
 
   log "Coordinator: released issue #$issue"
   push_metric "CoordinatorTaskReleased" 1
@@ -877,8 +880,14 @@ register_with_coordinator() {
     [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
   fi
 
-  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
-    --type=merge -p "{\"data\":{\"activeAgents\":\"${new_val}\"}}" 2>/dev/null || true
+  local err_output
+  if ! err_output=$(kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"activeAgents\":\"${new_val}\"}}" 2>&1); then
+    log "WARNING: Failed to register with coordinator: $err_output"
+    return 1
+  fi
+  
+  log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE})"
 }
 
 patch_task_status() {
@@ -889,10 +898,15 @@ patch_task_status() {
   # Patch the ConfigMap backing the Task CR, not the Task CR status directly.
   # kro status fields are output-only and reflect the ConfigMap data.
   # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
-  timeout 10s kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
+  local err_output
+  if ! err_output=$(timeout 10s kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
     --type=merge \
-    -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" \
-    2>/dev/null || true
+    -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" 2>&1); then
+    log "WARNING: Failed to update task status to ${phase}: $err_output"
+    return 1
+  fi
+  
+  log "Task status updated: ${phase}"
 }
 
 # Push a custom metric to CloudWatch for dashboard visibility.
