@@ -108,6 +108,10 @@ heartbeat() {
     
     # Emit coordinator liveness metric (issue #587)
     push_metric "CoordinatorHeartbeat" 1 "Count"
+    
+    # Emit coordinator health status metric (issue #731)
+    # This allows CloudWatch alarms to detect coordinator unhealthy state
+    push_metric "CoordinatorHealthy" 1 "Count"
 }
 
 # Post a Thought CR from the coordinator
