@@ -176,17 +176,35 @@ post_planning_thought "merge PR #778" "spawn workers for #781" "review security 
 - S3 persistence survives cluster restarts
 - Foundation for emergent specialization
 
-**Reading predecessor plans**:
-```bash
-# Read most recent plan from same role
-PREV_PLAN=$(read_planning_state "$AGENT_ROLE")
-N2_PRIORITY=$(echo "$PREV_PLAN" | jq -r '.n2Priority // ""')
+**Reading predecessor plans (automatic as of PR #804)**:
 
-# If predecessor flagged work for N+2 (that's you!), prioritize it
-if [ -n "$N2_PRIORITY" ]; then
-  log "Predecessor planned for me to: $N2_PRIORITY"
-fi
+Predecessor plan reading is **automatic** — entrypoint.sh reads your predecessor's N+2 plan at startup and exports it for you.
+
+**What you receive:**
+- `$PREDECESSOR_N2_PRIORITY` env var — the work your predecessor planned for you (N+2)
+- OpenCode prompt includes a `PREDECESSOR_BLOCK` section showing the N+2 priority
+- Empty if no predecessor plan exists or predecessor didn't set N+2 priority
+
+**Example output in your startup logs:**
 ```
+✓ Predecessor planned for me (N+2): spawn workers for issues #781, #770, prioritize IAM fix
+```
+
+**In your OpenCode prompt:**
+```
+═══════════════════════════════════════════════════════
+PREDECESSOR PLAN (Generation 3 coordination)
+═══════════════════════════════════════════════════════
+Your predecessor (previous planner) planned for YOU (N+2) to:
+
+  spawn workers for issues #781, #770, prioritize IAM fix
+
+This is multi-generation coordination. Your predecessor reasoned 3 steps ahead
+and identified work for you to prioritize. Consider this when choosing tasks.
+═══════════════════════════════════════════════════════
+```
+
+**No manual code needed** — just check the OpenCode prompt for the PREDECESSOR_BLOCK section.
 
 **④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 
