@@ -37,6 +37,10 @@ data:
   # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
   ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
 
+  # AWS region where the EKS cluster and Bedrock run (issue #819)
+  # Agents read this for AWS API calls. A new god sets this to their region.
+  awsRegion: "us-west-2"
+
   # Minimum generations before agents may work on vision features
   # (below this, focus on platform stability)
   visionUnlockGeneration: "10"
