@@ -61,3 +61,17 @@ jobs:
         run: |
           docker push $ECR_REGISTRY/$ECR_REPO:${{ github.sha }}
           docker push $ECR_REGISTRY/$ECR_REPO:latest
+
+      - name: Update coordinator image to SHA tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Configure kubectl to access EKS cluster
+          aws eks update-kubeconfig --name agentex --region ${{ env.AWS_REGION }}
+          
+          # Update Coordinator CR spec to use new SHA tag (kro will propagate to deployment)
+          kubectl patch coordinator coordinator -n agentex \
+            --type=merge \
+            -p '{"spec":{"imageTag":"'"${{ github.sha }}"'"}}'
+          
+          echo "Coordinator CR updated to use imageTag: ${{ github.sha }}"
+          echo "kro will automatically update the deployment with new image: $ECR_REGISTRY/$ECR_REPO:${{ github.sha }}"
