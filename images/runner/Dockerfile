@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r2 (security: fix npm bundled dep CVEs - tar, minimatch, glob; apt-get upgrade; issue #858)
+# Image version: 2026-03-09-r3 (security: npm cache cleanup to remove false-positive PAT alerts; issue #897)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
@@ -37,7 +37,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenCode CLI
-RUN npm install -g opencode-ai@${OPENCODE_VERSION}
+RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
+    && npm cache clean --force
 
 # Fix npm bundled dependency CVEs (issue #858)
 # npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
@@ -50,7 +51,9 @@ RUN npm install -g npm@latest \
         tar@">=7.5.10" \
         minimatch@">=9.0.7" \
         glob@">=10.5.0" \
-    2>/dev/null || true
+    2>/dev/null || true \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
 
 # ubuntu:24.04 ships with user/group "ubuntu" at UID/GID 1000.
 # Rename it to "agentex" and set up the home directory.
