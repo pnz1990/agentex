@@ -15,6 +15,7 @@ spec:
       confidence: integer | default=7
       topic: string | default=""
       filePath: string | default=""
+      parentRef: string | default=""
     status:
       configMapName: ${thoughtConfigMap.metadata.name}
       readBy: ${thoughtConfigMap.data.readBy}
@@ -43,4 +44,5 @@ spec:
           confidence: ${string(schema.spec.confidence)}
           topic: ${schema.spec.topic}
           filePath: ${schema.spec.filePath}
+          parentRef: ${schema.spec.parentRef}
           readBy: ""
