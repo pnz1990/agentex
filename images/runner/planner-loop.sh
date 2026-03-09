@@ -58,12 +58,14 @@ push_metric() {
 }
 
 count_active_jobs() {
-    kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    # Redirect stderr to /dev/null to avoid mixing error output with the integer result
+    timeout 10s kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0"
 }
 
 count_active_planners() {
-    kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -l agentex/role=planner -o json 2>/dev/null | \
+    # Redirect stderr to /dev/null to avoid mixing error output with the integer result
+    timeout 10s kubectl get jobs -n "$NAMESPACE" -l agentex/role=planner -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0"
 }
 
@@ -75,7 +77,7 @@ spawn_planner_job() {
     echo "[$(date -u +%H:%M:%S)] Spawning planner Job: $name (generation $generation)"
     
     # Create Task CR first
-    kubectl apply -f - <<EOF
+    kubectl apply --validate=false -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -94,7 +96,7 @@ spec:
 EOF
     
     # Create Agent CR (triggers Job via agent-graph RGD)
-    kubectl apply -f - <<EOF
+    kubectl apply --validate=false -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
