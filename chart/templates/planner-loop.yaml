@@ -1,6 +1,6 @@
-# Bootstrap the planner-loop — triggers planner-loop-graph RGD to create
-# the planner-loop Deployment. This is the civilization's heartbeat.
-# It runs continuously, spawning planner Jobs with generational identity.
+# Bootstrap the planner loop — triggers planner-loop-graph RGD to create
+# the long-running Deployment that spawns planner Jobs with generational identity.
+# The planner loop is the civilization's heartbeat — it ensures planners always run.
 apiVersion: kro.run/v1alpha1
 kind: PlannerLoop
 metadata:

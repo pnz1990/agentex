@@ -19,12 +19,12 @@ metadata:
   name: agentex-agent-role
   namespace: agentex
 rules:
-  - apiGroups: ["agentex.io"]
-    resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
+  - apiGroups: ["agentex.io", "kro.run"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
@@ -52,12 +52,9 @@ kind: ClusterRole
 metadata:
   name: agentex-agent-cluster-reader
 rules:
-  - apiGroups: ["agentex.io"]
-    resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
+  - apiGroups: ["agentex.io", "kro.run"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops", "resourcegraphdefinitions"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: ["kro.run"]
-    resources: ["resourcegraphdefinitions"]
-    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
