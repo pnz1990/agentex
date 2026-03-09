@@ -33,6 +33,22 @@ kubectl_with_timeout() {
   timeout "${timeout_secs}s" kubectl "$@" 2>&1
 }
 
+# ── Agent CR self-cleanup function (issue #736) ───────────────────────────
+# CRITICAL: Must be called before EVERY exit point to prevent kro re-proliferation.
+# Without cleanup, Agent CRs linger and kro re-spawns Jobs when TTL expires.
+cleanup_agent_cr() {
+  log "Self-cleanup: deleting Agent CR $AGENT_NAME to prevent kro re-proliferation (issue #736)"
+  # Step 1: Remove kro finalizer so deletion is not blocked
+  kubectl_with_timeout 10 patch agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+    --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null \
+    && log "Finalizer removed from Agent CR $AGENT_NAME" \
+    || log "WARNING: Could not remove finalizer from $AGENT_NAME (may not have one)"
+  # Step 2: Delete the CR (now unblocked)
+  kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
+    && log "Agent CR $AGENT_NAME deleted successfully" \
+    || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted)"
+}
+
 # ── CONSTITUTION: Read god-owned constants ─────────────────────────────────
 # These values are set by god and must not be changed by agents.
 # To change: god edits the 'agentex-constitution' ConfigMap directly.
@@ -132,6 +148,7 @@ handle_fatal_error() {
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Requesting spawn slot from atomic gate..." >&2
       if ! request_spawn_slot; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ATOMIC SPAWN GATE: spawn denied (system at capacity). Agent dying without successor." >&2
+        cleanup_agent_cr  # Issue #736: prevent kro re-proliferation even on fatal errors
         exit $exit_code
       fi
       
@@ -1437,6 +1454,7 @@ if [ -n "$RESTART_SIGNAL" ] && [ "$RESTART_SIGNAL" -gt "$AGENT_START_TIME" ]; th
   post_thought "Rolling restart: exiting to upgrade to new runner version" "observation" 9
   post_message "broadcast" "Rolling restart: $AGENT_NAME exiting for runner upgrade" "status"
   patch_task_status "Done" "Rolling restart triggered"
+  cleanup_agent_cr  # Issue #736: prevent kro re-proliferation
   exit 0  # Emergency perpetuation will spawn replacement with new image
 fi
 
@@ -1491,6 +1509,7 @@ if [ "$STARTUP_ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
   patch_task_status "Done" "Circuit breaker: system overloaded"
   push_metric "CircuitBreakerTriggered" 1
   push_metric "ActiveJobs" "$STARTUP_ACTIVE_JOBS" "Count"
+  cleanup_agent_cr  # Issue #736: prevent kro re-proliferation
   # Exit WITHOUT spawning successor - let system load decrease naturally
   # Emergency perpetuation will also be blocked by circuit breaker
   exit 0
@@ -2076,6 +2095,7 @@ if [ "$PRE_EXEC_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
   post_report 1 "Agent exited without work due to circuit breaker" "" "" "System overload: $PRE_EXEC_ACTIVE active jobs" "" 0
   
   log "Exiting gracefully. Emergency perpetuation will NOT spawn successor (circuit breaker blocks it)."
+  cleanup_agent_cr  # Issue #736: prevent kro re-proliferation
   exit 0
 fi
 
@@ -2463,23 +2483,10 @@ if [ "$AGENT_ROLE" = "planner" ]; then
   fi
 fi
 
-# ── 14. Self-cleanup: delete our own Agent CR (issue #597) ───────────────────
+# ── 14. Self-cleanup: delete our own Agent CR (issue #597, #736) ──────────────
 # CRITICAL: Agent CRs must be deleted after job completion to prevent kro
-# from re-creating Jobs when it restarts. Without this, every kro restart
-# causes mass proliferation regardless of the circuit breaker or spawn gate.
-#
-# kro adds a finalizer (kro.run/finalizer) to Agent CRs. If kro is busy or
-# restarting, deletion hangs forever. Fix: remove the finalizer first, then delete.
-# This ensures the CR is gone even if kro is not responsive.
-log "Self-cleanup: deleting Agent CR $AGENT_NAME to prevent kro re-proliferation (issue #597, #736)"
-# Step 1: Remove kro finalizer so deletion is not blocked
-kubectl_with_timeout 10 patch agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-  --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null \
-  && log "Finalizer removed from Agent CR $AGENT_NAME" \
-  || log "WARNING: Could not remove finalizer from $AGENT_NAME (may not have one)"
-# Step 2: Delete the CR (now unblocked)
-kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
-  && log "Agent CR $AGENT_NAME deleted successfully" \
-  || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted or kro finalizer pending)"
+# from re-creating Jobs when TTL expires. This function is now called at ALL
+# exit points, not just normal completion (see issue #736).
+cleanup_agent_cr
 
 log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE"
