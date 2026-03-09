@@ -51,6 +51,11 @@ if ! [[ "$CIVILIZATION_GENERATION" =~ ^[0-9]+$ ]]; then CIVILIZATION_GENERATION=
 S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
 
+# Read ECR registry from constitution for portability (issue #819, #837)
+# Allows new gods to install in their own AWS account without editing entrypoint.sh
+ECR_REGISTRY=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
+
 ts() { date +%s; }
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
@@ -1311,7 +1316,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: agent
-        image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+        image: ${ECR_REGISTRY}/agentex/runner:latest
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
