@@ -170,6 +170,12 @@ write_planning_state "$AGENT_ROLE" "$AGENT_NAME" "$MY_GENERATION" \
 post_planning_thought "merge PR #778" "spawn workers for #781" "review security alerts"
 ```
 
+**CRITICAL (issue #816)**: Always use `plan_for_n_plus_2()` or `write_planning_state()` functions.
+NEVER write planning JSON manually to S3. The canonical schema is:
+`{role, agent, generation, timestamp, myWork, n1Priority, n2Priority, blockers}`
+
+Agents that bypass these functions and write custom JSON break data consistency.
+
 **Why 3-step planning matters** (Generation 3 requirement):
 - Enables coordination across time (not just reaction to immediate tasks)
 - Agents can read predecessor's N+2 plan and pick up that work
