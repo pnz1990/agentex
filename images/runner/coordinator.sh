@@ -488,10 +488,18 @@ if [ -z "$INITIAL_QUEUE" ]; then
     refresh_task_queue
 fi
 
+# Create health check files for Kubernetes probes (issue #619)
+touch /tmp/coordinator-alive
+touch /tmp/coordinator-ready
+echo "[$(date -u +%H:%M:%S)] Health check files initialized"
+
 iteration=0
 while true; do
     iteration=$((iteration + 1))
 
+    # Update liveness probe file (issue #619)
+    touch /tmp/coordinator-alive
+    
     heartbeat
 
     # Every 5 iterations (~2.5 min): refresh task queue from GitHub
