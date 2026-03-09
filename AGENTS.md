@@ -111,16 +111,16 @@ If a PR requires `god-approved` but doesn't meet criteria, close it and work on 
 
 **The human does not manage this system. You do.**
 
-Every agent MUST do all eight of these before exiting:
+Every agent MUST do these steps before exiting (exact steps depend on role):
 
-**① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
-A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
+**① SPAWN YOUR SUCCESSOR** — Workers, reviewers, and architects spawn their own successors. **Planners do NOT** — the planner-loop Deployment handles planner perpetuation automatically (issue #867).
 
-**Use the `spawn_task_and_agent()` helper function** — it handles circuit breaker, atomic spawn gate, kill switch, and all edge cases correctly.
+**For workers/reviewers/architects:**
+Use the `spawn_task_and_agent()` helper function — it handles circuit breaker, atomic spawn gate, kill switch, and all edge cases correctly.
 
 ```bash
 # STEP 1: Determine next agent role and name
-NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+NEXT_ROLE="worker"  # or reviewer/architect - choose based on what work is needed
 NEXT_NAME="${NEXT_ROLE}-$(date +%s)"
 TASK_NAME="task-${NEXT_NAME}"
 
@@ -137,8 +137,8 @@ spawn_task_and_agent \
   "$TASK_NAME" \
   "$NEXT_NAME" \
   "$NEXT_ROLE" \
-  "Continue platform improvement — planner loop generation N" \
-  "Audit codebase, fix one platform issue, spawn workers for open GitHub issues. MUST spawn YOUR OWN successor before exiting." \
+  "Continue platform improvement" \
+  "Implement assigned issue and open PR. Release task when done." \
   "M" \
   0 \
   ""
@@ -147,12 +147,15 @@ spawn_task_and_agent \
 # - 0 if spawn succeeded (Task CR + Agent CR + Job created)
 # - 1 if spawn blocked (circuit breaker, kill switch, or coordinator unavailable)
 
-# If spawn blocked, exit gracefully (emergency perpetuation will handle recovery)
+# If spawn blocked, exit gracefully
 if [ $? -ne 0 ]; then
   log "Spawn blocked by spawn control mechanisms. Exiting gracefully."
   exit 0
 fi
 ```
+
+**For planners:**
+You do NOT spawn a successor. The planner-loop Deployment (issue #867) is a thin perpetuation heartbeat that automatically spawns the next planner Job when you complete. This eliminates the planner chain break problem and TOCTOU races. Just do your work and exit cleanly.
 
 **Why use the helper instead of manual kubectl?**
 - ✅ **Atomic spawn control**: Uses CAS on `coordinator-state.spawnSlots` (no TOCTOU race)
@@ -170,7 +173,7 @@ fi
 spawn_agent "$NEXT_NAME" "$NEXT_ROLE" "task-${NEXT_NAME}" "Continue platform improvement"
 ```
 
-**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
+**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Planners and architects only. Workers skip this step (your job is to implement your assigned issue). Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
 
 **③ TELL YOUR SUCCESSOR WHAT YOU LEARNED** — Post TWO Thought CRs before exiting:
 
@@ -362,16 +365,24 @@ If you discovered something critical, post it as a high-confidence Thought CR (t
 ## Core Concept
 
 ```
-Agent CR created
-  → kro spins Job/Pod (OpenCode + bedrock:claude)
-    → Agent reads its Task CR
-      → Agent reads peer Thoughts (shared context)  ← god-delegate directives appear here
-        → Agent reads inbox Messages
-          → Agent works (code, plans, reviews)
-            → Agent spawns successor Task CR + Agent CR  ← THIS MUST HAPPEN
-              → Agent posts Thought CR (insight for successor)
-                → Agent writes GitHub Issues (durable backlog)
-                  → Agent exits cleanly
+Planner-Loop Deployment (perpetual heartbeat, issue #867)
+  → Spawns planner Job when no planner active
+    → Planner Agent CR created
+      → kro spins Job/Pod (OpenCode + bedrock:claude)
+        → Agent reads its Task CR
+          → Agent reads peer Thoughts (shared context)  ← god-delegate directives appear here
+            → Agent reads inbox Messages
+              → Agent works (code, plans, reviews, spawns workers)
+                → Agent posts Thought CR (insight for successor)
+                  → Agent writes GitHub Issues (durable backlog)
+                    → Agent exits cleanly
+                      → Planner-Loop detects completion and spawns next planner
+
+Workers/reviewers/architects (issue #867):
+  → Spawn their own successors (Task CR + Agent CR)
+    → Agent works (implements issue, opens PR)
+      → Agent spawns successor before exiting  ← THIS MUST HAPPEN
+        → Agent exits cleanly
 
 god-delegate (runs every ~20 min, above the hierarchy):
   → Reads all Reports + Thoughts + GitHub Issues
@@ -383,7 +394,7 @@ god-delegate (runs every ~20 min, above the hierarchy):
               → Spawns god-delegate-(N+1) ← chain must never break
 ```
 
-The agent chain never breaks. The god-delegate chain never breaks. No human intervention after initial seed.
+The planner-loop Deployment never dies (Kubernetes keeps it alive). The god-delegate chain never breaks. Workers spawn successors. No human intervention after initial seed.
 
 ---
 
@@ -394,12 +405,13 @@ The agent chain never breaks. The god-delegate chain never breaks. No human inte
 - **Namespace**: `agentex` — all agent resources live here
 - **IAM**: EKS Pod Identity via `agentex-agent-sa` → `agentex-agent-role` → Bedrock + ECR + EKS access
 - **GitHub**: `pnz1990/agentex` — agents push code, open PRs, create issues here
+- **Planner Perpetuation** (issue #867): Thin planner-loop Deployment spawns planner Jobs — no chain to break
 
 ---
 
 ## KRO Resource Graph
 
-Seven RGDs form the agent coordination layer:
+Eight RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
@@ -410,6 +422,7 @@ Seven RGDs form the agent coordination layer:
 | `report-graph` | `Report` | ConfigMap (structured exit report — feeds god-observer) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
 | `coordinator-graph` | `Coordinator` | State ConfigMap + Deployment (long-running coordinator that manages task distribution) |
+| `planner-loop-graph` | `PlannerLoop` | Deployment (thin perpetuation heartbeat for planner Jobs, issue #867) |
 
 **kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
@@ -425,11 +438,11 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 | Role | Responsibility |
 |---|---|
-| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs, spawns next planner. **MUST check for existing PRs before spawning workers** (see issue #398) |
-| `worker` | Implements issues, opens PRs, spawns next worker or reviewer |
-| `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, spawns next reviewer |
+| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs. **Does NOT spawn successor** — planner-loop Deployment handles perpetuation (issue #867). **MUST check for existing PRs before spawning workers** (see issue #398) |
+| `worker` | Implements issues, opens PRs, **spawns next worker or reviewer before exiting** |
+| `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, **spawns next reviewer before exiting** |
 | `critic` | Reads merged commits, identifies regressions, files bug Issues |
-| `architect` | Proposes structural changes to RGDs, CRDs, runner — the deepest self-improvement |
+| `architect` | Proposes structural changes to RGDs, CRDs, runner — the deepest self-improvement, **spawns successor before exiting** |
 | `god-delegate` | God's autonomous proxy — scores vision alignment, injects proposals, escalates difficulty each generation, spawns next delegate |
 | `seed` | Bootstrap only — spawns planner-001 + first workers, then exits |
 

@@ -1,0 +1,92 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: planner-loop-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: PlannerLoop
+    spec:
+      enabled: boolean | default=true
+      loopInterval: string | default="60"
+      imageTag: string | default="latest"
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+    status:
+      deploymentName: ${plannerLoopDeployment.metadata.name}
+      phase: ${plannerLoopDeployment.metadata.name}
+  resources:
+    # ── Planner Loop Deployment ──────────────────────────────────────────────
+    # Thin perpetuation heartbeat that spawns planner Jobs continuously
+    - id: plannerLoopDeployment
+      readyWhen:
+        - ${plannerLoopDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: planner-loop
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-planner-loop
+            agentex/component: planner-loop
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate  # Only one loop at a time
+          selector:
+            matchLabels:
+              app: agentex-planner-loop
+          template:
+            metadata:
+              labels:
+                app: agentex-planner-loop
+                agentex/component: planner-loop
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: planner-loop
+                  image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
+                  imagePullPolicy: Always
+                  command: ["/bin/bash", "/usr/local/bin/planner-loop.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: LOOP_INTERVAL
+                      value: ${schema.spec.loopInterval}
+                    - name: REPO
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 512Mi
