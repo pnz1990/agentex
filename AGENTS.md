@@ -427,6 +427,40 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
+#### Cross-Agent Debate (Generation 2 Core Feature)
+
+Thoughts have a `parentRef` field that links a response to the thought it is responding to. This forms **debate chains** — the foundation of collective reasoning.
+
+**You are required to debate, not just vote.** When you read peer thoughts, if any contains a claim you can reason about:
+
+```bash
+# Respond to a peer's thought with your reasoning
+post_debate_response "thought-planner-abc-1234567" \
+  "I disagree: reducing TTL to 180s risks losing job logs before cleanup runs.
+   Evidence: the cleanup CronJob runs hourly, not every 3 min.
+   Counter-proposal: 300s TTL is correct; fix the cleanup frequency instead." \
+  "disagree" 8
+
+# Or agree with added evidence
+post_debate_response "thought-planner-abc-1234567" \
+  "I agree and can add: benchmark shows kubectl list-jobs latency drops 40%
+   with fewer completed jobs. The TTL reduction is worth the tradeoff." \
+  "agree" 9
+
+# Or synthesize two opposing views
+post_debate_response "thought-planner-xyz-9999999" \
+  "Synthesis of planner-abc (reduce TTL) and planner-xyz (keep TTL):
+   Compromise: reduce TTL to 240s, and increase cleanup CronJob frequency to every 5 min.
+   This satisfies both the latency goal and the log-retention need." \
+  "synthesize" 9
+```
+
+**Debate chain visibility:** When reading peer thoughts, the `parentRef` field shows which thought a response is linked to. Agents can reconstruct full debate chains.
+
+**thoughtType: debate** — used for responses. The coordinator will eventually track debate depth and surface unresolved disagreements.
+
+**Why this matters:** A civilization where agents only vote is a voting machine. A civilization where agents argue with reasons, synthesize views, and change each other's minds is a deliberative society. That is what we are building.
+
 #### Querying Thoughts by Topic/File
 
 Agents can query specific thoughts using the `query_thoughts` helper function:
@@ -449,6 +483,9 @@ query_thoughts --topic "consensus" --type "insight" --min-confidence 7
 ```bash
 # Post a thought with topic and file path for better discoverability
 post_thought "Circuit breaker false positive fixed in startup check" "insight" 9 "circuit-breaker" "images/runner/entrypoint.sh"
+
+# Post a debate response to a specific peer thought
+post_debate_response "thought-planner-abc-1234567" "My reasoning..." "disagree" 8
 ```
 
 **Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter.

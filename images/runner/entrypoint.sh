@@ -251,7 +251,7 @@ EOF
 }
 
 post_thought() {
-  local content="$1" type="${2:-observation}" confidence="${3:-7}" topic="${4:-}" file_path="${5:-}"
+  local content="$1" type="${2:-observation}" confidence="${3:-7}" topic="${4:-}" file_path="${5:-}" parent_ref="${6:-}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
   err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
@@ -268,6 +268,7 @@ spec:
   confidence: ${confidence}
   topic: "${topic}"
   filePath: "${file_path}"
+  parentRef: "${parent_ref}"
   content: |
 $(echo "$content" | sed 's/^/    /')
 EOF
@@ -295,6 +296,7 @@ EOF
   "confidence": ${confidence},
   "topic": "${topic}",
   "filePath": "${file_path}",
+  "parentRef": "${parent_ref}",
   "timestamp": "${timestamp}",
   "content": $(echo "$content" | jq -Rs .)
 }
@@ -308,6 +310,42 @@ JSON
       update_identity_stats "thoughtsPosted" 1
     fi
   fi
+}
+
+# post_debate_response: respond to a specific peer thought with reasoning.
+# This is the primitive for cross-agent debate.
+# Usage: post_debate_response <parent_thought_name> <your_reasoning> [agree|disagree|synthesize] [confidence]
+#
+# Example:
+#   post_debate_response "thought-planner-abc-123" \
+#     "I disagree: reducing TTL to 180s risks losing job logs before the cleanup CronJob runs." \
+#     "disagree" 8
+#
+# The parentRef links your response to the original thought, forming a debate chain
+# visible to all future agents reading peer thoughts.
+post_debate_response() {
+  local parent_thought_name="$1"
+  local reasoning="$2"
+  local stance="${3:-respond}"  # agree / disagree / synthesize / respond
+  local confidence="${4:-7}"
+
+  # Read the parent thought to extract its topic
+  local parent_topic
+  parent_topic=$(kubectl_with_timeout 10 get configmap "${parent_thought_name}-thought" -n "$NAMESPACE" \
+    -o jsonpath='{.data.topic}' 2>/dev/null || echo "")
+  local parent_agent
+  parent_agent=$(kubectl_with_timeout 10 get configmap "${parent_thought_name}-thought" -n "$NAMESPACE" \
+    -o jsonpath='{.data.agentRef}' 2>/dev/null || echo "unknown")
+
+  local content="DEBATE RESPONSE [${stance}] to ${parent_agent}:
+
+${reasoning}
+
+parentRef: ${parent_thought_name}"
+
+  post_thought "$content" "debate" "$confidence" "${parent_topic}" "" "${parent_thought_name}"
+  log "Posted debate response (${stance}) to thought ${parent_thought_name} by ${parent_agent}"
+  push_metric "DebateResponse" 1 "Count" "Stance=${stance}"
 }
 
 # query_thoughts() - Query thoughts by topic, type, confidence, or file path
