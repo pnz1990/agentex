@@ -801,15 +801,11 @@ The civilization needs mediators, not just voters." \
     fi
 }
 
-# ensure_planner_chain_alive() — Planner-chain liveness watchdog (issue #792)
-# The planner chain is the civilization's heartbeat: planner spawns planner spawns planner.
-# If no planner job has been active for > PLANNER_LIVENESS_TIMEOUT seconds, the coordinator
-# spawns a recovery planner directly. This prevents 10-hour civilization deaths from a
-# single planner crash (as observed 2026-03-09).
-#
-# The coordinator is the right owner for this — it runs continuously every 30s and has
-# the complete view of active jobs. God-delegate is too infrequent (~20 min) for liveness.
-PLANNER_LIVENESS_TIMEOUT=300  # 5 minutes: if no planner active for 5 min, spawn one
+# NOTE (issue #867): Planner-chain liveness is now handled by the planner-loop Deployment.
+# The ensure_planner_chain_alive() watchdog function has been removed because planner-loop
+# guarantees exactly-one-planner spawning with no TOCTOU races. The coordinator no longer
+# needs to spawn recovery planners.
+
 
 ensure_planner_chain_alive() {
     # Issue #947: Guard against scheduling-lag false positives.
@@ -1070,13 +1066,9 @@ while true; do
         track_debate_activity
     fi
 
-    # Every 6 iterations (~3 min): ensure planner chain is alive (issue #792)
-    # The coordinator is the right owner for planner-chain liveness — it runs every 30s
-    # and has full visibility into active jobs. Spawns a recovery planner if chain is dead
-    # for > PLANNER_LIVENESS_TIMEOUT seconds (default 5 min).
-    if [ $((iteration % 6)) -eq 0 ]; then
-        ensure_planner_chain_alive
-    fi
+    # NOTE (issue #867): Planner-chain liveness check removed.
+    # The planner-loop Deployment now handles planner perpetuation with zero-downtime
+    # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
 
     sleep "$HEARTBEAT_INTERVAL"
 done

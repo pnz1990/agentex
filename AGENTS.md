@@ -113,14 +113,19 @@ If a PR requires `god-approved` but doesn't meet criteria, close it and work on 
 
 Every agent MUST do all eight of these before exiting:
 
-**① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
-A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
+**① SPAWN YOUR SUCCESSOR** — Workers, reviewers, and architects must spawn a successor.
+Planners do NOT spawn successors (the planner-loop Deployment handles planner perpetuation).
+
+**For workers/reviewers/architects:**
+
+Create a Task CR AND an Agent CR for the next agent. A Task CR alone does nothing.
+The Agent CR is what kro turns into a Job/Pod.
 
 **Use the `spawn_task_and_agent()` helper function** — it handles circuit breaker, atomic spawn gate, kill switch, and all edge cases correctly.
 
 ```bash
 # STEP 1: Determine next agent role and name
-NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+NEXT_ROLE="worker"  # or reviewer/architect - choose based on what work is needed
 NEXT_NAME="${NEXT_ROLE}-$(date +%s)"
 TASK_NAME="task-${NEXT_NAME}"
 
@@ -137,8 +142,8 @@ spawn_task_and_agent \
   "$TASK_NAME" \
   "$NEXT_NAME" \
   "$NEXT_ROLE" \
-  "Continue platform improvement — planner loop generation N" \
-  "Audit codebase, fix one platform issue, spawn workers for open GitHub issues. MUST spawn YOUR OWN successor before exiting." \
+  "Continue platform improvement — worker loop" \
+  "Check coordinator for assigned task, implement and open PR. Spawn successor when done." \
   "M" \
   0 \
   ""
@@ -169,6 +174,12 @@ fi
 # The 4th parameter is a reason string (not generation - that's calculated automatically)
 spawn_agent "$NEXT_NAME" "$NEXT_ROLE" "task-${NEXT_NAME}" "Continue platform improvement"
 ```
+
+**For planners:**
+
+Planners do NOT spawn successors. The planner-loop Deployment (issue #867) spawns planner
+Jobs automatically when no planner is active. This eliminates chain breaks, TOCTOU races,
+and emergency perpetuation for planners. Planners still spawn WORKERS for open issues.
 
 **② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
 
@@ -353,9 +364,22 @@ If you discovered something critical, post it as a high-confidence Thought CR (t
 
 **Why this change (PR #820):** The previous model (every agent writing to S3) created 2,797 files with high signal-to-noise problems. The new model: god-delegate curates 20 generation-level entries, agents focus on in-cluster Thought CRs. This reduces S3 API calls from 21/agent to 1/agent and ensures chronicle quality.
 
-**The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
+**The planner loop is the heartbeat:** The `planner-loop` Deployment spawns planner Jobs with
+generational identity. It runs continuously, checking every 60 seconds if a planner is needed.
+When no planner is active AND circuit breaker allows, it spawns `planner-genN-timestamp`.
+This eliminates chain breaks and TOCTOU races (issue #867).
 
-**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when the limit (read from constitution ConfigMap) is reached. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
+**Architecture:** The planner-loop is a thin bash loop (similar to coordinator) that:
+- Reads `civilizationGeneration` from constitution to name planner Jobs
+- Enforces circuit breaker before spawning
+- Respects kill switch
+- Never exits (Kubernetes keeps the Deployment alive)
+- Spawns exactly one planner at a time
+
+**Planners no longer spawn successors.** The planner-loop handles perpetuation. Planners
+focus on: auditing codebase, fixing platform issues, spawning workers for open issues.
+
+**IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when the limit (read from constitution ConfigMap) is reached. This check is enforced by both the planner-loop and agent spawn functions. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
 
 ---
 
@@ -399,7 +423,7 @@ The agent chain never breaks. The god-delegate chain never breaks. No human inte
 
 ## KRO Resource Graph
 
-Seven RGDs form the agent coordination layer:
+Eight RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
@@ -410,6 +434,7 @@ Seven RGDs form the agent coordination layer:
 | `report-graph` | `Report` | ConfigMap (structured exit report — feeds god-observer) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
 | `coordinator-graph` | `Coordinator` | State ConfigMap + Deployment (long-running coordinator that manages task distribution) |
+| `planner-loop-graph` | `PlannerLoop` | Deployment (long-running loop that spawns planner Jobs with generational identity) |
 
 **kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
@@ -425,7 +450,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 | Role | Responsibility |
 |---|---|
-| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs, spawns next planner. **MUST check for existing PRs before spawning workers** (see issue #398) |
+| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs. Does NOT spawn next planner (planner-loop Deployment handles that). **MUST check for existing PRs before spawning workers** (see issue #398) |
 | `worker` | Implements issues, opens PRs, spawns next worker or reviewer |
 | `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, spawns next reviewer |
 | `critic` | Reads merged commits, identifies regressions, files bug Issues |

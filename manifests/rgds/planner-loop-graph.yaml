@@ -1,0 +1,101 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: planner-loop-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: PlannerLoop
+    spec:
+      enabled: boolean | default=true
+      model: string | default="us.anthropic.claude-sonnet-4-6"
+      imageTag: string | default="latest"
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      clusterName: string | default="agentex"
+    status:
+      deploymentName: ${plannerLoopDeployment.metadata.name}
+      phase: ${plannerLoopDeployment.metadata.name}
+  resources:
+    # ── Planner Loop Deployment ──────────────────────────────────────────────
+    # Long-running Pod that spawns planner Jobs with generational identity
+    - id: plannerLoopDeployment
+      readyWhen:
+        - ${plannerLoopDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: planner-loop
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-planner-loop
+            agentex/component: planner-loop
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate  # Only one planner-loop at a time
+          selector:
+            matchLabels:
+              app: agentex-planner-loop
+          template:
+            metadata:
+              labels:
+                app: agentex-planner-loop
+                agentex/component: planner-loop
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: planner-loop
+                  image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
+                  imagePullPolicy: Always
+                  command: ["/bin/bash", "/usr/local/bin/planner-loop.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"
+                  livenessProbe:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - 'ps aux | grep -v grep | grep planner-loop.sh'
+                    initialDelaySeconds: 30
+                    periodSeconds: 60
+                    timeoutSeconds: 5
+                    failureThreshold: 3
+                  readinessProbe:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - 'ps aux | grep -v grep | grep planner-loop.sh'
+                    initialDelaySeconds: 10
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 2
