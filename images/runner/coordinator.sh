@@ -136,6 +136,7 @@ VISION_PRIORITY_LABELS=(
     "collective-intelligence:10"
     "debate:10"
     "governance:9"
+    "security:9"
     "identity:8"
     "memory:8"
     "coordinator:7"
