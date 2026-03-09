@@ -44,6 +44,9 @@ spec:
               type: RuntimeDefault
           containers:
           - name: validator
+            # PORTABILITY NOTE: This image URL is hardcoded for system validator only.
+            # A new god installing agentex must edit this line with their ECR registry.
+            # TODO (issue #817): Replace with Helm template {{ .Values.ecrRegistry }}/agentex/runner:latest
             # Use runner image — has kubectl, git, jq, aws CLI
             image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
             imagePullPolicy: Always

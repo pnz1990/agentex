@@ -21,6 +21,17 @@ kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data}' | py
 - `vision` — what this civilization exists to become. Read it before every task.
 - `civilizationGeneration` — the current generation. Check if you're doing generation-appropriate work.
 
+**Portability constants (issue #819):**
+- `githubRepo` — where agents file issues/PRs (e.g., `myorg/myrepo`)
+- `ecrRegistry` — container registry URL (e.g., `123456.dkr.ecr.eu-west-1.amazonaws.com`)
+- `awsRegion` — AWS region for Bedrock, S3, EKS (e.g., `eu-west-1`)
+- `clusterName` — EKS cluster name (e.g., `my-cluster`)
+- `s3Bucket` — S3 bucket for agent memory (e.g., `my-thoughts`)
+
+All agent code reads these values at runtime. A new god can install agentex in
+their own AWS account/region/repo by running `manifests/system/install-configure.sh`
+before applying manifests.
+
 **Protected files** (require `god-approved` label on any PR that touches them):
 - `images/runner/entrypoint.sh`
 - `AGENTS.md`
@@ -929,12 +940,30 @@ watch 'kubectl get jobs -n agentex | grep Running | wc -l'
 
 ## Infrastructure
 
+**PORTABILITY (issue #819):** These values are now parameterized for new gods.
+All runtime values are read from the `agentex-constitution` ConfigMap.
+
+**Original installation (pnz1990/agentex):**
 - Cluster: `agentex` in `us-west-2`, account `569190534191`
 - ECR: `569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner`
 - GitHub: `pnz1990/agentex`
+- S3 bucket: `agentex-thoughts`
 - Namespace: `agentex`
 - Pod Identity role: `agentex-agent-role` → Bedrock + ECR read/write + EKS describe
 - kro: installed via Helm (`manifests/system/kro-install.sh`), v0.8.5
+
+**For new gods installing agentex:**
+1. Run `manifests/system/install-configure.sh` to parameterize values for your environment
+2. Create your S3 bucket and ECR repository
+3. Push the runner image to your ECR
+4. Apply manifests: `kubectl apply -f manifests/system/ && kubectl apply -f manifests/bootstrap/`
+
+All agent runtime code reads from `agentex-constitution` ConfigMap:
+- `githubRepo`: Where agents file issues and PRs
+- `ecrRegistry`: Container image registry URL
+- `awsRegion`: AWS region for Bedrock and S3
+- `clusterName`: EKS cluster name for kubectl config
+- `s3Bucket`: S3 bucket for agent memory and chronicle
 
 ---
 

@@ -11,9 +11,11 @@ AGENT_ROLE="${AGENT_ROLE:-worker}"
 TASK_CR_NAME="${TASK_CR_NAME:-}"
 SWARM_REF="${SWARM_REF:-}"
 NAMESPACE="${NAMESPACE:-agentex}"
-REPO="${REPO:-pnz1990/agentex}"
-CLUSTER="${CLUSTER:-agentex}"
-BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"
+# DEPRECATED: REPO, CLUSTER, BEDROCK_REGION env vars — read from constitution instead (issue #819)
+# Keep as fallbacks for backward compatibility during migration
+REPO="${REPO:-}"  # Will be overridden by constitution.githubRepo
+CLUSTER="${CLUSTER:-}"  # Will be overridden by constitution.clusterName
+BEDROCK_REGION="${BEDROCK_REGION:-}"  # Will be overridden by constitution.awsRegion
 BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
@@ -63,6 +65,27 @@ GITHUB_REPO_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-co
 # Override REPO if constitution has githubRepo set (allows REPO env var for backward compat)
 if [ -n "$GITHUB_REPO_FROM_CONSTITUTION" ]; then
   REPO="$GITHUB_REPO_FROM_CONSTITUTION"
+elif [ -z "$REPO" ]; then
+  # Final fallback only if both constitution and env var are empty
+  REPO="pnz1990/agentex"
+fi
+
+# Read AWS region from constitution for portability (issue #819)
+AWS_REGION_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "")
+if [ -n "$AWS_REGION_FROM_CONSTITUTION" ]; then
+  BEDROCK_REGION="$AWS_REGION_FROM_CONSTITUTION"
+elif [ -z "$BEDROCK_REGION" ]; then
+  BEDROCK_REGION="us-west-2"  # Final fallback
+fi
+
+# Read cluster name from constitution for portability (issue #819)
+CLUSTER_NAME_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "")
+if [ -n "$CLUSTER_NAME_FROM_CONSTITUTION" ]; then
+  CLUSTER="$CLUSTER_NAME_FROM_CONSTITUTION"
+elif [ -z "$CLUSTER" ]; then
+  CLUSTER="agentex"  # Final fallback
 fi
 
 # ── Portability verification warnings (issue #899) ────────────────────────────
