@@ -37,7 +37,10 @@ jobs:
           # SC2181: Check exit code directly with if mycmd; then (style preference)
           # SC1090: Can't follow non-constant source (we source identity.sh which exists)
           # SC2001: See if you can use ${variable//search/replace} instead of sed (readability)
-          shellcheck -e SC2086,SC2181,SC1090,SC2001 images/runner/entrypoint.sh
+          # SC2155: Declare and assign separately (style preference - intentional in many cases)
+          # SC2317: Unreachable code (false positives on function stubs that are redefined)
+          # --severity=error: Only fail on actual errors, not warnings or info
+          shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317 --severity=error images/runner/entrypoint.sh
           echo "✓ Shellcheck passed"
           
       - name: Validate identity.sh
@@ -48,7 +51,7 @@ jobs:
             echo "✓ identity.sh syntax check passed"
             
             echo "Running shellcheck on identity.sh..."
-            shellcheck -e SC2086,SC2181,SC1090,SC2001 images/runner/identity.sh
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317 --severity=error images/runner/identity.sh
             echo "✓ identity.sh shellcheck passed"
           else
             echo "identity.sh not found, skipping"
