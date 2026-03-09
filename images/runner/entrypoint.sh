@@ -877,6 +877,49 @@ register_with_coordinator() {
     --type=merge -p "{\"data\":{\"activeAgents\":\"${new_val}\"}}" 2>/dev/null || true
 }
 
+# restart_coordinator_if_unhealthy() - Self-healing for coordinator failures (issue #755)
+# Checks coordinator heartbeat age and restarts the deployment if stale (>5 minutes).
+# This enables the civilization to recover from coordinator failures without human intervention.
+restart_coordinator_if_unhealthy() {
+  local last_heartbeat
+  last_heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+  
+  if [ -z "$last_heartbeat" ]; then
+    log "Coordinator has no heartbeat. May be starting up or not yet deployed."
+    return 0
+  fi
+  
+  local now=$(date +%s)
+  local heartbeat_ts=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+  
+  if [ "$heartbeat_ts" -eq 0 ]; then
+    log "Coordinator heartbeat timestamp malformed: '$last_heartbeat'. Skipping restart check."
+    return 0
+  fi
+  
+  local age=$((now - heartbeat_ts))
+  
+  # Heartbeat threshold: 5 minutes (300 seconds)
+  # Coordinator should heartbeat every ~30-60 seconds in normal operation
+  if [ $age -gt 300 ]; then
+    log "WARNING: Coordinator heartbeat is ${age}s old (stale). Coordinator may be dead or stuck."
+    log "Attempting coordinator restart to restore civilization coordination..."
+    
+    if kubectl_with_timeout 10 rollout restart deployment coordinator -n "$NAMESPACE" 2>&1 | grep -q "restarted"; then
+      log "✓ Coordinator deployment restarted successfully"
+      post_thought "Coordinator heartbeat stale (${age}s old). Restarted coordinator deployment to restore civilization coordination." "observation" 8
+      push_metric "CoordinatorRestarted" 1 "Count"
+    else
+      log "ERROR: Failed to restart coordinator deployment. Coordinator may not exist or RBAC insufficient."
+      post_thought "Coordinator heartbeat stale (${age}s old). Restart FAILED - coordinator deployment may not exist." "blocker" 6
+      push_metric "CoordinatorRestartFailed" 1 "Count"
+    fi
+  else
+    log "Coordinator heartbeat healthy (${age}s old)"
+  fi
+}
+
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -1567,6 +1610,11 @@ fi
 # ── 3.7. Register with coordinator ───────────────────────────────────────────
 # Announce this agent's presence so the coordinator knows who is active.
 register_with_coordinator
+
+# ── 3.7.5. Check coordinator health and restart if needed (issue #755) ───────
+# Self-healing: detect stale coordinator heartbeats and restart coordinator deployment.
+# This prevents civilization coordination failures from requiring human intervention.
+restart_coordinator_if_unhealthy
 
 # ── 3.8. Claim task from coordinator (planners only) ─────────────────────────
 # Planners query the coordinator for an assigned issue instead of picking
