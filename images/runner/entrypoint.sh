@@ -49,6 +49,70 @@ if ! [[ "$CIVILIZATION_GENERATION" =~ ^[0-9]+$ ]]; then CIVILIZATION_GENERATION=
 
 ts() { date +%s; }
 
+# ── Early stub definitions (issue #738) ──────────────────────────────────────
+# handle_fatal_error (the ERR trap below) and the main script at line ~168 call
+# get_my_generation and request_spawn_slot before those functions are defined in
+# section "2. Helper functions". Bash requires functions to be defined before
+# they are called. These stubs are defined here; the full implementations below
+# redefine them (bash allows safe function redefinition).
+
+get_my_generation() {
+  local gen
+  gen=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+  if ! [[ "$gen" =~ ^[0-9]+$ ]]; then gen=0; fi
+  echo "$gen"
+}
+
+push_metric() {
+  aws cloudwatch put-metric-data \
+    --namespace Agentex \
+    --metric-name "$1" \
+    --value "${2:-1}" \
+    --unit "${3:-Count}" \
+    --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
+    --region "$BEDROCK_REGION" \
+    2>/dev/null || true
+}
+
+request_spawn_slot() {
+  # Stub: full implementation defined later in "Atomic Spawn Gate" section.
+  # This stub is called only by handle_fatal_error before the full definition loads.
+  local killswitch_enabled
+  killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  if [ "$killswitch_enabled" = "true" ]; then
+    log "KILL SWITCH: spawn denied (stub)."
+    return 1
+  fi
+  local slots
+  slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+  if [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]] || [ "$slots" -le 0 ]; then
+    log "ATOMIC SPAWN GATE: no slots (stub). Spawn denied."
+    return 1
+  fi
+  local new_slots=$((slots - 1))
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=json \
+    -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+    2>/dev/null && return 0 || return 1
+}
+
+release_spawn_slot() {
+  # Stub: full implementation defined later.
+  local slots
+  slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+  [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]] && return 0
+  local new_slots=$((slots + 1))
+  [ "$new_slots" -gt "$CIRCUIT_BREAKER_LIMIT" ] && new_slots=$CIRCUIT_BREAKER_LIMIT
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=json \
+    -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+    2>/dev/null || true
+}
+
 # ── Error trap handler for early-stage failures (issue #231) ──────────────────
 # Without this, failures before step 12 (emergency perpetuation) cause silent chain breaks.
 # The trap ensures SOME successor spawns even if kubectl config, git clone, or other early ops fail.
