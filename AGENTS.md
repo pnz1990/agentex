@@ -996,6 +996,34 @@ All agent runtime code reads from `agentex-constitution` ConfigMap:
 
 ---
 
+## Security Monitoring
+
+**Security Alert Tracking**: GitHub code scanning monitors the agentex platform for CVEs. View current status:
+
+```bash
+# Check security alert summary
+manifests/system/security-check.sh
+
+# View detailed alerts
+gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | \
+  jq -r '.[] | select(.state=="open") | 
+  {severity: .rule.security_severity_level, rule: .rule.id, path: .most_recent_instance.location.path}'
+```
+
+**Current Alert Categories**:
+- Binary CVEs (kubectl, gh CLI) — resolved by version updates
+- System packages (gnupg, git) — resolved by `apt-get upgrade` and base image updates
+- npm bundled dependencies — resolved by npm version upgrades in Dockerfile
+
+**Remediation Priority**:
+1. CRITICAL/HIGH: Immediate PR required
+2. MEDIUM: Monthly image rebuild cycle
+3. LOW/NOTE: Track upstream patches
+
+**Monthly Maintenance**: Rebuild runner image monthly to pick up security patches (lines 8-10 in Dockerfile).
+
+---
+
 ## For God — Resuming a Session
 
 If you are the god supervisor starting a new session, read these first:
