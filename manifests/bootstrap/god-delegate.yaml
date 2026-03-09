@@ -49,10 +49,10 @@ spec:
         "[\(.spec.thoughtType)] \(.spec.agentRef): \(.spec.content | split("\n")[0:3] | join(" | "))"'
 
     Read all open GitHub Issues:
-      gh issue list --repo pnz1990/agentex --state open --limit 50
+      gh issue list --repo ${REPO} --state open --limit 50
 
     Read recent merged PRs (last 10):
-      gh pr list --repo pnz1990/agentex --state merged --limit 10
+      gh pr list --repo ${REPO} --state merged --limit 10
 
     Count active agents:
       kubectl get agents.kro.run -n agentex --no-headers | wc -l
@@ -164,7 +164,7 @@ spec:
           You are assigned by god-delegate to implement issue #${ISSUE_NUM}.
           This issue has been open for multiple planner generations with no progress.
           
-          Read the issue: gh issue view ${ISSUE_NUM} --repo pnz1990/agentex
+          Read the issue: gh issue view ${ISSUE_NUM} --repo ${REPO}
           Implement the fix. Open a PR. Post your Report CR.
           Spawn your successor. Follow the Prime Directive.
         role: worker
@@ -226,27 +226,27 @@ spec:
     This keeps all civilization status in one thread for the human supervisor.
 
       # Find the latest [GOD-REPORT] issue number
-      GOD_REPORT_ISSUE=$(gh issue list --repo pnz1990/agentex \
+      GOD_REPORT_ISSUE=$(gh issue list --repo ${REPO} \
         --search "[GOD-REPORT]" --state open --limit 1 --json number \
         --jq '.[0].number' 2>/dev/null)
 
       # If no open GOD-REPORT exists, find the most recent closed one
       if [ -z "$GOD_REPORT_ISSUE" ] || [ "$GOD_REPORT_ISSUE" = "null" ]; then
-        GOD_REPORT_ISSUE=$(gh issue list --repo pnz1990/agentex \
+        GOD_REPORT_ISSUE=$(gh issue list --repo ${REPO} \
           --search "[GOD-REPORT]" --state closed --limit 1 --json number \
           --jq '.[0].number' 2>/dev/null)
       fi
 
       # If still none, create one
       if [ -z "$GOD_REPORT_ISSUE" ] || [ "$GOD_REPORT_ISSUE" = "null" ]; then
-        GOD_REPORT_ISSUE=$(gh issue create --repo pnz1990/agentex \
+        GOD_REPORT_ISSUE=$(gh issue create --repo ${REPO} \
           --title "[GOD-REPORT] Civilization Status — $(date -u '+%Y-%m-%d')" \
           --body "Initial god-report created by god-delegate-${MY_GEN}" \
           --json number --jq '.number')
       fi
 
       NEXT_GEN=$((MY_GEN + 1))
-      gh issue comment ${GOD_REPORT_ISSUE} --repo pnz1990/agentex \
+      gh issue comment ${GOD_REPORT_ISSUE} --repo ${REPO} \
         --body "$(cat <<BODY
     ## God Delegate ${MY_GEN} Assessment — $(date -u '+%Y-%m-%d %H:%M UTC')
 
@@ -285,14 +285,14 @@ spec:
       CHRONICLE_ENTRY_PERIOD="god-delegate-$(printf "%03d" ${MY_GEN}) ($(date -u '+%Y-%m-%d'))"
 
       # Download current chronicle (or start fresh)
-      CURRENT_CHRONICLE=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null || echo '{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}')
+      CURRENT_CHRONICLE=$(aws s3 cp s3://${S3_BUCKET}/chronicle.json - 2>/dev/null || echo '{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}')
       if [ -z "$CURRENT_CHRONICLE" ]; then
         CURRENT_CHRONICLE='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
       fi
 
       # Count active agents and recent PRs for the summary
       ACTIVE_JOBS=$(kubectl get jobs -n agentex --no-headers 2>/dev/null | grep -v "Complete\|Failed" | wc -l | tr -d ' ')
-      RECENT_PRS=$(gh pr list --repo pnz1990/agentex --state merged --limit 5 --json number --jq 'length' 2>/dev/null || echo "0")
+      RECENT_PRS=$(gh pr list --repo ${REPO} --state merged --limit 5 --json number --jq 'length' 2>/dev/null || echo "0")
 
       # Build and upload updated chronicle (capped at 20 entries)
       NEW_CHRONICLE=$(echo "$CURRENT_CHRONICLE" | jq \
@@ -311,7 +311,7 @@ spec:
         2>/dev/null)
 
       if [ -n "$NEW_CHRONICLE" ]; then
-        echo "$NEW_CHRONICLE" | aws s3 cp - s3://agentex-thoughts/chronicle.json \
+        echo "$NEW_CHRONICLE" | aws s3 cp - s3://${S3_BUCKET}/chronicle.json \
           --content-type application/json 2>/dev/null && \
           echo "Chronicle updated (generation ${MY_GEN}, capped at 20 entries)" || \
           echo "WARNING: Failed to update chronicle"

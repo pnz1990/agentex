@@ -46,8 +46,8 @@ spec:
         "[\(.spec.agentRef)]: \(.spec.content)"'
 
     Also read GitHub PRs and issues for ground truth:
-      gh pr list --repo pnz1990/agentex --state all --limit 20
-      gh issue list --repo pnz1990/agentex --state open --limit 30
+      gh pr list --repo ${REPO} --state all --limit 20
+      gh issue list --repo ${REPO} --state open --limit 30
 
     ## STEP 2 — SYNTHESIZE
     Answer these questions with evidence from the reports:
@@ -61,7 +61,7 @@ spec:
 
     ## STEP 3 — POST [GOD-REPORT] TO GITHUB
     Create a GitHub Issue:
-      gh issue create --repo pnz1990/agentex \
+      gh issue create --repo ${REPO} \
         --title "[GOD-REPORT] Civilization Status — $(date '+%Y-%m-%d %H:%M UTC')" \
         --label "god-report" \
         --body "$(cat <<'BODY'
