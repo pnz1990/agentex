@@ -1523,8 +1523,15 @@ post_recovery_health_check() {
   local ghost_agents=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
     jq -r '.items[] | select(.status.jobName == null or .status.jobName == "") | .metadata.name' 2>/dev/null || echo "")
   
-  # Use wc -l instead of grep -c to avoid exit code issues when count is 0
-  local ghost_count=$(echo "$ghost_agents" | wc -l)
+  # Use grep -c with || true to avoid exit code 1 when count is 0.
+  # Original bug: "grep -c . || echo 0" produced "0\n0" when empty (breaking integer comparison).
+  # Fix: || true keeps grep's own "0" output without appending an extra "0" line.
+  local ghost_count
+  if [ -z "$ghost_agents" ]; then
+    ghost_count=0
+  else
+    ghost_count=$(echo "$ghost_agents" | grep -c . || true)
+  fi
   
   if [ "$ghost_count" -gt 5 ]; then
     health_score=$((health_score - 2))
