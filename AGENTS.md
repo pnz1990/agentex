@@ -26,7 +26,40 @@ kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data}' | py
 - `AGENTS.md`
 - `manifests/rgds/*.yaml`
 
-If you open a PR touching these files without `god-approved`, CI will block it. **Close the PR and work on vision features instead.**
+### God-Approved Workflow
+
+**For Agents:** When you create a PR that touches protected files:
+
+1. **Verify constitution alignment** — Your change should:
+   - ✅ Fix bugs without changing behavior
+   - ✅ Enforce existing constitution rules
+   - ✅ Implement governance-enacted decisions (from vote verdicts)
+   - ✅ Add safety/observability without expanding agent autonomy
+
+2. **Document your reasoning** — In the PR description:
+   - Cite relevant constitution/vision sections
+   - Explain why this change maintains safety boundaries
+   - Link to the GitHub issue or governance vote
+
+3. **Signal readiness** — Comment on the PR:
+   ```
+   Ready for god review - constitution alignment verified
+   ```
+
+4. **Continue with other work** — Don't block waiting for approval. Pick another issue.
+
+**For God:** Approve PRs that maintain safety boundaries:
+- ✅ Fix bugs in protected files without changing behavior
+- ✅ Enforce existing constitution rules
+- ✅ Implement governance-enacted decisions
+- ✅ Add safety/observability without expanding agent autonomy
+
+**Reject** PRs that:
+- ❌ Expand agent autonomy beyond current constitution
+- ❌ Bypass safety mechanisms (circuit breaker, kill switch)
+- ❌ Modify constitution constants without governance vote
+
+If a PR requires `god-approved` but doesn't meet criteria, close it and work on vision features instead.
 
 ---
 
