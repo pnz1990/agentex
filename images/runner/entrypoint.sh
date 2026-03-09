@@ -970,6 +970,111 @@ EOF
   # so we do NOT need to release the slot here — the new agent holds it.
   # The slot is effectively released when the agent Job completes (coordinator reconciliation).
   log "Agent CR $name created successfully (slot consumed by new agent)."
+  
+  # WORKAROUND FOR ISSUE #714: Verify kro actually creates a Job within 10s
+  # If kro's dynamic controller is stuck after restart, the Agent CR exists but no Job is created
+  # Fallback: create the Job directly using the same template as agent-graph RGD
+  log "Verifying kro creates Job for Agent CR $name (10s grace period)..."
+  local job_created=false
+  for i in $(seq 1 10); do
+    local job_name=$(kubectl_with_timeout 5 get agent.kro.run "$name" -n "$NAMESPACE" \
+      -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+    if [ -n "$job_name" ]; then
+      log "kro created Job $job_name for Agent $name ✓"
+      job_created=true
+      break
+    fi
+    sleep 1
+  done
+  
+  if [ "$job_created" = "false" ]; then
+    log "WARNING: kro did not create Job for Agent $name after 10s (issue #714: kro controller stuck)"
+    log "Fallback: Creating Job directly to prevent chain break"
+    
+    # Create Job directly using agent-graph RGD template (lines match manifests/rgds/agent-graph.yaml)
+    local job_name="agent-${name}"
+    local fallback_err
+    fallback_err=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${job_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/agent: ${name}
+    agentex/role: ${role}
+    agentex/generation: "${next_generation}"
+    kro.run/instance: ${name}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        agentex/agent: ${name}
+        agentex/role: ${role}
+    spec:
+      serviceAccountName: agentex-agent-sa
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: agent
+        image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: false
+        env:
+        - name: AGENT_NAME
+          value: "${name}"
+        - name: AGENT_ROLE
+          value: "${role}"
+        - name: TASK_CR_NAME
+          value: "${task_ref}"
+        - name: NAMESPACE
+          value: "${NAMESPACE}"
+        - name: REPO
+          value: "${REPO}"
+        - name: CLUSTER
+          value: "${CLUSTER}"
+        - name: BEDROCK_REGION
+          value: "${BEDROCK_REGION}"
+        - name: BEDROCK_MODEL
+          value: "${BEDROCK_MODEL}"
+        - name: SWARM_REF
+          value: "${SWARM_REF}"
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: agentex-github-token
+              key: token
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+EOF
+) || {
+      log "CRITICAL: Fallback Job creation also failed for $name: $fallback_err"
+      log "CRITICAL: Both kro reconciliation AND direct Job creation failed. Releasing spawn slot."
+      release_spawn_slot
+      return 1
+    }
+    
+    log "Fallback Job $job_name created successfully ✓"
+    log "Filed blocker thought for kro reconciliation failure (requires investigation)"
+    post_thought "kro dynamic controller did not reconcile Agent CR $name after 10s. Created Job directly as fallback. This indicates issue #714 recurrence: kro may have restarted and stopped reconciling. Investigate kro-controller-manager logs and consider restart." "blocker" 9
+  fi
+  
   log "Spawn complete: $name (role=$role task=$task_ref)"
 }
 

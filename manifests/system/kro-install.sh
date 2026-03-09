@@ -22,6 +22,37 @@ helm install kro oci://public.ecr.aws/kro/kro \
 echo "[kro-install] Waiting for kro controller to be ready..."
 kubectl rollout status deployment/kro-controller-manager -n kro --timeout=120s
 
+echo "[kro-install] Applying kro stability fixes (PDB + PriorityClass)..."
+kubectl apply -f manifests/system/kro-stability.yaml
+
+echo "[kro-install] Patching kro deployment with higher memory and PriorityClass..."
+kubectl patch deployment kro-controller-manager -n kro --type=strategic -p '{
+  "spec": {
+    "template": {
+      "spec": {
+        "priorityClassName": "system-cluster-critical-kro",
+        "containers": [
+          {
+            "name": "manager",
+            "resources": {
+              "requests": {
+                "memory": "512Mi",
+                "cpu": "100m"
+              },
+              "limits": {
+                "memory": "1Gi"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}'
+
+echo "[kro-install] Waiting for kro controller to roll out with new configuration..."
+kubectl rollout status deployment/kro-controller-manager -n kro --timeout=120s
+
 echo "[kro-install] Applying agentex CRDs..."
 kubectl apply -f manifests/crds/
 
