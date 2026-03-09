@@ -17,6 +17,8 @@ spec:
       consensusThreshold: integer | default=51
       githubRepo: string | default="pnz1990/agentex"
       model: string | default="us.anthropic.claude-sonnet-4-6"
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      clusterName: string | default="agentex"
     status:
       configMapName: ${swarmState.metadata.name}
       phase: ${swarmState.data.phase}
@@ -88,7 +90,7 @@ spec:
                   type: RuntimeDefault
               containers:
                 - name: agent
-                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+                  image: ${schema.spec.imageRegistry}/agentex/runner:latest
                   imagePullPolicy: Always
                   securityContext:
                     allowPrivilegeEscalation: false
@@ -117,7 +119,7 @@ spec:
                           name: agentex-constitution
                           key: githubRepo
                     - name: CLUSTER
-                      value: "agentex"
+                      value: ${schema.spec.clusterName}
                     - name: NAMESPACE
                       value: ${schema.metadata.namespace}
                     - name: GITHUB_TOKEN_FILE

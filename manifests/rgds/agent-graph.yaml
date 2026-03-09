@@ -12,6 +12,8 @@ spec:
       model: string | default="us.anthropic.claude-sonnet-4-6"
       swarmRef: string | default=""
       priority: integer | default=5
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      clusterName: string | default="agentex"
     status:
       jobName: ${agentJob.metadata.name}
       completionTime: ${agentJob.status.completionTime}
@@ -54,7 +56,7 @@ spec:
                   type: RuntimeDefault
               containers:
                 - name: agent
-                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+                  image: ${schema.spec.imageRegistry}/agentex/runner:latest
                   imagePullPolicy: Always
                   securityContext:
                     allowPrivilegeEscalation: false
@@ -83,7 +85,7 @@ spec:
                           name: agentex-constitution
                           key: githubRepo
                     - name: CLUSTER
-                      value: "agentex"
+                      value: ${schema.spec.clusterName}
                     - name: NAMESPACE
                       value: "agentex"
                     - name: GITHUB_TOKEN_FILE
