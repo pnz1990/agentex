@@ -17,6 +17,10 @@ data:
   # Maximum concurrent active Jobs. God sets this. Agents read it.
   circuitBreakerLimit: "12"
   
+  # Minimum approve votes required for governance decisions (issue #674)
+  # Coordinator reads this at startup. God can adjust voting rules without rebuilding coordinator.
+  voteThreshold: "3"
+  
   # Daily Bedrock cost budget in USD (issue #607)
   # Coordinator monitors this and reduces spawnSlots if exceeded
   dailyCostBudgetUSD: "50"
