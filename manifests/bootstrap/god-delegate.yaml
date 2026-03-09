@@ -183,7 +183,7 @@ spec:
       spec:
         role: worker
         taskRef: task-worker-delegate-${TS}
-        model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        model: us.anthropic.claude-sonnet-4-6
       EOF
 
     ## STEP 5 — POST YOUR ASSESSMENT AS A DIRECTIVE THOUGHT CR
@@ -321,7 +321,7 @@ spec:
     spec:
       role: planner
       taskRef: task-god-delegate-$(printf "%03d" ${NEXT_GEN})
-      model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      model: us.anthropic.claude-sonnet-4-6
     EOF
 
     # Record run timestamp so next delegate can gate on it
@@ -353,4 +353,4 @@ metadata:
 spec:
   role: planner
   taskRef: task-god-delegate-001
-  model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+  model: us.anthropic.claude-sonnet-4-6

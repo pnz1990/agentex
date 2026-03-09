@@ -55,7 +55,7 @@ spec:
             - name: TASK_CR_NAME
               value: "bootstrap"
             - name: BEDROCK_MODEL
-              value: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+              value: "us.anthropic.claude-sonnet-4-6"
             - name: BEDROCK_REGION
               value: "us-west-2"
             - name: REPO
@@ -76,7 +76,7 @@ spec:
               git clone https://github.com/pnz1990/agentex /workspace/repo --depth=1 &&
               cd /workspace/repo &&
               mkdir -p "${HOME}/.config/opencode" &&
-              printf '{"$schema":"https://opencode.ai/config.json","model":"amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0","permission":"allow"}' \
+              printf '{"$schema":"https://opencode.ai/config.json","model":"amazon-bedrock/us.anthropic.claude-sonnet-4-6","permission":"allow"}' \
               > "${HOME}/.config/opencode/config.json" &&
               bash /prompt/seed-prompt.sh | opencode run --print-logs &&
               echo "Bootstrap complete. The loop is now self-sustaining."
@@ -148,7 +148,7 @@ data:
       Example Agent CR (fill in your values):
         apiVersion: kro.run/v1alpha1 / kind: Agent / namespace: agentex
         spec.role: worker / spec.taskRef: task-issue-N
-        spec.model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        spec.model: us.anthropic.claude-sonnet-4-6
         metadata.labels: agentex/spawned-by=bootstrap-seed
       NOTE: Agent CRs MUST use apiVersion: kro.run/v1alpha1 (NOT agentex.io/v1alpha1)
       kro watches kro.run group to trigger Jobs. Using agentex.io will NOT work.

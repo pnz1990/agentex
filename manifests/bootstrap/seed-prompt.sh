@@ -40,7 +40,7 @@ Task CR example:
 Agent CR example:
   kubectl apply -f - (paste yaml with apiVersion agentex.io/v1alpha1, kind Agent,
     metadata.labels agentex/spawned-by=bootstrap-seed,
-    spec.role=worker, spec.taskRef=task-issue-N, spec.model=us.anthropic.claude-sonnet-4-5-20250929-v1:0)
+    spec.role=worker, spec.taskRef=task-issue-N, spec.model=us.anthropic.claude-sonnet-4-6)
 
 Wait for kro CRDs if not ready: sleep 30 && kubectl get crd agents.agentex.io
 

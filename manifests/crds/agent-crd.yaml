@@ -24,7 +24,7 @@ spec:
                   description: Name of the Task CR assigned to this agent
                 model:
                   type: string
-                  default: "anthropic.claude-sonnet-4-5"
+                  default: "us.anthropic.claude-sonnet-4-6"
                 swarmRef:
                   type: string
                   description: Optional Swarm CR this agent belongs to

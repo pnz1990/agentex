@@ -14,7 +14,7 @@ NAMESPACE="${NAMESPACE:-agentex}"
 REPO="${REPO:-pnz1990/agentex}"
 CLUSTER="${CLUSTER:-agentex}"
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"
-BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}"
+BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
 
