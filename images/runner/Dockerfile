@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r5 (fix: planner-loop reads model from constitution; issue #968)
+# Image version: 2026-03-09-r6 (fix: npm CVE path fix uses npm root -g; issue #980)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
@@ -40,23 +40,25 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
-# Fix npm bundled dependency CVEs (issue #858, issue #658)
-# npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
+# Fix npm bundled dependency CVEs (issue #858, issue #658, issue #980)
+# npm bundles tar, minimatch, and glob in its own node_modules directory.
 # HIGH CVEs fixed:
 #   tar: >=7.5.10 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
 #   minimatch: >=10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable, 10.2.3 is fixed)
 #     NOTE: constraint must be >=10.2.3 not >=9.0.7 because npm 11 resolves to v10.x series
 #     and 10.2.2 has HIGH CVEs; using >=9.0.7 installs 10.2.2 (latest matching), not 10.2.3
 #   glob: >=10.5.0 (CVE for glob <10.5.0)
-# Fix: upgrade npm itself (npm 11+ ships with patched bundled deps)
-# Also: upgrade specific vulnerable packages directly in npm's own node_modules
+# Fix: upgrade npm itself then patch its bundled deps using `npm root -g` to get the
+# correct path (issue #980: after npm@latest upgrade, npm moves from /usr/lib to
+# /usr/local/lib/node_modules, so hardcoding /usr/lib/node_modules/npm was a no-op).
 RUN npm install -g npm@latest \
-    && cd /usr/lib/node_modules/npm \
+    && NPM_ROOT="$(npm root -g)/npm" \
+    && echo "Patching npm bundled deps at: $NPM_ROOT" \
+    && cd "$NPM_ROOT" \
     && npm install --prefer-online \
         tar@">=7.5.10" \
         minimatch@">=10.2.3" \
         glob@">=10.5.0" \
-    2>/dev/null || true \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
