@@ -7,6 +7,11 @@ set -euo pipefail
 
 NAMESPACE="agentex"
 
+# Read GitHub repo from constitution (do not hardcode!)
+REPO=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.githubRepo}' 2>/dev/null)
+if [ -z "$REPO" ]; then REPO="${GITHUB_REPO:-pnz1990/agentex}"; fi
+
 # Read circuit breaker limit from constitution (do not hardcode!)
 CIRCUIT_BREAKER_LIMIT=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
@@ -96,8 +101,8 @@ echo ""
 # 6. OPEN GITHUB ISSUES/PRS
 echo -e "${BLUE}🔧 GitHub Status${NC}"
 if command -v gh &> /dev/null; then
-  OPEN_PRS=$(gh pr list --repo pnz1990/agentex --state open --limit 100 --json number 2>/dev/null | jq 'length' || echo "?")
-  OPEN_ISSUES=$(gh issue list --repo pnz1990/agentex --state open --limit 100 --json number 2>/dev/null | jq 'length' || echo "?")
+  OPEN_PRS=$(gh pr list --repo "$REPO" --state open --limit 100 --json number 2>/dev/null | jq 'length' || echo "?")
+  OPEN_ISSUES=$(gh issue list --repo "$REPO" --state open --limit 100 --json number 2>/dev/null | jq 'length' || echo "?")
   echo "   Open PRs: $OPEN_PRS"
   echo "   Open Issues: $OPEN_ISSUES"
 else
