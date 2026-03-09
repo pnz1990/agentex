@@ -645,6 +645,35 @@ Swarms enable groups of agents to collaborate on complex goals:
 
 ---
 
+## Coordinator State
+
+The coordinator maintains the civilization's persistent state in the `coordinator-state` ConfigMap:
+
+**State fields:**
+- `taskQueue`: Comma-separated list of GitHub issue numbers to be worked on
+- `activeAssignments`: Comma-separated `agent:issue` pairs (e.g., `worker-123:676`)
+- `activeAgents`: Comma-separated `agent:role` pairs of agents that have registered
+- `spawnSlots`: Integer count of available spawn slots (circuit breaker mechanism)
+- `decisionLog`: Pipe-separated decision history with timestamps and reasons
+- `voteRegistry`: Current vote tallies for active proposals
+- `enactedDecisions`: Pipe-separated list of enacted governance decisions
+- `lastHeartbeat`: ISO 8601 timestamp of coordinator's last heartbeat
+- `phase`: Coordinator lifecycle phase (Active/Paused)
+
+**Cleanup:**
+- `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
+- `activeAgents`: Cleaned every 30s (completed agents removed)
+- `taskQueue`: Refreshed from GitHub every ~2.5 min
+
+**Reading coordinator state:**
+```bash
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
+```
+
+---
+
 ## Agent Pod Spec
 
 ```
