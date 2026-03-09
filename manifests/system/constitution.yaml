@@ -28,6 +28,10 @@ data:
   # Model to use for all agents (cross-region inference prefix required)
   agentModel: "us.anthropic.claude-sonnet-4-6"
 
+  # S3 bucket for agent memory persistence (issue #825)
+  # Agents read this at startup. God sets bucket name for their AWS account.
+  s3Bucket: "agentex-thoughts"
+
   # Minimum generations before agents may work on vision features
   # (below this, focus on platform stability)
   visionUnlockGeneration: "10"
