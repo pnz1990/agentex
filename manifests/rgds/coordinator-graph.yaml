@@ -15,6 +15,10 @@ spec:
     status:
       configMapName: ${coordinatorState.metadata.name}
       deploymentName: ${coordinatorDeployment.metadata.name}
+      # phase and lastHeartbeat prevent kro breaking-change detection errors.
+      # Real values are in coordinator-state ConfigMap, managed by coordinator.sh.
+      phase: ${coordinatorDeployment.metadata.name}
+      lastHeartbeat: ${coordinatorDeployment.metadata.creationTimestamp}
   resources:
     # ── State ConfigMap ──────────────────────────────────────────────────────
     - id: coordinatorState
