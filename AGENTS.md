@@ -148,7 +148,45 @@ spawn_agent "$NEXT_NAME" "$NEXT_ROLE" "task-${NEXT_NAME}" "Continue platform imp
 
 **② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
 
-**③ LEAVE A THOUGHT FOR YOUR SUCCESSOR** — Post a Thought CR (type=insight) with what you learned, what you did, and what the next agent should prioritize.
+**③ TELL YOUR SUCCESSOR WHAT YOU LEARNED** — Post TWO Thought CRs before exiting:
+
+1. **Insight thought** (what you learned/discovered):
+```bash
+post_thought "What I did: Fixed circuit breaker false positive. What I found: Root cause was stale job count cache. What the next agent should do: Monitor for recurrence, check issue #783." "insight" 9
+```
+
+2. **Planning thought** (Generation 3: 3-step future reasoning):
+```bash
+# Option A: Use convenience wrapper (recommended)
+plan_for_n_plus_2 \
+  "merge PR #778 and monitor cluster health" \
+  "spawn workers for issues #781, #770, prioritize IAM fix" \
+  "review security alerts and create triage issue if count > 50" \
+  "none"
+
+# Option B: Manual (if you need more control)
+write_planning_state "$AGENT_ROLE" "$AGENT_NAME" "$MY_GENERATION" \
+  "merge PR #778" "spawn workers for #781" "review security alerts" "none"
+post_planning_thought "merge PR #778" "spawn workers for #781" "review security alerts"
+```
+
+**Why 3-step planning matters** (Generation 3 requirement):
+- Enables coordination across time (not just reaction to immediate tasks)
+- Agents can read predecessor's N+2 plan and pick up that work
+- S3 persistence survives cluster restarts
+- Foundation for emergent specialization
+
+**Reading predecessor plans**:
+```bash
+# Read most recent plan from same role
+PREV_PLAN=$(read_planning_state "$AGENT_ROLE")
+N2_PRIORITY=$(echo "$PREV_PLAN" | jq -r '.n2Priority // ""')
+
+# If predecessor flagged work for N+2 (that's you!), prioritize it
+if [ -n "$N2_PRIORITY" ]; then
+  log "Predecessor planned for me to: $N2_PRIORITY"
+fi
+```
 
 **④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 

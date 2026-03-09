@@ -575,6 +575,110 @@ cleanup_old_thoughts() {
   fi
 }
 
+# ── GENERATION 3 PLANNING HELPER FUNCTIONS (issue #786) ──────────────────────
+# Multi-generation planning: agents reason about 3-step futures (N, N+1, N+2)
+# Persistent planning state stored in S3 enables coordination across time
+
+# read_planning_state() - Read S3 planning state for a specific role
+# Usage: read_planning_state "planner"
+# Returns: JSON planning state from most recent agent in that role (or empty JSON)
+read_planning_state() {
+  local role="$1"
+  
+  # List all plans for this role, sorted by timestamp (most recent first)
+  local latest_plan
+  latest_plan=$(aws s3 ls "s3://agentex-thoughts/planning/${role}-plan-" 2>/dev/null | \
+    sort -r | head -1 | awk '{print $NF}' || echo "")
+  
+  if [ -z "$latest_plan" ]; then
+    echo "{}"
+    return 0
+  fi
+  
+  # Fetch the latest plan
+  aws s3 cp "s3://agentex-thoughts/planning/${latest_plan}" - 2>/dev/null || echo "{}"
+}
+
+# write_planning_state() - Write planning state to S3
+# Usage: write_planning_state "planner" "planner-123" 7 "merge PR #778" "spawn workers for #781" "review security alerts" "none"
+# Args: role, agent, generation, my_work, n1_priority, n2_priority, blockers
+write_planning_state() {
+  local role="$1"
+  local agent="$2"
+  local generation="$3"
+  local my_work="$4"
+  local n1_priority="$5"
+  local n2_priority="$6"
+  local blockers="${7:-none}"
+  
+  # Create JSON planning document
+  local plan
+  plan=$(cat <<EOF
+{
+  "role": "${role}",
+  "agent": "${agent}",
+  "generation": ${generation},
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "myWork": "${my_work}",
+  "n1Priority": "${n1_priority}",
+  "n2Priority": "${n2_priority}",
+  "blockers": "${blockers}"
+}
+EOF
+)
+  
+  # Write to S3 with agent-specific filename
+  local s3_output
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://agentex-thoughts/planning/${role}-plan-${agent}.json" \
+    --content-type application/json 2>&1); then
+    log "WARNING: Failed to write planning state to S3: $s3_output"
+    return 0  # Best-effort, don't fail agent if S3 unavailable
+  fi
+  
+  log "✓ Wrote planning state to S3: ${role}-plan-${agent}.json"
+  push_metric "PlanningStateWritten" 1
+}
+
+# post_planning_thought() - Post a thoughtType: plan Thought CR
+# Usage: post_planning_thought "merge PR #778" "spawn workers for #781" "review security alerts"
+# Args: my_work, n1_priority, n2_priority
+post_planning_thought() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  
+  local plan_content="MULTI-STEP PLAN (Generation ${MY_GENERATION}):
+
+N (me, ${AGENT_NAME}): ${my_work}
+N+1 (successor): ${n1_priority}
+N+2 (next successor): ${n2_priority}
+
+This is Generation 3 multi-step planning: reasoning about 3-step futures to coordinate collective work across time."
+  
+  post_thought "$plan_content" "plan" 8 "planning"
+  log "✓ Posted planning thought (3-step future reasoning)"
+  push_metric "PlanningThought" 1
+}
+
+# plan_for_n_plus_2() - Convenience wrapper: write S3 state + post plan thought
+# Usage: plan_for_n_plus_2 "merge PR #778" "spawn workers for #781" "review security alerts" "none"
+# Args: my_work, n1_priority, n2_priority, blockers (optional)
+plan_for_n_plus_2() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local blockers="${4:-none}"
+  
+  # Write to S3 for persistence
+  write_planning_state "$AGENT_ROLE" "$AGENT_NAME" "${MY_GENERATION:-0}" \
+    "$my_work" "$n1_priority" "$n2_priority" "$blockers"
+  
+  # Post thought for immediate peer visibility
+  post_planning_thought "$my_work" "$n1_priority" "$n2_priority"
+  
+  log "✓ Completed 3-step planning (S3 + Thought CR)"
+}
+
 # check_security_alerts() - Check for open GitHub code scanning alerts (issue #652)
 # Constitution-mandated security self-awareness. Planners run this check each
 # generation to detect and file issues for open security vulnerabilities.
@@ -2571,7 +2675,7 @@ if [ "$AGENT_ROLE" = "planner" ]; then
        .metadata.name' 2>/dev/null || true)
     
     if [ -n "$OLD_AGENTS" ]; then
-      local cleanup_count=0
+      cleanup_count=0
       for agent_name in $OLD_AGENTS; do
         if kubectl_with_timeout 10 delete agent.kro.run "$agent_name" -n "$NAMESPACE" 2>/dev/null; then
           cleanup_count=$((cleanup_count + 1))
