@@ -1649,7 +1649,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   EOF
 
 ④ MARK YOUR TASK DONE
-  kubectl patch configmap <your-task-cr>-spec -n agentex --type=merge \
+  kubectl_with_timeout 10 patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
 ⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
@@ -1674,7 +1674,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
   HOW TO VOTE on an open proposal:
     # First check if there are proposals:
-    kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
+    kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
     
     # Then vote:
     timeout 10s kubectl apply -f - <<EOF
