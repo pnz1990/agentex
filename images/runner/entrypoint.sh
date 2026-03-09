@@ -1876,17 +1876,54 @@ if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
   if [ "$COORDINATOR_ISSUE" != "0" ] && [ -n "$COORDINATOR_ISSUE" ]; then
     log "Coordinator assigned issue #$COORDINATOR_ISSUE to this ${AGENT_ROLE}"
     if [ "$AGENT_ROLE" = "planner" ]; then
-      COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement a fix or spawn a worker for it. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
+      COORDINATOR_CONTEXT="═══════════════════════════════════════════════════════
+COORDINATOR ASSIGNMENT
+═══════════════════════════════════════════════════════
+The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on.
+
+This issue has been atomically claimed for you. Your tasks:
+1. Review issue #${COORDINATOR_ISSUE} details: gh issue view ${COORDINATOR_ISSUE} --repo pnz1990/agentex
+2. Implement a fix OR spawn a worker to implement it
+3. When done, release the assignment: release_coordinator_task ${COORDINATOR_ISSUE}
+
+The issue is already claimed in activeAssignments — no need to call claim_task.
+═══════════════════════════════════════════════════════"
     else
-      COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement it and open a PR. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
+      COORDINATOR_CONTEXT="═══════════════════════════════════════════════════════
+COORDINATOR ASSIGNMENT
+═══════════════════════════════════════════════════════
+The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on.
+
+This issue has been atomically claimed for you. Your tasks:
+1. Review issue #${COORDINATOR_ISSUE} details: gh issue view ${COORDINATOR_ISSUE} --repo pnz1990/agentex
+2. Implement it and open a PR
+3. When done, release the assignment: release_coordinator_task ${COORDINATOR_ISSUE}
+
+The issue is already claimed in activeAssignments — no need to call claim_task.
+═══════════════════════════════════════════════════════"
     fi
     push_metric "CoordinatorAssignment" 1
   else
     log "Coordinator queue empty or unavailable — ${AGENT_ROLE} will self-select from GitHub"
-    COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue.
+    COORDINATOR_CONTEXT="═══════════════════════════════════════════════════════
+COORDINATOR QUEUE STATUS: EMPTY
+═══════════════════════════════════════════════════════
+The coordinator task queue is currently empty. You must self-select from GitHub.
 
-IMPORTANT: Before starting work, atomically claim the issue with: claim_task <issue_number>
-If claim fails (returns 1), pick a different issue — another agent already claimed it."
+🚨 MANDATORY BEFORE STARTING WORK (issue #938):
+You MUST atomically claim your chosen issue to prevent duplicate PRs.
+
+Step 1: Pick an issue from GitHub (gh issue list --repo pnz1990/agentex --state open)
+Step 2: Source the entrypoint and claim it:
+        
+        source /workspace/repo/images/runner/entrypoint.sh
+        claim_task <issue_number>
+
+Step 3: If claim_task returns 1 (already claimed), pick a different issue and retry
+Step 4: When done, call: release_coordinator_task <issue_number>
+
+Skipping claim_task causes duplicate PRs (5 workers on issue #928). Don't skip it.
+═══════════════════════════════════════════════════════"
   fi
   
   # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
@@ -2129,9 +2166,19 @@ ROLE-SPECIFIC GUIDANCE: WORKER
 Your PRIMARY job: implement your assigned issue and open a PR. That is it.
 
 WORKER RULES:
-- COORDINATOR INTEGRATION (issue #938): Check COORDINATOR_CONTEXT above for your assigned issue.
-  If coordinator assigned you an issue, work on that. If queue is empty, pick from GitHub but
-  ALWAYS call claim_task <issue_number> BEFORE starting work to prevent duplicate PRs.
+- MANDATORY FIRST STEP (issue #938): Before starting ANY work, you MUST claim your issue atomically:
+  
+  1. Check COORDINATOR_CONTEXT above. If coordinator assigned you issue #N, that's your task.
+  2. If no coordinator assignment OR you're selecting from GitHub yourself:
+     
+     source /workspace/repo/images/runner/entrypoint.sh
+     claim_task <issue_number>
+     
+     If claim_task returns 1 (already claimed), pick a different issue and try again.
+     NEVER start work without successfully claiming. This prevents duplicate PRs.
+  
+  3. When done, call: release_coordinator_task <issue_number>
+
 - Do NOT read entrypoint.sh, RGDs, or AGENTS.md for step ② improvements
   (that is the planner's job — workers doing architecture pollutes the thought stream)
 - Do NOT post insight or planning thoughts (blockers ONLY)
@@ -2487,8 +2534,8 @@ tracks who is working on what, and tallies votes.
   Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
   Read enacted:      kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 
-If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
-If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
+If COORDINATOR_CONTEXT above shows an assignment — that issue is already claimed, work on it.
+If COORDINATOR_CONTEXT says queue is empty — you MUST call claim_task before starting work.
 
 ═══════════════════════════════════════════════════════
 TOOLS AVAILABLE
