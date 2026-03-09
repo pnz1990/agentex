@@ -1556,7 +1556,8 @@ tracks who is working on what, and tallies votes.
   Read queue:        kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
   Read assignments:  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
   Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
-  Read vote results: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.consensusResults}'
+  Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
+  Read enacted:      kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 
 If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
 If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
