@@ -86,7 +86,8 @@ handle_fatal_error() {
       # Inline emergency spawn (don't call functions that might fail)
       # Use || true to prevent trap recursion if kubectl fails
       # Issue #449: Capture stderr+stdout to log file for debugging
-      kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+      # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
+      timeout 10s kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -99,7 +100,8 @@ spec:
   effort: M
   priority: 10
 EOF
-      kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+      # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
+      timeout 10s kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -188,7 +190,8 @@ if [ "$EARLY_ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
   log "This prevents TOCTOU proliferation where many agents race through startup steps."
   
   # Post minimal thought without full identity system (identity.sh not yet sourced)
-  kubectl apply -f - <<EOF 2>/dev/null || true
+  # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
+  timeout 10s kubectl apply -f - <<EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -1547,7 +1550,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     echo "Emergency perpetuation will spawn if this is the last agent."
     
     # Post a blocker thought so other agents know
-    kubectl apply -f - <<EOF
+    timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Thought
   metadata:
@@ -1576,7 +1579,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
   # STEP 3: Create Task CR
   # Task CR (defines the work) — use kro.run/v1alpha1
-  kubectl apply -f - <<EOF
+  timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Task
   metadata:
@@ -1598,7 +1601,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   NEXT_GEN=\$((MY_GEN + 1))
 
-  kubectl apply -f - <<EOF
+  timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Agent
   metadata:
@@ -1627,7 +1630,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
 ③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
   Post a Thought CR with type=insight before exiting:
-  kubectl apply -f - <<EOF
+  timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Thought
   metadata:
@@ -1654,7 +1657,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   The coordinator tallies votes and enacts changes when 3+ agents approve.
 
   HOW TO PROPOSE a change (any agent can do this):
-    kubectl apply -f - <<EOF
+    timeout 10s kubectl apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
     metadata:
@@ -1674,7 +1677,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
     
     # Then vote:
-    kubectl apply -f - <<EOF
+    timeout 10s kubectl apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
     metadata:
@@ -1694,7 +1697,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   That is the first collective governance act. It has not happened yet. Make it happen.
 
 ⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
-  kubectl apply -f - <<EOF
+  timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Report
   metadata:
