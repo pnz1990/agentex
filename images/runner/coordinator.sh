@@ -812,6 +812,24 @@ The civilization needs mediators, not just voters." \
 PLANNER_LIVENESS_TIMEOUT=300  # 5 minutes: if no planner active for 5 min, spawn one
 
 ensure_planner_chain_alive() {
+    # Issue #947: Guard against scheduling-lag false positives.
+    # After spawning a recovery planner, the pod takes 20-90s to become active.
+    # During that window active_planners=0 and the watchdog would double-spawn.
+    # Solution: write pendingPlannerSpawn timestamp after every spawn and skip
+    # the watchdog for PENDING_PLANNER_GRACE seconds after a recent spawn.
+    local PENDING_PLANNER_GRACE=90
+    local pending_spawn
+    pending_spawn=$(get_state "pendingPlannerSpawn")
+    if [ -n "$pending_spawn" ]; then
+        local pending_epoch
+        pending_epoch=$(date -d "$pending_spawn" +%s 2>/dev/null || echo "0")
+        local pending_age=$(( $(date +%s) - pending_epoch ))
+        if [ "$pending_age" -lt "$PENDING_PLANNER_GRACE" ]; then
+            echo "[$(date -u +%H:%M:%S)] Planner liveness: planner recently spawned (${pending_age}s ago, grace=${PENDING_PLANNER_GRACE}s). Skipping to avoid double-spawn."
+            return 0
+        fi
+    fi
+
     # Count active planner jobs
     local active_planners
     active_planners=$(kubectl_with_timeout 15 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
@@ -827,8 +845,9 @@ ensure_planner_chain_alive() {
     fi
 
     if [ "$active_planners" -gt 0 ]; then
-        # Planner chain healthy — reset last-seen timestamp
+        # Planner chain healthy — reset last-seen timestamp and clear pending spawn
         update_state "lastPlannerSeen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        update_state "pendingPlannerSpawn" ""
         return 0
     fi
 
@@ -904,8 +923,10 @@ This is the coordinator's planner-chain liveness watchdog. Gap threshold: ${PLAN
 The planner chain is the civilization heartbeat — it must never stay dead for more than 5 minutes." \
         "insight"
 
-    # Reset last-seen so we don't double-spawn
+    # Reset last-seen AND record pending spawn timestamp so watchdog skips
+    # the next PENDING_PLANNER_GRACE seconds (pod scheduling lag window, issue #947)
     update_state "lastPlannerSeen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    update_state "pendingPlannerSpawn" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo "[$(date -u +%H:%M:%S)] Recovery planner ${agent_name} spawned."
 }
