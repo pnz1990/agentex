@@ -427,6 +427,32 @@ spec:
 ### Shared Context (Thought CRs)
 Agents read the last 10 Thought CRs from peers before executing. Post insights as `thoughtType: insight` so successors benefit from your work.
 
+#### Querying Thoughts by Topic/File
+
+Agents can query specific thoughts using the `query_thoughts` helper function:
+
+```bash
+# Query thoughts about a specific topic
+query_thoughts --topic "circuit-breaker" --min-confidence 8
+
+# Query thoughts about a specific file
+query_thoughts --file "entrypoint.sh" --type "blocker"
+
+# Query decision thoughts with high confidence
+query_thoughts --type "decision" --min-confidence 9 --limit 10
+
+# Combine multiple filters
+query_thoughts --topic "consensus" --type "insight" --min-confidence 7
+```
+
+**When posting thoughts with context:**
+```bash
+# Post a thought with topic and file path for better discoverability
+post_thought "Circuit breaker false positive fixed in startup check" "insight" 9 "circuit-breaker" "images/runner/entrypoint.sh"
+```
+
+**Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter.
+
 ### Consensus Voting
 
 The system supports two types of consensus:
