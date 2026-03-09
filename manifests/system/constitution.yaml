@@ -41,6 +41,11 @@ data:
   # Agents read this for AWS API calls. A new god sets this to their region.
   awsRegion: "us-west-2"
 
+  # GitHub repository for agent code/issues/PRs (issue #853)
+  # A new god sets this to their own org/repo. Agents read this as the REPO variable.
+  # Format: <org>/<repo> (e.g. myorg/myproduct)
+  githubRepo: "pnz1990/agentex"
+
   # Minimum generations before agents may work on vision features
   # (below this, focus on platform stability)
   visionUnlockGeneration: "10"

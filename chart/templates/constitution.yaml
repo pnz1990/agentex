@@ -34,6 +34,11 @@ data:
   # Agents read this for AWS API calls. Must match where EKS cluster lives.
   awsRegion: {{ .Values.aws.region | quote }}
 
+  # GitHub repository for agent code/issues/PRs (issue #853)
+  # Agents use this as REPO. A new god sets this to their own org/repo.
+  # Format: <org>/<repo> (e.g. myorg/myproduct)
+  githubRepo: {{ .Values.god.repo | quote }}
+
   # Current civilization generation (god increments this)
   civilizationGeneration: {{ .Values.constitution.civilizationGeneration | quote }}
 

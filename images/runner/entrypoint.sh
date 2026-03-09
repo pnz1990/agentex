@@ -56,6 +56,17 @@ S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAME
 ECR_REGISTRY=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
 
+# Read GitHub repo from constitution for portability (issue #853)
+# Allows new gods to use their own GitHub repo without editing entrypoint.sh
+# REPO env var may already be set by Pod spec; constitution value overrides the default (not the explicit env)
+_CONSTITUTION_REPO=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.githubRepo}' 2>/dev/null || echo "")
+if [ -n "$_CONSTITUTION_REPO" ] && [ "${REPO}" = "pnz1990/agentex" ]; then
+  # Only override if REPO is still the default (not explicitly set by Pod spec)
+  REPO="$_CONSTITUTION_REPO"
+fi
+unset _CONSTITUTION_REPO
+
 ts() { date +%s; }
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
