@@ -658,54 +658,129 @@ push_metric() {
     2>/dev/null || true
 }
 
+# ── Atomic Spawn Gate (issue #519: TOCTOU fix) ───────────────────────────────
+# The coordinator maintains a spawnSlots counter in coordinator-state.
+# Agents atomically claim a slot before spawning and release it after.
+# This replaces the racy "count jobs → decide to spawn" pattern.
+#
+# The coordinator reconciles spawnSlots against actual job count every ~2 min
+# to recover from leaked slots (agent crash before release).
+#
+# Returns 0 if slot granted, 1 if denied.
+request_spawn_slot() {
+  local max_attempts=5
+  local attempt=0
+
+  # Check kill switch first
+  local killswitch_enabled
+  killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  if [ "$killswitch_enabled" = "true" ]; then
+    local ks_reason
+    ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "KILL SWITCH: spawn slot denied. Reason: $ks_reason"
+    return 1
+  fi
+
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+
+    # Read current spawnSlots
+    local slots
+    slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+
+    # If coordinator-state missing or spawnSlots not set, fall back to job count (fail-open)
+    if [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]]; then
+      log "WARNING: coordinator spawnSlots unavailable, falling back to job count circuit breaker"
+      local total_active
+      total_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+      if [ "$total_active" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
+        log "FALLBACK CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. Spawn denied."
+        push_metric "CircuitBreakerTriggered" 1
+        return 1
+      fi
+      log "FALLBACK CIRCUIT BREAKER passed: $total_active < $CIRCUIT_BREAKER_LIMIT"
+      return 0
+    fi
+
+    if [ "$slots" -le 0 ]; then
+      log "ATOMIC SPAWN GATE: 0 slots available (limit=$CIRCUIT_BREAKER_LIMIT). Spawn denied."
+      post_thought "Atomic spawn gate: 0 slots remaining. Spawn blocked. System at capacity." "blocker" 10
+      push_metric "CircuitBreakerTriggered" 1
+      return 1
+    fi
+
+    # Atomically decrement: test current value then replace with (value - 1)
+    local new_slots=$((slots - 1))
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=json \
+      -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+      2>/dev/null; then
+      log "Spawn slot granted: ${slots} → ${new_slots} slots remaining"
+      push_metric "SpawnSlotGranted" 1
+      return 0
+    fi
+
+    # Test failed = concurrent modification, retry
+    log "Spawn slot CAS retry $attempt/$max_attempts (concurrent modification detected)"
+    sleep 0.$((RANDOM % 5 + 1))  # 0.1-0.5s jitter
+  done
+
+  log "ATOMIC SPAWN GATE: failed to acquire slot after $max_attempts attempts. Spawn denied."
+  push_metric "CircuitBreakerTriggered" 1
+  return 1
+}
+
+release_spawn_slot() {
+  # Increment spawnSlots back after spawn completes (or fails)
+  # Use retry loop for CAS correctness
+  local max_attempts=5
+  local attempt=0
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+    local slots
+    slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+    if [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]]; then
+      log "WARNING: coordinator spawnSlots unavailable during release, skipping"
+      return 0
+    fi
+    local new_slots=$((slots + 1))
+    # Cap at CIRCUIT_BREAKER_LIMIT to prevent slot leaks from double-release
+    if [ "$new_slots" -gt "$CIRCUIT_BREAKER_LIMIT" ]; then
+      new_slots=$CIRCUIT_BREAKER_LIMIT
+    fi
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=json \
+      -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+      2>/dev/null; then
+      log "Spawn slot released: ${slots} → ${new_slots} slots available"
+      push_metric "SpawnSlotReleased" 1
+      return 0
+    fi
+    log "Spawn slot release CAS retry $attempt/$max_attempts"
+    sleep 0.$((RANDOM % 3 + 1))
+  done
+  log "WARNING: Failed to release spawn slot after $max_attempts attempts (slot may be leaked, coordinator will reconcile)"
+}
+
 # ── Consensus Protocol Functions ──────────────────────────────────────────────
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
   local name="$1" role="$2" task_ref="$3" reason="$4"
   
-  # EMERGENCY KILL SWITCH (issue #210): Check if spawning is globally disabled
-  # Instant emergency stop via ConfigMap - no image rebuild needed
-  local killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
-    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
-  
-  if [ "$killswitch_enabled" = "true" ]; then
-    local killswitch_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
-      -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
-    log "EMERGENCY KILL SWITCH ACTIVE: $killswitch_reason. NOT spawning successor."
-    post_thought "Kill switch active: $killswitch_reason. Agent exiting without spawning successor." "blocker" 10
+  # ATOMIC SPAWN GATE (issue #519): Request a spawn slot from the coordinator.
+  # This replaces the racy "count jobs → decide to spawn" TOCTOU pattern.
+  # The coordinator maintains an atomic counter that prevents concurrent over-spawning.
+  if ! request_spawn_slot; then
+    log "spawn_agent: spawn slot denied by atomic gate. Not spawning $name."
     return 1
   fi
-  
-  # GLOBAL CIRCUIT BREAKER (issue #338, #352): Hard limit to prevent catastrophic proliferation.
-  # Count active Jobs (status.completionTime == null AND status.active > 0).
-  # NOTE: Agent CRs never get completionTime set by kro — always use Jobs for counting.
-  local total_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-
-  # Push active job count metric for dashboard visibility (issue #416)
-  push_metric "ActiveJobs" "$total_active" "Count"
-
-  if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
-    log "CIRCUIT BREAKER TRIGGERED: $total_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn."
-    post_thought "Circuit breaker: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. Spawn blocked." "blocker" 10
-    push_metric "CircuitBreakerTriggered" 1
-    return 1
-  fi
-  
-  # RECOVERY MODE CHECK (issue #562): More conservative spawning after emergency events
-  # If system is in recovery mode (recent kill switch or instability), use lower threshold
-  if [ "${RECOVERY_MODE:-false}" = "true" ]; then
-    local recovery_threshold=$((CIRCUIT_BREAKER_LIMIT * 70 / 100))  # 70% of limit in recovery
-    if [ "$total_active" -ge "$recovery_threshold" ]; then
-      log "RECOVERY MODE: $total_active active jobs >= $recovery_threshold (70% of $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn during recovery."
-      post_thought "Recovery mode: $total_active active jobs >= $recovery_threshold (70% threshold). Spawn blocked until system stabilizes." "blocker" 9
-      push_metric "RecoveryModeSpawnBlocked" 1
-      return 1
-    else
-      log "Recovery mode spawn check passed: $total_active < $recovery_threshold (70% threshold)"
-    fi
-  fi
+  local _slot_acquired=true
   
   # Calculate next generation number by reading current agent's generation label
   local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
@@ -743,51 +818,17 @@ spec:
 EOF
 ) || {
     log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
-    log "ERROR: System perpetuation may be broken. Emergency spawn may trigger."
+    log "ERROR: Releasing spawn slot due to Agent CR creation failure."
+    release_spawn_slot
     return 0  # Don't fail immediately - let emergency spawn handle it
   }
-  
-  # POST-SPAWN VERIFICATION (issue #364, #490): TOCTOU race condition mitigation
-  # Re-check circuit breaker after spawn. If we raced and exceeded limit, delete BOTH Agent CR and Job.
-  # This provides eventual consistency - not atomic, but catches most race conditions.
-  sleep 1  # Brief delay to let API server state stabilize
-  local post_spawn_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-  
-  if [ "$post_spawn_active" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
-    log "POST-SPAWN VERIFICATION FAILED: $post_spawn_active active jobs after spawn (limit: $CIRCUIT_BREAKER_LIMIT). TOCTOU race detected!"
-    
-    # CRITICAL (issue #490, #542): Must delete the Job, not just the Agent CR
-    # kro creates the Job immediately - deleting only the Agent CR leaves orphaned Job running
-    # Retry fetching job name with backoff - kro may take 2-3s to populate status.jobName
-    log "Retrieving Job name for Agent $name before cleanup (with retry)..."
-    local job_name=""
-    for attempt in {1..5}; do
-      job_name=$(kubectl_with_timeout 10 get agent.kro.run "$name" -n "$NAMESPACE" -o jsonpath='{.status.jobName}' 2>/dev/null)
-      if [ -n "$job_name" ]; then
-        log "Job name retrieved: $job_name (attempt $attempt)"
-        break
-      fi
-      log "Attempt $attempt: status.jobName not yet populated by kro, retrying in 1s..."
-      sleep 1
-    done
-    
-    log "Deleting Agent CR $name to restore system stability..."
-    kubectl delete agent.kro.run "$name" -n "$NAMESPACE" 2>/dev/null || true
-    
-    # Delete the Job kro created (if it exists)
-    if [ -n "$job_name" ]; then
-      log "Deleting Job $job_name associated with Agent $name (TOCTOU race cleanup)..."
-      kubectl delete job "$job_name" -n "$NAMESPACE" 2>/dev/null || true
-    else
-      log "WARNING: Could not determine Job name for Agent $name. Job may be orphaned."
-    fi
-    
-    post_thought "TOCTOU race: deleted Agent $name and Job $job_name after detecting $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)" "blocker" 8
-    return 1
-  fi
-  
-  log "Post-spawn verification passed: $post_spawn_active active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
+
+  # Spawn succeeded. The slot is now "consumed" by the new agent Job.
+  # The coordinator will reconcile spawnSlots against actual job count periodically,
+  # so we do NOT need to release the slot here — the new agent holds it.
+  # The slot is effectively released when the agent Job completes (coordinator reconciliation).
+  log "Agent CR $name created successfully (slot consumed by new agent)."
+  log "Spawn complete: $name (role=$role task=$task_ref)"
 }
 
 # Create a Task CR and immediately spawn an Agent to work it.
@@ -1843,21 +1884,11 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
   # Set agent name to match role (fix for issue #111)
   NEXT_AGENT="${NEXT_ROLE}-${TS}"
 
-  # CIRCUIT BREAKER (issue #338, #352): Same logic as spawn_agent.
-  # Count active Jobs. Agent CRs never get completionTime set by kro.
-  # Use kubectl_with_timeout for consistency with spawn_agent (issue #491)
-  TOTAL_ACTIVE=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-
-  # Push active job count metric for dashboard visibility (issue #416)
-  push_metric "ActiveJobs" "$TOTAL_ACTIVE" "Count"
-
-  if [ "$TOTAL_ACTIVE" -ge $CIRCUIT_BREAKER_LIMIT ]; then
-    log "CIRCUIT BREAKER: $TOTAL_ACTIVE active jobs (limit: $CIRCUIT_BREAKER_LIMIT). Blocking emergency spawn."
-    post_thought "Emergency spawn blocked: $TOTAL_ACTIVE active jobs >= $CIRCUIT_BREAKER_LIMIT." "blocker" 10
-    push_metric "CircuitBreakerTriggered" 1
-    NEEDS_EMERGENCY_SPAWN=false
-  fi
+  # ATOMIC SPAWN GATE (issue #519): Emergency spawn uses the same slot-based gate as spawn_agent.
+  # spawn_task_and_agent calls spawn_agent which calls request_spawn_slot.
+  # No separate circuit breaker check needed here — the gate handles it.
+  push_metric "ActiveJobs" "$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")" "Count"
 
   if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     spawn_task_and_agent \

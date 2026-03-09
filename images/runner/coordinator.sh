@@ -200,6 +200,39 @@ cleanup_stale_assignments() {
     [ $stale_count -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Cleaned $stale_count stale assignments"
 }
 
+# Reconcile spawnSlots against actual running job count (leak recovery)
+# If agents crash before releasing slots, spawnSlots drifts low.
+# This function resets spawnSlots = max(0, circuitBreakerLimit - activeJobs).
+reconcile_spawn_slots() {
+    local limit
+    limit=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
+    if ! [[ "$limit" =~ ^[0-9]+$ ]]; then limit=12; fi
+
+    local active_jobs
+    active_jobs=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "0")
+
+    local correct_slots=$(( limit - active_jobs ))
+    if [ "$correct_slots" -lt 0 ]; then correct_slots=0; fi
+
+    local current_slots
+    current_slots=$(get_state "spawnSlots")
+    if [ -z "$current_slots" ] || ! [[ "$current_slots" =~ ^[0-9]+$ ]]; then
+        current_slots=0
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Spawn slot reconciliation: limit=$limit activeJobs=$active_jobs currentSlots=$current_slots → correctSlots=$correct_slots"
+    push_metric "ActiveJobs" "$active_jobs" "Count" "Component=Coordinator"
+    push_metric "SpawnSlots" "$correct_slots" "Count" "Component=Coordinator"
+
+    if [ "$current_slots" != "$correct_slots" ]; then
+        update_state "spawnSlots" "$correct_slots"
+        echo "[$(date -u +%H:%M:%S)] Reconciled spawnSlots: $current_slots → $correct_slots"
+    fi
+}
+
 # Tally votes from Thought CRs and ENACT consensus when threshold reached
 tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs..."
@@ -319,6 +352,19 @@ Constitution patched at ${ts}. All future agents will use limit=${proposed_value
 echo "Coordinator entering main loop..."
 update_state "phase" "Active"
 
+# Initialize spawnSlots to circuitBreakerLimit on startup (atomic spawn gate, issue #519)
+# This is the number of concurrent agent spawns permitted.
+INIT_SLOTS=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
+if ! [[ "$INIT_SLOTS" =~ ^[0-9]+$ ]]; then INIT_SLOTS=12; fi
+CURRENT_SLOTS=$(get_state "spawnSlots")
+if [ -z "$CURRENT_SLOTS" ] || ! [[ "$CURRENT_SLOTS" =~ ^[0-9]+$ ]]; then
+  update_state "spawnSlots" "$INIT_SLOTS"
+  echo "[$(date -u +%H:%M:%S)] Initialized spawnSlots=$INIT_SLOTS (from circuitBreakerLimit)"
+else
+  echo "[$(date -u +%H:%M:%S)] spawnSlots already set: $CURRENT_SLOTS"
+fi
+
 # Seed the task queue on first start if empty
 INITIAL_QUEUE=$(get_state "taskQueue")
 if [ -z "$INITIAL_QUEUE" ]; then
@@ -339,6 +385,12 @@ while true; do
 
     # Every iteration: cleanup stale assignments
     cleanup_stale_assignments
+
+    # Every 4 iterations (~2 min): reconcile spawn slots against actual job count
+    # This recovers leaked slots when agents crash before releasing them
+    if [ $((iteration % 4)) -eq 0 ]; then
+        reconcile_spawn_slots
+    fi
 
     # Every 3 iterations (~1.5 min): tally votes and potentially enact
     if [ $((iteration % 3)) -eq 0 ]; then
