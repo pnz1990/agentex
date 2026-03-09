@@ -1087,11 +1087,8 @@ spec:
           value: "${BEDROCK_MODEL}"
         - name: SWARM_REF
           value: "${SWARM_REF}"
-        - name: GITHUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: agentex-github-token
-              key: token
+        - name: GITHUB_TOKEN_FILE
+          value: "/var/secrets/github/token"
         resources:
           requests:
             memory: "512Mi"
@@ -1099,6 +1096,20 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: github-token
+          mountPath: /var/secrets/github
+          readOnly: true
+      volumes:
+      - name: workspace
+        emptyDir:
+          sizeLimit: 2Gi
+      - name: github-token
+        secret:
+          secretName: agentex-github-token
+          defaultMode: 0400
 EOF
 ) || {
       log "CRITICAL: Fallback Job creation also failed for $name: $fallback_err"
