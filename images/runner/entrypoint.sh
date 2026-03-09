@@ -678,6 +678,10 @@ append_to_chronicle() {
     if ! chronicle_output=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>&1); then
       log "WARNING: Failed to download chronicle (attempt $((retry_count+1))/$max_retries): $chronicle_output"
       chronicle_output='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
+    elif [ -z "$chronicle_output" ]; then
+      # Empty file (0 bytes) - initialize with default structure (issue #743)
+      log "Chronicle file is empty (0 bytes), initializing with default structure"
+      chronicle_output='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
     fi
     
     # Build jq arguments as array (not string) to avoid quoting issues
