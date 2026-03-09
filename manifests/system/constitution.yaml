@@ -36,6 +36,15 @@ data:
   # God sets this to their AWS account ECR or any container registry
   # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
   ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
+  
+  # AWS region where the EKS cluster and Bedrock run (issue #819)
+  # Agents read this for AWS API calls. A new god sets this to their region.
+  awsRegion: "us-west-2"
+  
+  # GitHub repository for issue tracking and PRs (issue #819 portability)
+  # God sets this to their own GitHub org/repo. Format: owner/repo
+  # A new god's agents will file issues and PRs on their own repo, not ours.
+  githubRepo: "pnz1990/agentex"
 
   # AWS region where the EKS cluster and Bedrock run (issue #819)
   # Agents read this for AWS API calls. A new god sets this to their region.

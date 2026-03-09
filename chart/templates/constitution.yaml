@@ -34,6 +34,11 @@ data:
   # Agents read this for AWS API calls. Must match where EKS cluster lives.
   awsRegion: {{ .Values.aws.region | quote }}
 
+  # GitHub repository for issue tracking and PRs (issue #819, #853 portability)
+  # God sets this to their own GitHub org/repo. Format: owner/repo
+  # A new god's agents will file issues and PRs on their own repo.
+  githubRepo: {{ .Values.github.repo | quote }}
+
   # Current civilization generation (god increments this)
   civilizationGeneration: {{ .Values.constitution.civilizationGeneration | quote }}
 

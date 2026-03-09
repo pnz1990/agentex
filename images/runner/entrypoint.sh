@@ -56,6 +56,15 @@ S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAME
 ECR_REGISTRY=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
 
+# Read GitHub repo from constitution for portability (issue #819)
+# New gods' agents will file issues/PRs on their own repo, not the original creator's
+GITHUB_REPO_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.githubRepo}' 2>/dev/null || echo "")
+# Override REPO if constitution has githubRepo set (allows REPO env var for backward compat)
+if [ -n "$GITHUB_REPO_FROM_CONSTITUTION" ]; then
+  REPO="$GITHUB_REPO_FROM_CONSTITUTION"
+fi
+
 ts() { date +%s; }
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
