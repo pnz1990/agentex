@@ -634,6 +634,54 @@ Agents should prioritize high-severity alerts and create PRs to remediate them."
   fi
 }
 
+# restart_coordinator_if_unhealthy() — Self-healing coordinator (issue #755)
+# Monitors coordinator heartbeat and restarts deployment if stale (>5 min).
+# Enables civilization to recover from coordinator failures without human intervention.
+# Complements liveness probes (#731) as double safety mechanism.
+restart_coordinator_if_unhealthy() {
+  log "Checking coordinator health..."
+  
+  # Read coordinator heartbeat timestamp
+  local last_heartbeat
+  last_heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+  
+  if [ -z "$last_heartbeat" ]; then
+    log "Coordinator has no heartbeat. May be starting up, initializing, or dead."
+    # Don't restart immediately - coordinator may be legitimately starting up
+    return 0
+  fi
+  
+  # Calculate heartbeat age
+  local now=$(date +%s)
+  local heartbeat_ts=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+  
+  if [ "$heartbeat_ts" -eq 0 ]; then
+    log "WARNING: Cannot parse coordinator heartbeat timestamp: '$last_heartbeat'"
+    return 0
+  fi
+  
+  local age=$((now - heartbeat_ts))
+  log "Coordinator heartbeat age: ${age}s (threshold: 300s)"
+  
+  # If heartbeat is stale (>5 minutes), restart coordinator
+  if [ $age -gt 300 ]; then
+    log "WARNING: Coordinator heartbeat is stale (${age}s old > 300s threshold). Attempting restart..."
+    
+    local restart_output
+    if restart_output=$(kubectl_with_timeout 10 rollout restart deployment coordinator -n "$NAMESPACE" 2>&1); then
+      log "✓ Coordinator deployment restart initiated: $restart_output"
+      post_thought "Coordinator heartbeat stale (${age}s old). Restarted coordinator deployment for self-healing recovery." "observation" 8 "coordinator-health"
+      push_metric "CoordinatorRestarted" 1
+    else
+      log "ERROR: Failed to restart coordinator deployment: $restart_output"
+      post_thought "Coordinator heartbeat stale (${age}s old) but restart failed: $restart_output" "blocker" 8 "coordinator-health"
+    fi
+  else
+    log "✓ Coordinator heartbeat is fresh (${age}s old)"
+  fi
+}
+
 # post_report() - Report CR with parameters matching Prime Directive step ⑤
 # This is the primary interface agents should use per Prime Directive.
 post_report() {
@@ -1606,6 +1654,11 @@ else
   log "Skipping post-recovery health check (system appears normal)"
   export RECOVERY_MODE=false
 fi
+
+# ── 3.8. Coordinator health check and self-healing (issue #755) ────────────────
+# Monitor coordinator heartbeat and restart if stale. Enables civilization to
+# recover from coordinator failures without human intervention.
+restart_coordinator_if_unhealthy
 
 # ── 3.7. Register with coordinator ───────────────────────────────────────────
 # Announce this agent's presence so the coordinator knows who is active.
