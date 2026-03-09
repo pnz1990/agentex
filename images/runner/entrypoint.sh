@@ -2375,6 +2375,108 @@ push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
 log "Self-improvement audit complete: score=$SI_SCORE/10"
 
+# ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
+# The agent who opened a PR has the most context to fix a CI failure.
+# We wait up to 5 minutes for CI to complete on any PR opened this session.
+# If CI fails: post a blocker thought, comment on the PR, then exit without
+# spawning a successor (emergency perpetuation will recover the chain).
+# If CI passes or times out: continue normally.
+# This prevents the pattern of agents opening PRs with CI failures and exiting,
+# leaving no one with context to fix them.
+
+wait_for_pr_ci() {
+  local pr_number="$1"
+  local timeout_secs=300  # 5 minutes
+  local poll_interval=20
+  local elapsed=0
+
+  log "Waiting for CI on PR #$pr_number (timeout: ${timeout_secs}s)..."
+
+  while [ "$elapsed" -lt "$timeout_secs" ]; do
+    local checks
+    checks=$(gh pr checks "$pr_number" --repo "$REPO" --json name,state,conclusion \
+      --jq '[.[] | select(.name != "Require god-approved label")] | 
+            {total: length, pending: [.[] | select(.state == "PENDING" or .state == "IN_PROGRESS")] | length,
+             failed: [.[] | select(.conclusion == "failure" or .conclusion == "cancelled")] | length,
+             passed: [.[] | select(.conclusion == "success" or .conclusion == "skipped")] | length}' \
+      2>/dev/null || echo '{"total":0,"pending":0,"failed":0,"passed":0}')
+
+    local total pending failed passed
+    total=$(echo "$checks" | jq -r '.total')
+    pending=$(echo "$checks" | jq -r '.pending')
+    failed=$(echo "$checks" | jq -r '.failed')
+    passed=$(echo "$checks" | jq -r '.passed')
+
+    # No checks yet — CI hasn't started, wait
+    if [ "$total" -eq 0 ]; then
+      log "PR #$pr_number: CI not started yet, waiting..."
+      sleep "$poll_interval"
+      elapsed=$((elapsed + poll_interval))
+      continue
+    fi
+
+    # All done and failed
+    if [ "$pending" -eq 0 ] && [ "$failed" -gt 0 ]; then
+      log "PR #$pr_number: CI FAILED ($failed failures). Agent has context to fix."
+      gh pr comment "$pr_number" --repo "$REPO" \
+        --body "CI failed on this PR. I am the agent who opened it and have context to fix it. Investigating..." \
+        2>/dev/null || true
+      post_thought "CI failed on PR #${pr_number} that I opened this session. Posting blocker — I have context to fix this. Check: gh pr checks ${pr_number} --repo ${REPO}" "blocker" 9
+      return 1  # Signal failure to caller
+    fi
+
+    # All done and passed
+    if [ "$pending" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$passed" -gt 0 ]; then
+      log "PR #$pr_number: CI passed ($passed checks green)"
+      return 0
+    fi
+
+    # Still pending
+    log "PR #$pr_number: CI in progress (pending=$pending passed=$passed failed=$failed), waiting ${poll_interval}s..."
+    sleep "$poll_interval"
+    elapsed=$((elapsed + poll_interval))
+  done
+
+  # Timed out — leave a note and continue (don't block civilization)
+  log "PR #$pr_number: CI wait timed out after ${timeout_secs}s. Continuing."
+  gh pr comment "$pr_number" --repo "$REPO" \
+    --body "CI wait timed out (${timeout_secs}s) before results were available. Please check CI status manually." \
+    2>/dev/null || true
+  return 0  # Timeout is not a hard failure — don't block the chain
+}
+
+# Find PRs opened by this agent this session and wait on their CI
+if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
+  log "Agent opened $PRS_OPENED PR(s) this session — waiting for CI..."
+  AGENT_START_ISO=$(date -u -d "@$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
+                    date -u -r "$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
+
+  SESSION_PRS=$(gh pr list --repo "$REPO" --state open --author "@me" --limit 20 \
+    --json number,createdAt \
+    --jq --arg start "$AGENT_START_ISO" \
+    '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null || echo "")
+
+  CI_FAILED=0
+  for pr_num in $SESSION_PRS; do
+    if ! wait_for_pr_ci "$pr_num"; then
+      CI_FAILED=1
+    fi
+  done
+
+  if [ "$CI_FAILED" -eq 1 ]; then
+    log "One or more PRs from this session have CI failures. Exiting without spawning successor — emergency perpetuation will recover chain."
+    log "The next agent will NOT have context to fix these failures. This is intentional — the PR stays open for god to review."
+    push_metric "CIFailureOnExit" 1
+    # Skip to cleanup — emergency perpetuation handles chain recovery
+    # but the failing PR is left for god-review rather than a context-free successor
+    update_identity_stats "tasksCompleted" 1 2>/dev/null || true
+    cleanup_agent_cr
+    exit 1
+  fi
+  log "All PRs from this session passed CI."
+  push_metric "CIPassOnExit" 1
+fi
+
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
 # Check if this agent discovered a structural issue that requires architect-level intervention.
 # If so, the successor should be spawned with role=architect instead of the default role.
