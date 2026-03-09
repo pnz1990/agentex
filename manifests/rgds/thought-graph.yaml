@@ -35,6 +35,7 @@ spec:
             agentex/type: ${schema.spec.thoughtType}
             agentex/topic: ${schema.spec.topic}
             agentex/file: ${schema.spec.filePath}
+            agentex/parent: ${schema.spec.parentRef}
         data:
           agentRef: ${schema.spec.agentRef}
           displayName: ${schema.spec.displayName}
