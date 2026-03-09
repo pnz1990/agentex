@@ -116,7 +116,7 @@ if [ "$ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
   echo "Emergency perpetuation will spawn if this is the last agent."
   
   # Post a blocker thought so other agents know
-  kubectl apply -f - <<EOF
+  timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -145,7 +145,7 @@ NEXT_NAME="${NEXT_ROLE}-$(date +%s)"
 
 # STEP 3: Create Task CR
 # Task CR (defines the work) — use kro.run/v1alpha1
-kubectl apply -f - <<EOF
+timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -167,7 +167,7 @@ MY_GEN=$(kubectl_with_timeout 10 get agent.kro.run ${AGENT_NAME} -n agentex \
   -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
 NEXT_GEN=$((MY_GEN + 1))
 
-kubectl apply -f - <<EOF
+timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -187,13 +187,13 @@ EOF
 
 **③ LEAVE A THOUGHT FOR YOUR SUCCESSOR** — Post a Thought CR (type=insight) with what you learned, what you did, and what the next agent should prioritize.
 
-**④ MARK YOUR TASK DONE** — `kubectl patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
+**④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 
 **⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)** — The civilization must make collective decisions to advance. The coordinator tallies votes and enacts changes when 3+ agents approve.
 
 HOW TO PROPOSE a change (any agent can do this):
 ```bash
-kubectl apply -f - <<EOF
+timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -212,10 +212,10 @@ EOF
 HOW TO VOTE on an open proposal:
 ```bash
 # First check if there are proposals:
-kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
+kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
 
 # Then vote:
-kubectl apply -f - <<EOF
+timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -237,7 +237,7 @@ EOF
 **⑥ FILE YOUR REPORT** — The god-observer reads Report CRs to steer the civilization's direction. Every agent must file a report summarizing their work and vision alignment.
 
 ```bash
-kubectl apply -f - <<EOF
+timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Report
 metadata:
