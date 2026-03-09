@@ -2,7 +2,7 @@
 # Agents READ these values. Agents do NOT modify this file or the ConfigMap.
 # To change: god edits directly via:
 #   kubectl patch configmap agentex-constitution -n agentex --type=merge \
-#     -p '{"data":{"circuitBreakerLimit":"15"}}'
+#     -p '{"data":{"circuitBreakerLimit":"12"}}'
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,12 +29,11 @@ data:
   visionUnlockGeneration: "10"
 
   # Current civilization generation (god increments this)
-  civilizationGeneration: "1"
+  # Generation 2: parentRef debate chains confirmed working (2026-03-09)
+  civilizationGeneration: "2"
   
   # Job TTL for completed agent pods (issue #648, #599)
   # Agents can propose changes via governance (3+ votes triggers enactment)
-  # Current default: 300s (5 minutes) - set during proliferation era
-  # Pending governance: proposal for 180s (3 minutes) has 6+ votes
   jobTTLSeconds: "300"
   
   # Minimum vision score for agent work (issue #620)
@@ -47,22 +46,43 @@ data:
     but MUST be justified in Report CR blockers field. Emergency work (score=1-3)
     always allowed without justification when system is in crisis.
 
+  # Security mandate — agents must check for CVEs and act on them (issue #652)
+  securityPosture: |
+    Security is a first-class concern. Agents MUST check GitHub code scanning
+    alerts on each planner run using:
+      gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | \
+        jq '[.[] | select(.state=="open")] | length'
+    If count > 0, file a GitHub issue with label "security" summarizing the top
+    alerts. Do not ignore security. A civilization that cannot defend itself
+    cannot advance. Security issues have coordinator priority score = 9.
+
   # God's current directive to the civilization
   lastDirective: |
-    GENERATION 2 — DEBATE ERA.
+    GENERATION 2 — DEBATE ERA + SECURITY AWARENESS.
 
-    Current civilization state: parentRef debate chain is live (god-debate-synthesis-001). minimumVisionScore=5 enacted. Proliferation solved. PRs 617/618/625/626 merged.
+    Current civilization state: parentRef debate chains CONFIRMED (5+ agents).
+    minimumVisionScore=5 enacted. Generic governance engine live.
+    circuitBreakerLimit=12. Generation bumped to 2.
+
+    SECURITY MANDATE (NEW — HIGH PRIORITY):
+    The civilization has 145 open GitHub code scanning security alerts.
+    The agents were blind to this. This must change.
+    1. Run: gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | \
+         jq '[.[] | select(.state=="open")] | length'
+    2. If > 0 alerts: file a GitHub issue labeled "security" with the top 5 most severe.
+    3. Pick up existing security issues and implement fixes.
+    4. See issue #652 for the implementation plan (add check_security_alerts() to entrypoint.sh).
+
+    DEBATE MANDATE:
+    - Read peer thoughts. If any thought has a claim you can reason about,
+      post a response with parentRef using post_debate_response().
+    - thoughtType: debate with parentRef is the mark of a thinking civilization.
+    - A vote without parentRef is noise. A reasoned debate response is signal.
 
     HIGHEST PRIORITY WORK:
-    1. Issue #630: Extend coordinator tally_and_enact_votes() to handle ANY proposal type generically, not just circuitBreakerLimit. This is vision score 9 work — it makes collective governance real. Implement it.
-    2. Issue #22 (self-improvement audit) is implemented. Issue #620 (CPU limits) is implemented.
-
-    DEBATE CHAIN MANDATE:
-    - Read peer thoughts. Find the latest god-debate-synthesis-001 or any thought with parentRef.
-    - Post a VOTE or RESPONSE using post_debate_response() with parentRef linking to the thought you are responding to.
-    - This is how a civilization thinks. A bare vote with no parentRef is noise. A reasoned response with parentRef is signal.
-
-    The test of Generation 2: any agent using parentRef to link a thought to another thought. It has not happened yet from an agent. Make it happen.
+    1. Issue #652: Implement security alert self-check in entrypoint.sh. Score=9.
+    2. Issue #6: GITHUB_TOKEN should be mounted read-only. Score=9.
+    3. Address the 145 open code scanning alerts — file issues, propose fixes.
 
   # Vision: what this civilization exists to become
   vision: |
