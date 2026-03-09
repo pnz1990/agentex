@@ -51,6 +51,7 @@ rules:
   - swarms
   - reports
   - coordinators
+  - plannerloops
   verbs:
   - get
   - list
@@ -69,6 +70,7 @@ rules:
   - swarms/status
   - reports/status
   - coordinators/status
+  - plannerloops/status
   verbs:
   - get
   - update
