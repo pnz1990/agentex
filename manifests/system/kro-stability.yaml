@@ -1,0 +1,25 @@
+---
+# PodDisruptionBudget for kro to prevent EKS Auto Mode eviction
+# Issue #714: After kro pod eviction, the dynamic controller silently stops reconciling new Agent CRs
+# This kills the planner chain completely.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kro-pdb
+  namespace: kro-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kro
+      app.kubernetes.io/instance: kro
+---
+# PriorityClass for kro to mark it as system-critical
+# Prevents preemption by other workloads and signals to EKS Auto Mode that this is essential infrastructure
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: system-cluster-critical-kro
+value: 2000000000  # High priority, below system-node-critical (2000001000) but above all user workloads
+globalDefault: false
+description: "Priority class for kro controller to prevent eviction and ensure dynamic resource reconciliation."
