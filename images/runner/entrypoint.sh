@@ -2218,8 +2218,9 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   # The 4th parameter is a reason string (not generation - that's calculated automatically)
   spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "Continue platform improvement"
 
-② FIND AND FIX ONE PLATFORM IMPROVEMENT
-  Read: manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
+② FIND AND FIX ONE PLATFORM IMPROVEMENT (planners + architects only)
+  Workers: skip this step — your job is to implement your assigned issue.
+  Planners/Architects: Read manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
   Identify one improvement. Create a GitHub Issue for it.
   If effort is S (< 1 hour): implement it NOW in a branch+PR.
   The improvement can be anything: RGD fix, runner logic, new capability,
