@@ -434,6 +434,77 @@ cleanup_old_thoughts() {
   fi
 }
 
+# check_security_alerts() - Check for open GitHub code scanning alerts (issue #652)
+# Constitution-mandated security self-awareness. Planners run this check each
+# generation to detect and file issues for open security vulnerabilities.
+# Deduplicates: only creates issue if no existing open security issue found.
+check_security_alerts() {
+  log "Checking for open code scanning alerts (issue #652)..."
+  
+  # Query GitHub API for open code scanning alerts
+  # --paginate ensures we get all alerts across pages
+  local alert_count
+  alert_count=$(gh api /repos/"${REPO}"/code-scanning/alerts --paginate 2>/dev/null | \
+    jq '[.[] | select(.state=="open")] | length' 2>/dev/null || echo "0")
+  
+  if ! [[ "$alert_count" =~ ^[0-9]+$ ]]; then
+    log "WARNING: Failed to query code scanning alerts (gh api error)"
+    return 0
+  fi
+  
+  log "Code scanning: $alert_count open alerts"
+  push_metric "SecurityAlerts" "$alert_count"
+  
+  # If no alerts, we're good
+  if [ "$alert_count" -eq 0 ]; then
+    log "✓ No open security alerts"
+    return 0
+  fi
+  
+  # Check if there's already an open security issue to avoid duplicate filings
+  local existing_issue
+  existing_issue=$(gh issue list --repo "$REPO" --label security --state open --limit 1 --json number -q '.[0].number' 2>/dev/null || echo "")
+  
+  if [ -n "$existing_issue" ]; then
+    log "Security issue already exists: #$existing_issue (not filing duplicate)"
+    return 0
+  fi
+  
+  # No existing issue - file one now
+  log "Filing security issue for $alert_count open alerts..."
+  local new_issue
+  new_issue=$(gh issue create --repo "$REPO" \
+    --title "security: $alert_count open code scanning alerts" \
+    --label "security" \
+    --body "Filed by agent ${AGENT_NAME}.
+
+Open code scanning alerts detected: $alert_count
+
+The civilization has open security vulnerabilities that need review and remediation.
+See GitHub Security tab for details: https://github.com/${REPO}/security/code-scanning
+
+This is constitution-mandated work (securityPosture field in agentex-constitution).
+
+To view alerts:
+\`\`\`bash
+gh api /repos/${REPO}/code-scanning/alerts --paginate | jq '.[] | select(.state==\"open\") | {number, rule: .rule.id, severity: .rule.severity_level, path: .most_recent_instance.location.path}'
+\`\`\`
+
+Agents should prioritize high-severity alerts and create PRs to remediate them." 2>&1)
+  
+  if [ $? -eq 0 ]; then
+    local issue_num=$(echo "$new_issue" | grep -oP 'https://github.com/[^/]+/[^/]+/issues/\K[0-9]+' || echo "")
+    if [ -n "$issue_num" ]; then
+      log "✓ Filed security issue #$issue_num for $alert_count alerts"
+      post_thought "Filed security issue #$issue_num for $alert_count open code scanning alerts (constitution-mandated)" "observation" 8 "security"
+    else
+      log "✓ Filed security issue (number not parsed from output)"
+    fi
+  else
+    log "WARNING: Failed to create security issue: $new_issue"
+  fi
+}
+
 # post_report() - Report CR with parameters matching Prime Directive step ⑤
 # This is the primary interface agents should use per Prime Directive.
 post_report() {
@@ -1227,6 +1298,9 @@ if [ "$AGENT_ROLE" = "planner" ]; then
   # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
   log "Planner: cleaning up old thoughts..."
   cleanup_old_thoughts
+  
+  # Security alert check (issue #652) - constitution-mandated self-awareness
+  check_security_alerts
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
