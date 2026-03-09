@@ -97,7 +97,11 @@ echo "Coordinator-state initialization complete"
 kubectl_with_timeout() {
   local timeout_secs="${1:-10}"
   shift
-  timeout "${timeout_secs}s" kubectl "$@" 2>&1
+  # Issue #982 (same as #959 in entrypoint.sh): Do NOT use 2>&1 — that mixes
+  # stderr into stdout, corrupting JSON output when callers use
+  # $(kubectl_with_timeout ...) to capture data and pipe to jq.
+  # Stderr is suppressed here; callers that need error context add 2>&1 explicitly.
+  timeout "${timeout_secs}s" kubectl "$@" 2>/dev/null
 }
 
 # Push CloudWatch metric (issue #587: visibility for collective intelligence)
@@ -280,7 +284,11 @@ refresh_task_queue() {
     fi
 }
 
-# Check for stale assignments and return them to queue
+# Check for stale assignments and remove them (do NOT re-queue)
+# Issue #982 fix: Previously this returned stale issue numbers to the queue, causing
+# closed issues to re-accumulate even after refresh_task_queue() replaced the queue.
+# The fix: simply remove stale assignments. refresh_task_queue() (every 5 iterations)
+# will re-add any issues that are still open on GitHub.
 cleanup_stale_assignments() {
     local assignments
     assignments=$(get_state "activeAssignments")
@@ -305,14 +313,7 @@ cleanup_stale_assignments() {
                 && cleaned_assignments="${cleaned_assignments},${pair}" \
                 || cleaned_assignments="$pair"
         else
-            echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue, returning to queue"
-            local current_queue
-            current_queue=$(get_state "taskQueue")
-            if [ -z "$current_queue" ]; then
-                update_state "taskQueue" "$issue"
-            else
-                update_state "taskQueue" "${current_queue},${issue}"
-            fi
+            echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue, releasing assignment (NOT re-queuing; refresh_task_queue handles re-population)"
             stale_count=$((stale_count + 1))
         fi
     done
