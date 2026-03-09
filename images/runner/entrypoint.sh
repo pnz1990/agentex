@@ -1523,7 +1523,8 @@ post_recovery_health_check() {
   local ghost_agents=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
     jq -r '.items[] | select(.status.jobName == null or .status.jobName == "") | .metadata.name' 2>/dev/null || echo "")
   
-  local ghost_count=$(echo "$ghost_agents" | grep -c . || echo "0")
+  # Use wc -l instead of grep -c to avoid exit code issues when count is 0
+  local ghost_count=$(echo "$ghost_agents" | wc -l)
   
   if [ "$ghost_count" -gt 5 ]; then
     health_score=$((health_score - 2))
