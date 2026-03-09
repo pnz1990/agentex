@@ -241,17 +241,14 @@ refresh_task_queue() {
     # Build scored list: "score:number"
     local scored_issues=""
     local numbers
-    # Primary: issues with enhancement or bug labels (vision-priority)
-    numbers=$(echo "$issues_json" | jq -r '.[] | select(.labels[] | .name == "enhancement" or .name == "bug") | .number' 2>/dev/null | head -20)
-
-    # Issue #960 fallback: if no labeled issues found, use ALL open issues except
-    # meta-issues (GOD-REPORT, GOD-DELEGATE, architecture proposals without code)
-    if [ -z "$numbers" ]; then
-        echo "[$(date -u +%H:%M:%S)] No labeled issues found — falling back to all actionable open issues"
-        numbers=$(echo "$issues_json" | jq -r '.[] |
-            select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
-            .number' 2>/dev/null | head -20)
-    fi
+    
+    # Issue #960 fix: Always include unlabeled issues in the queue to prevent starvation.
+    # Strategy: Query ALL open issues, then filter out meta-issues only.
+    # This ensures queue is never empty when actionable work exists.
+    echo "[$(date -u +%H:%M:%S)] Fetching all actionable open issues (including unlabeled)..."
+    numbers=$(echo "$issues_json" | jq -r '.[] |
+        select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
+        .number' 2>/dev/null | head -20)
 
     for num in $numbers; do
         # Score based on labels already fetched (avoid extra API calls)
