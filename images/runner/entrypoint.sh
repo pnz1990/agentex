@@ -1675,94 +1675,60 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   Create a Task CR + Agent CR for the next agent to continue the work.
   The Agent CR is what triggers a new pod via kro. A Task CR alone does nothing.
 
-  **MANDATORY: Check circuit breaker before spawning to prevent proliferation.**
+  **Use the spawn_task_and_agent() helper function** — it handles circuit breaker,
+  atomic spawn gate, kill switch, and all edge cases correctly.
 
-  # STEP 1: CIRCUIT BREAKER — Prevent catastrophic proliferation (issue #338)
-  # This check is MANDATORY. DO NOT skip it. OpenCode agents MUST execute this.
-  # Count total active jobs across all roles to detect system overload.
+  # STEP 1: Determine next agent role and name
+  NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+  NEXT_NAME="\${NEXT_ROLE}-\$(date +%s)"
+  TASK_NAME="task-\${NEXT_NAME}"
 
-  # Read circuit breaker limit from constitution (never hardcode!)
-  CIRCUIT_BREAKER_LIMIT=\$(kubectl_with_timeout 10 get configmap agentex-constitution -n agentex \\
-    -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
-  if ! [[ "\$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+\$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
+  # STEP 2: Call spawn_task_and_agent() helper (from entrypoint.sh)
+  # This function handles ALL spawn control mechanisms:
+  # - Atomic spawn slot allocation (request_spawn_slot with CAS on coordinator-state)
+  # - Kill switch check (agentex-killswitch ConfigMap)
+  # - Circuit breaker enforcement (fail-closed if coordinator unavailable)
+  # - Task CR creation + validation
+  # - Agent CR creation with correct generation label
+  # - kro health check + fallback Job creation (issue #714)
 
-  ACTIVE_JOBS=\$(kubectl_with_timeout 10 get jobs -n agentex -o json | \\
-    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
+  spawn_task_and_agent \\
+    "\$TASK_NAME" \\
+    "\$NEXT_NAME" \\
+    "\$NEXT_ROLE" \\
+    "Continue platform improvement — planner loop generation N" \\
+    "Audit codebase, fix one platform issue, spawn workers for open GitHub issues. MUST spawn YOUR OWN successor before exiting." \\
+    "M" \\
+    0 \\
+    ""
 
-  echo "Circuit breaker check: \$ACTIVE_JOBS active jobs (limit: \$CIRCUIT_BREAKER_LIMIT)"
+  # spawn_task_and_agent returns:
+  # - 0 if spawn succeeded (Task CR + Agent CR + Job created)
+  # - 1 if spawn blocked (circuit breaker, kill switch, or coordinator unavailable)
 
-  if [ "\$ACTIVE_JOBS" -ge \$CIRCUIT_BREAKER_LIMIT ]; then
-    echo "⚠️  CIRCUIT BREAKER ACTIVATED: \$ACTIVE_JOBS active jobs >= \$CIRCUIT_BREAKER_LIMIT"
-    echo "System is overloaded. NOT spawning successor."
-    echo "The civilization will pause to let load decrease."
-    echo "Emergency perpetuation will spawn if this is the last agent."
-    
-    # Post a blocker thought so other agents know
-    timeout 10s kubectl apply -f - <<EOF
-  apiVersion: kro.run/v1alpha1
-  kind: Thought
-  metadata:
-    name: thought-circuit-breaker-\$(date +%s)
-    namespace: agentex
-  spec:
-    agentRef: "\${AGENT_NAME:-unknown}"
-    taskRef: "\${TASK_CR_NAME:-unknown}"
-    thoughtType: blocker
-    confidence: 10
-    content: |
-      Circuit breaker activated: \$ACTIVE_JOBS active jobs >= \$CIRCUIT_BREAKER_LIMIT.
-      Agent \${AGENT_NAME:-unknown} NOT spawning successor.
-      System will stabilize before new spawns.
-  EOF
-    
-    # Exit without spawning - emergency perpetuation will handle liveness if needed
+  # If spawn blocked, exit gracefully (emergency perpetuation will handle recovery)
+  if [ \$? -ne 0 ]; then
+    log "Spawn blocked by spawn control mechanisms. Exiting gracefully."
     exit 0
   fi
 
-  echo "✓ Circuit breaker passed: safe to spawn"
+  **Why use the helper instead of manual kubectl?**
+  - ✅ **Atomic spawn control**: Uses CAS on coordinator-state.spawnSlots (no TOCTOU race)
+  - ✅ **Kill switch aware**: Respects agentex-killswitch ConfigMap
+  - ✅ **Fail-closed**: Denies spawn when coordinator unavailable (prevents proliferation)
+  - ✅ **kro health check**: Verifies kro creates Job, falls back to direct Job creation if needed
+  - ✅ **Issue validation**: Checks GitHub issue exists and is open before spawning workers
+  - ✅ **Generation tracking**: Automatically increments generation label
+  - ❌ Manual kubectl: TOCTOU race, no kill switch, fail-open fallback, duplicates 100+ lines
 
-  # STEP 2: Determine next agent role and name
-  NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
-  NEXT_NAME="\${NEXT_ROLE}-\$(date +%s)"
-
-  # STEP 3: Create Task CR
-  # Task CR (defines the work) — use kro.run/v1alpha1
-  timeout 10s kubectl apply -f - <<EOF
-  apiVersion: kro.run/v1alpha1
-  kind: Task
-  metadata:
-    name: task-\${NEXT_NAME}
-    namespace: agentex
-  spec:
-    title: "<what to do>"
-    description: "<detailed instructions including: spawn YOUR OWN successor before exiting>"
-    role: \${NEXT_ROLE}
-    effort: M
-    priority: 5
-    swarmRef: ""  # optional: set to swarm name if this task belongs to a swarm
-  EOF
-
-  # STEP 4: Create Agent CR (triggers the Job via kro)
-  # MUST use kro.run/v1alpha1 (NOT agentex.io). kro watches kro.run group.
-  # Calculate next generation: read your generation label and add 1
+  **Alternative: spawn only Agent CR** (if you already created Task CR separately):
+  # Read your generation and calculate next
   MY_GEN=\$(kubectl_with_timeout 10 get agent.kro.run \${AGENT_NAME} -n agentex \\
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   NEXT_GEN=\$((MY_GEN + 1))
 
-  timeout 10s kubectl apply -f - <<EOF
-  apiVersion: kro.run/v1alpha1
-  kind: Agent
-  metadata:
-    name: \${NEXT_NAME}
-    namespace: agentex
-    labels:
-      agentex/spawned-by: \${AGENT_NAME}
-      agentex/generation: "\${NEXT_GEN}"
-  spec:
-    role: \${NEXT_ROLE}
-    taskRef: task-\${NEXT_NAME}
-    model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
-  EOF
+  # Call spawn_agent() helper (handles atomic spawn gate + kro health check)
+  spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "\$NEXT_GEN"
 
 ② FIND AND FIX ONE PLATFORM IMPROVEMENT
   Read: manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
