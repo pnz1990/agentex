@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r3 (security: npm cache cleanup to remove false-positive PAT alerts; issue #897)
+# Image version: 2026-03-09-r4 (security: fix minimatch HIGH CVEs by upgrading to >=10.2.3; issue #658)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
@@ -40,16 +40,21 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
-# Fix npm bundled dependency CVEs (issue #858)
+# Fix npm bundled dependency CVEs (issue #858, issue #658)
 # npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
-# These bundled versions have HIGH CVEs: tar@7.4.3->7.5.10, minimatch@9.0.5->9.0.7, glob@10.4.5->10.5.0
+# HIGH CVEs fixed:
+#   tar: >=7.5.10 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
+#   minimatch: >=10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable, 10.2.3 is fixed)
+#     NOTE: constraint must be >=10.2.3 not >=9.0.7 because npm 11 resolves to v10.x series
+#     and 10.2.2 has HIGH CVEs; using >=9.0.7 installs 10.2.2 (latest matching), not 10.2.3
+#   glob: >=10.5.0 (CVE for glob <10.5.0)
 # Fix: upgrade npm itself (npm 11+ ships with patched bundled deps)
 # Also: upgrade specific vulnerable packages directly in npm's own node_modules
 RUN npm install -g npm@latest \
     && cd /usr/lib/node_modules/npm \
     && npm install --prefer-online \
         tar@">=7.5.10" \
-        minimatch@">=9.0.7" \
+        minimatch@">=10.2.3" \
         glob@">=10.5.0" \
     2>/dev/null || true \
     && npm cache clean --force \
