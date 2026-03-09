@@ -298,26 +298,29 @@ reconcile_spawn_slots() {
 tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs (generic governance engine)..."
 
-    # Read all thought ConfigMaps
-    local all_thoughts
-    # Use single jq invocation to avoid control-character parse errors from -r | jq -s pipeline.
-    # Thought content can contain literal newlines/control chars which break jq -s line parsing.
-    all_thoughts=$(kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
+    # Write thoughts to temp file to avoid shell variable expansion mangling content
+    local thoughts_file
+    thoughts_file=$(mktemp /tmp/agentex-thoughts-XXXXXX.json)
+    trap "rm -f '$thoughts_file'" RETURN
+
+    # Single jq invocation: collect all thoughts as array, strip control chars
+    kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
         | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
             agent: (.data.agentRef // "unknown"),
             content: ((.data.content // "") | gsub("[\\u0000-\\u001f]"; " ")),
             type: (.data.thoughtType // ""),
             ts: .metadata.creationTimestamp
-          }]' 2>/dev/null) || all_thoughts="[]"
+          }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
 
-    if [ "$all_thoughts" = "[]" ] || [ -z "$all_thoughts" ]; then
+    local thought_count
+    thought_count=$(jq 'length' "$thoughts_file" 2>/dev/null || echo 0)
+    if [ "$thought_count" -eq 0 ]; then
         return 0
     fi
 
     # Extract all unique proposal topics from #proposal-<topic> tags
     local topics
-    topics=$(echo "$all_thoughts" \
-        | jq -r '.[] | select(.type == "proposal") | .content' \
+    topics=$(jq -r '.[] | select(.type == "proposal") | .content' "$thoughts_file" \
         | grep -oE '#proposal-[a-zA-Z0-9_-]+' \
         | sed 's/#proposal-//' \
         | sort -u 2>/dev/null || true)
@@ -334,9 +337,8 @@ tally_and_enact_votes() {
         
         # Get most recent proposal for this topic
         local proposal_content
-        proposal_content=$(echo "$all_thoughts" \
-            | jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
-            | tail -1 || true)
+        proposal_content=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
+            "$thoughts_file" | tail -1 || true)
         
         [ -z "$proposal_content" ] && continue
 
@@ -346,19 +348,16 @@ tally_and_enact_votes() {
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
-        approve_votes=$(echo "$all_thoughts" \
-            | jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .agent" \
-            2>/dev/null | sort -u | wc -l | tr -d ' ')
+        approve_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .agent" \
+            "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 
         local reject_votes
-        reject_votes=$(echo "$all_thoughts" \
-            | jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"reject\")))) | .agent" \
-            2>/dev/null | sort -u | wc -l | tr -d ' ')
+        reject_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"reject\")))) | .agent" \
+            "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 
         local abstain_votes
-        abstain_votes=$(echo "$all_thoughts" \
-            | jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"abstain\")))) | .agent" \
-            2>/dev/null | sort -u | wc -l | tr -d ' ')
+        abstain_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"abstain\")))) | .agent" \
+            "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 
         echo "[$(date -u +%H:%M:%S)] Vote tally — $topic: approve=$approve_votes reject=$reject_votes abstain=$abstain_votes threshold=$VOTE_THRESHOLD"
         
