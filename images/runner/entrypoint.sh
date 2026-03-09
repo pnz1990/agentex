@@ -1471,6 +1471,18 @@ post_message "broadcast" "Starting: $TASK_TITLE" "status"
 post_thought "Task received: $TASK_TITLE. Beginning work." "observation" 8
 
 # ── 7. Clone repo ─────────────────────────────────────────────────────────────
+# Issue #6: Read GitHub token from read-only file mount instead of environment variable
+log "Configuring GitHub authentication..."
+if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
+  export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
+  log "GitHub token loaded from read-only file mount"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  log "GitHub token loaded from environment variable (legacy)"
+else
+  log "ERROR: No GitHub token available (neither GITHUB_TOKEN_FILE nor GITHUB_TOKEN set)"
+  exit 1
+fi
+
 log "Cloning repo..."
 gh auth setup-git
 mkdir -p "$WORKSPACE/repo"

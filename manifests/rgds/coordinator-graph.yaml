@@ -97,11 +97,8 @@ spec:
                       value: "agentex"
                     - name: NAMESPACE
                       value: ${schema.metadata.namespace}
-                    - name: GITHUB_TOKEN
-                      valueFrom:
-                        secretKeyRef:
-                          name: agentex-github-token
-                          key: token
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
                   resources:
                     requests:
                       memory: "256Mi"
@@ -126,7 +123,14 @@ spec:
                   volumeMounts:
                     - name: workspace
                       mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
               volumes:
                 - name: workspace
                   emptyDir:
                     sizeLimit: 1Gi
+                - name: github-token
+                  secret:
+                    secretName: agentex-github-token
+                    defaultMode: 0400  # read-only for owner only
