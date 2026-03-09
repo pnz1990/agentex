@@ -612,6 +612,20 @@ spawn_agent() {
     return 1
   fi
   
+  # RECOVERY MODE CHECK (issue #562): More conservative spawning after emergency events
+  # If system is in recovery mode (recent kill switch or instability), use lower threshold
+  if [ "${RECOVERY_MODE:-false}" = "true" ]; then
+    local recovery_threshold=$((CIRCUIT_BREAKER_LIMIT * 70 / 100))  # 70% of limit in recovery
+    if [ "$total_active" -ge "$recovery_threshold" ]; then
+      log "RECOVERY MODE: $total_active active jobs >= $recovery_threshold (70% of $CIRCUIT_BREAKER_LIMIT). BLOCKING spawn during recovery."
+      post_thought "Recovery mode: $total_active active jobs >= $recovery_threshold (70% threshold). Spawn blocked until system stabilizes." "blocker" 9
+      push_metric "RecoveryModeSpawnBlocked" 1
+      return 1
+    else
+      log "Recovery mode spawn check passed: $total_active < $recovery_threshold (70% threshold)"
+    fi
+  fi
+  
   # Calculate next generation number by reading current agent's generation label
   local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
@@ -775,6 +789,156 @@ EOF
   return 0
 }
 
+# post_recovery_health_check() - Validate system health after emergency events (issue #562)
+# Returns: 0 if healthy, 1 if unhealthy, sets RECOVERY_MODE=true if issues found
+# Exports: RECOVERY_MODE (true if recent kill switch activation or instability detected)
+post_recovery_health_check() {
+  log "Running post-recovery health check..."
+  
+  local health_score=10
+  local issues_found=()
+  local recommendations=()
+  
+  # Check 1: Kill switch recently activated?
+  local killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  
+  if [ "$killswitch_enabled" = "true" ]; then
+    health_score=$((health_score - 3))
+    issues_found+=("Kill switch is ACTIVE")
+    recommendations+=("System is in emergency stop mode. Do not spawn successors.")
+  fi
+  
+  # Check 2: Active job count stable?
+  local active_jobs_1=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+  
+  log "Health check: first count = $active_jobs_1 active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
+  
+  # Wait 30s and check again for stability
+  sleep 30
+  
+  local active_jobs_2=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+  
+  log "Health check: second count = $active_jobs_2 active jobs (after 30s)"
+  
+  # Check if count is trending down (good) or up (bad)
+  local job_delta=$((active_jobs_2 - active_jobs_1))
+  
+  if [ "$active_jobs_2" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+    health_score=$((health_score - 4))
+    issues_found+=("Active jobs ($active_jobs_2) >= circuit breaker limit ($CIRCUIT_BREAKER_LIMIT)")
+    recommendations+=("System overloaded. Wait for jobs to complete before resuming spawns.")
+  elif [ "$job_delta" -gt 3 ]; then
+    health_score=$((health_score - 2))
+    issues_found+=("Active job count increasing rapidly (+$job_delta in 30s)")
+    recommendations+=("Possible proliferation event in progress. Monitor closely.")
+  fi
+  
+  # Check 3: Ghost Agent CRs without Jobs?
+  local ghost_agents=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq -r '.items[] | select(.status.jobName == null or .status.jobName == "") | .metadata.name' 2>/dev/null || echo "")
+  
+  local ghost_count=$(echo "$ghost_agents" | grep -c . || echo "0")
+  
+  if [ "$ghost_count" -gt 5 ]; then
+    health_score=$((health_score - 2))
+    issues_found+=("Found $ghost_count Agent CRs without Jobs (kro may be failing)")
+    recommendations+=("Investigate kro health. Check logs: kubectl logs -n kro-system -l app.kubernetes.io/name=kro")
+  fi
+  
+  # Check 4: Jobs stuck in pending state?
+  local pending_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.active == 0 and .status.succeeded == 0 and .status.failed == 0)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$pending_jobs" -gt 10 ]; then
+    health_score=$((health_score - 2))
+    issues_found+=("Found $pending_jobs jobs in pending state (may be resource constrained)")
+    recommendations+=("Check cluster resources: kubectl top nodes; kubectl describe nodes | grep -A5 Allocated")
+  fi
+  
+  # Check 5: Recent failed jobs?
+  local failed_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.failed > 0)] | length' 2>/dev/null || echo "0")
+  
+  if [ "$failed_jobs" -gt 10 ]; then
+    health_score=$((health_score - 1))
+    issues_found+=("Found $failed_jobs failed jobs")
+    recommendations+=("Investigate failure patterns: kubectl get jobs -n agentex | grep -v Complete")
+  fi
+  
+  # Generate health report
+  log "=== POST-RECOVERY HEALTH CHECK ==="
+  log "Health Score: $health_score/10"
+  log "Active Jobs: $active_jobs_2 (limit: $CIRCUIT_BREAKER_LIMIT, trend: ${job_delta:+0})"
+  log "Kill Switch: $killswitch_enabled"
+  log "Ghost Agents: $ghost_count"
+  log "Pending Jobs: $pending_jobs"
+  log "Failed Jobs: $failed_jobs"
+  
+  if [ ${#issues_found[@]} -gt 0 ]; then
+    log "Issues Found:"
+    for issue in "${issues_found[@]}"; do
+      log "  - $issue"
+    done
+    log "Recommendations:"
+    for rec in "${recommendations[@]}"; do
+      log "  - $rec"
+    done
+  else
+    log "✓ System healthy - no issues detected"
+  fi
+  log "=================================="
+  
+  # Set RECOVERY_MODE if health score is low or kill switch active
+  if [ "$health_score" -lt 7 ] || [ "$killswitch_enabled" = "true" ]; then
+    export RECOVERY_MODE=true
+    log "RECOVERY_MODE enabled due to health score $health_score or kill switch"
+  else
+    export RECOVERY_MODE=false
+  fi
+  
+  # Post health check result as Thought CR
+  local health_content="Post-recovery health check completed.
+Health Score: $health_score/10
+Active Jobs: $active_jobs_2 (limit: $CIRCUIT_BREAKER_LIMIT)
+Kill Switch: $killswitch_enabled
+Recovery Mode: $RECOVERY_MODE
+
+$(if [ ${#issues_found[@]} -gt 0 ]; then
+  echo "Issues:"
+  for issue in "${issues_found[@]}"; do
+    echo "  - $issue"
+  done
+fi)
+
+$(if [ ${#recommendations[@]} -gt 0 ]; then
+  echo "Recommendations:"
+  for rec in "${recommendations[@]}"; do
+    echo "  - $rec"
+  done
+fi)"
+  
+  post_thought "$health_content" "observation" "$health_score"
+  
+  # Push health score metric
+  aws cloudwatch put-metric-data \
+    --namespace Agentex \
+    --metric-name RecoveryHealthScore \
+    --value "$health_score" \
+    --unit None \
+    --dimensions Agent="${AGENT_NAME}",Role="${AGENT_ROLE}" \
+    --region "${BEDROCK_REGION}" 2>/dev/null || true
+  
+  # Return 0 if healthy, 1 if unhealthy
+  if [ "$health_score" -ge 7 ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # ── 3. Announce startup ───────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
 push_metric "AgentRun" 1
@@ -841,6 +1005,32 @@ if [ "$STARTUP_ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
 fi
 
 log "Circuit breaker check passed at startup: $STARTUP_ACTIVE_JOBS active jobs < $CIRCUIT_BREAKER_LIMIT limit"
+
+# ── 3.7. Post-recovery health check (issue #562) ───────────────────────────────
+# If kill switch was recently activated OR active job count is high (soft breaker),
+# run comprehensive health check to validate system recovery.
+# This helps agents make informed decisions about spawning successors.
+KILLSWITCH_ENABLED=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+  -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+
+# Run health check if:
+# 1. Kill switch is currently active, OR
+# 2. Active jobs > 80% of circuit breaker limit (soft warning threshold)
+SOFT_BREAKER_THRESHOLD=$((CIRCUIT_BREAKER_LIMIT * 80 / 100))
+
+if [ "$KILLSWITCH_ENABLED" = "true" ] || [ "$STARTUP_ACTIVE_JOBS" -ge "$SOFT_BREAKER_THRESHOLD" ]; then
+  log "Post-recovery health check triggered (killswitch=$KILLSWITCH_ENABLED, jobs=$STARTUP_ACTIVE_JOBS, soft_threshold=$SOFT_BREAKER_THRESHOLD)"
+  
+  # Run health check (sets RECOVERY_MODE env var)
+  if post_recovery_health_check; then
+    log "Health check PASSED: system is stable"
+  else
+    log "Health check FAILED: system has issues (see health report)"
+  fi
+else
+  log "Skipping post-recovery health check (system appears normal)"
+  export RECOVERY_MODE=false
+fi
 
 # ── 3.7. Register with coordinator ───────────────────────────────────────────
 # Announce this agent's presence so the coordinator knows who is active.
