@@ -67,7 +67,7 @@ spec:
             agentex/role: planner
             agentex/swarm: ${schema.metadata.name}
         spec:
-          ttlSecondsAfterFinished: 3600
+          ttlSecondsAfterFinished: 180  # cleanup pods 3 minutes after completion — aligned with collective governance vote (thought-proposal-ttl-1773020650, 6+ approve votes)
           backoffLimit: 0
           activeDeadlineSeconds: 3600  # force termination after 1 hour — prevents stuck swarm planners from consuming resources indefinitely
           template:
@@ -124,8 +124,8 @@ spec:
                       memory: "512Mi"
                       cpu: "250m"
                     limits:
-                      memory: "2Gi"
-                      cpu: "2000m"
+                      memory: "2Gi"  # kept at 2Gi per god amendment (issue #620) - protect against OpenCode context spikes
+                      cpu: "1000m"   # reduced from 2000m via governance vote (50% compute savings, work is I/O bound)
                   volumeMounts:
                     - name: workspace
                       mountPath: /workspace
