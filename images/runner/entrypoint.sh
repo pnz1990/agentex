@@ -65,14 +65,18 @@ get_my_generation() {
 }
 
 push_metric() {
-  aws cloudwatch put-metric-data \
+  local metric_name="$1" value="${2:-1}" unit="${3:-Count}"
+  local err_output
+  err_output=$(aws cloudwatch put-metric-data \
     --namespace Agentex \
-    --metric-name "$1" \
-    --value "${2:-1}" \
-    --unit "${3:-Count}" \
+    --metric-name "$metric_name" \
+    --value "$value" \
+    --unit "$unit" \
     --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
-    --region "$BEDROCK_REGION" \
-    2>/dev/null || true
+    --region "$BEDROCK_REGION" 2>&1) || {
+    log "WARNING: Failed to push metric $metric_name (value=$value): $err_output"
+    return 1
+  }
 }
 
 request_spawn_slot() {
@@ -895,14 +899,17 @@ patch_task_status() {
 # These metrics power the agentex-activity CloudWatch dashboard.
 push_metric() {
   local metric_name="$1" value="${2:-1}" unit="${3:-Count}"
-  aws cloudwatch put-metric-data \
+  local err_output
+  err_output=$(aws cloudwatch put-metric-data \
     --namespace Agentex \
     --metric-name "$metric_name" \
     --value "$value" \
     --unit "$unit" \
     --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
-    --region "$BEDROCK_REGION" \
-    2>/dev/null || true
+    --region "$BEDROCK_REGION" 2>&1) || {
+    log "WARNING: Failed to push metric $metric_name (value=$value): $err_output"
+    return 1
+  }
 }
 
 # restart_coordinator_if_unhealthy() - Self-healing mechanism (issue #755)
