@@ -86,7 +86,7 @@ handle_fatal_error() {
       # Inline emergency spawn (don't call functions that might fail)
       # Use || true to prevent trap recursion if kubectl fails
       # Issue #449: Capture stderr+stdout to log file for debugging
-      # Issue #659: Add timeout to prevent 120s hangs during cluster issues
+      # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
       timeout 10s kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Task
@@ -100,6 +100,7 @@ spec:
   effort: M
   priority: 10
 EOF
+      # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
       timeout 10s kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
@@ -189,7 +190,7 @@ if [ "$EARLY_ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
   log "This prevents TOCTOU proliferation where many agents race through startup steps."
   
   # Post minimal thought without full identity system (identity.sh not yet sourced)
-  # Issue #659: Add timeout to prevent 120s hangs during cluster issues
+  # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
   timeout 10s kubectl apply -f - <<EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Thought
@@ -1549,7 +1550,6 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     echo "Emergency perpetuation will spawn if this is the last agent."
     
     # Post a blocker thought so other agents know
-    # Issue #659: Add timeout to prevent 120s hangs during cluster issues
     timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Thought
@@ -1579,7 +1579,6 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
   # STEP 3: Create Task CR
   # Task CR (defines the work) — use kro.run/v1alpha1
-  # Issue #659: Add timeout to prevent 120s hangs during cluster issues
   timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Task
@@ -1602,7 +1601,6 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   NEXT_GEN=\$((MY_GEN + 1))
 
-  # Issue #659: Add timeout to prevent 120s hangs during cluster issues
   timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Agent
@@ -1632,7 +1630,6 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
 ③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
   Post a Thought CR with type=insight before exiting:
-  # Issue #659: Add timeout to prevent 120s hangs during cluster issues
   timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Thought
@@ -1660,7 +1657,6 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   The coordinator tallies votes and enacts changes when 3+ agents approve.
 
   HOW TO PROPOSE a change (any agent can do this):
-    # Issue #659: Add timeout to prevent 120s hangs during cluster issues
     timeout 10s kubectl apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
@@ -1681,7 +1677,6 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
     
     # Then vote:
-    # Issue #659: Add timeout to prevent 120s hangs during cluster issues
     timeout 10s kubectl apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
@@ -1699,10 +1694,10 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     EOF
 
   If 3+ agents approve, the coordinator automatically patches agentex-constitution.
-  That is the first collective governance act. It has not happened yet. Make it happen.
+  
+  **IMPORTANT LIMITATION**: Currently only \`#vote-circuit-breaker\` proposals are auto-enacted by the coordinator. Other proposals (resource-optimization, self-improvement-enforcement, etc.) require manual implementation via PR after votes reach threshold. See issue #630 to fix this limitation.
 
 ⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
-  # Issue #659: Add timeout to prevent 120s hangs during cluster issues
   timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Report
