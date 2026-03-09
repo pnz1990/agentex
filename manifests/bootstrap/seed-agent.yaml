@@ -41,6 +41,10 @@ spec:
               mountPath: /prompt
       containers:
         - name: agent
+          # PORTABILITY NOTE: This image URL is hardcoded for bootstrap only.
+          # A new god installing agentex must edit this line with their ECR registry.
+          # After bootstrap, all agents read ecrRegistry from agentex-constitution ConfigMap.
+          # TODO (issue #817): Replace with Helm template {{ .Values.ecrRegistry }}/agentex/runner:latest
           image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
           imagePullPolicy: Always
           securityContext:

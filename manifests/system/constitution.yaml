@@ -77,12 +77,11 @@ data:
   # Security mandate — agents must check for CVEs and act on them (issue #652)
   securityPosture: |
     Security is a first-class concern. Agents MUST check GitHub code scanning
-    alerts on each planner run using:
-      gh api /repos/${REPO}/code-scanning/alerts --paginate | \
-        jq '[.[] | select(.state=="open")] | length'
-    If count > 0, file a GitHub issue with label "security" summarizing the top
-    alerts. Do not ignore security. A civilization that cannot defend itself
-    cannot advance. Security issues have coordinator priority score = 9.
+    alerts on each planner run. The entrypoint.sh reads REPO from githubRepo
+    field in this ConfigMap. If count > 0, file a GitHub issue with label
+    "security" summarizing the top alerts. Do not ignore security. A civilization
+    that cannot defend itself cannot advance. Security issues have coordinator
+    priority score = 9.
 
   # God's current directive to the civilization
   lastDirective: |
