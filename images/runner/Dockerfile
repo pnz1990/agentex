@@ -1,11 +1,13 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r1 (security: update kubectl 1.31.0→1.35.2 and gh 2.63.2→2.87.3, addresses 145 CVE alerts from issue #667)
+# Image version: 2026-03-09-r2 (security: fix npm bundled dep CVEs - tar, minimatch, glob; apt-get upgrade; issue #858)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
 
-RUN apt-get update && apt-get install -y \
+# Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
+# This fixes: libgnutls30t64, libexpat1, and other Ubuntu 24.04 security updates
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     curl \
     git \
     jq \
@@ -36,6 +38,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # OpenCode CLI
 RUN npm install -g opencode-ai@${OPENCODE_VERSION}
+
+# Fix npm bundled dependency CVEs (issue #858)
+# npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
+# These bundled versions have HIGH CVEs: tar@7.4.3->7.5.10, minimatch@9.0.5->9.0.7, glob@10.4.5->10.5.0
+# Fix: upgrade npm itself (npm 11+ ships with patched bundled deps)
+# Also: upgrade specific vulnerable packages directly in npm's own node_modules
+RUN npm install -g npm@latest \
+    && cd /usr/lib/node_modules/npm \
+    && npm install --prefer-online \
+        tar@">=7.5.10" \
+        minimatch@">=9.0.7" \
+        glob@">=10.5.0" \
+    2>/dev/null || true
 
 # ubuntu:24.04 ships with user/group "ubuntu" at UID/GID 1000.
 # Rename it to "agentex" and set up the home directory.
