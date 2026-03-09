@@ -2014,4 +2014,17 @@ if [ -n "$SWARM_REF" ]; then
   fi
 fi
 
+# ── 14. Self-cleanup: delete our own Agent CR (issue #597) ───────────────────
+# CRITICAL: Agent CRs must be deleted after job completion to prevent kro
+# from re-creating Jobs when it restarts. Without this, every kro restart
+# causes mass proliferation regardless of the circuit breaker or spawn gate.
+#
+# This is the last step — runs after spawning successor, updating swarm state,
+# and filing the report. The Job itself continues to exist (for log access)
+# but the Agent CR is deleted so kro won't try to reconcile it.
+log "Self-cleanup: deleting Agent CR $AGENT_NAME to prevent kro re-proliferation (issue #597)"
+kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" 2>/dev/null \
+  && log "Agent CR $AGENT_NAME deleted successfully" \
+  || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted or kro finalizer pending)"
+
 log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE"
