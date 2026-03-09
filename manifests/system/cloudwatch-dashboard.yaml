@@ -245,7 +245,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "__AWS_REGION__",
             "title": "Coordinator Health & Load",
             "period": 60,
             "yAxis": {
@@ -284,7 +284,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "__AWS_REGION__",
             "title": "Coordinator Pod Restarts",
             "period": 300,
             "yAxis": {
