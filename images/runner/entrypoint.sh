@@ -611,21 +611,18 @@ write_planning_state() {
   local n2_priority="$6"
   local blockers="${7:-none}"
   
-  # Create JSON planning document
+  # Create JSON planning document with jq (safe escaping of special chars)
   local plan
-  plan=$(cat <<EOF
-{
-  "role": "${role}",
-  "agent": "${agent}",
-  "generation": ${generation},
-  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "myWork": "${my_work}",
-  "n1Priority": "${n1_priority}",
-  "n2Priority": "${n2_priority}",
-  "blockers": "${blockers}"
-}
-EOF
-)
+  plan=$(jq -n \
+    --arg role "$role" \
+    --arg agent "$agent" \
+    --argjson generation "$generation" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg myWork "$my_work" \
+    --arg n1Priority "$n1_priority" \
+    --arg n2Priority "$n2_priority" \
+    --arg blockers "$blockers" \
+    '{role: $role, agent: $agent, generation: $generation, timestamp: $timestamp, myWork: $myWork, n1Priority: $n1Priority, n2Priority: $n2Priority, blockers: $blockers}')
   
   # Write to S3 with agent-specific filename
   local s3_output
