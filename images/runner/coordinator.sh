@@ -260,6 +260,44 @@ cleanup_stale_assignments() {
     [ $stale_count -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Cleaned $stale_count stale assignments"
 }
 
+# Cleanup activeAgents list - remove agents whose Jobs have completed (issue #676)
+# Agents register themselves on startup but never deregister on exit.
+# This causes activeAgents to accumulate stale entries over time.
+# This function removes agents whose Jobs are completed or missing.
+cleanup_active_agents() {
+    local current_agents
+    current_agents=$(get_state "activeAgents")
+    [ -z "$current_agents" ] && return
+
+    local cleaned_agents=""
+    local removed_count=0
+
+    IFS=',' read -ra agent_pairs <<< "$current_agents"
+    for pair in "${agent_pairs[@]}"; do
+        [ -z "$pair" ] && continue
+        local agent_name="${pair%%:*}"
+        
+        # Check if Job still active (exists and no completionTime)
+        local job_active
+        job_active=$(kubectl get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
+            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
+            || echo "false")
+        
+        if [ "$job_active" = "true" ]; then
+            [ -n "$cleaned_agents" ] \
+                && cleaned_agents="${cleaned_agents},${pair}" \
+                || cleaned_agents="$pair"
+        else
+            removed_count=$((removed_count + 1))
+        fi
+    done
+
+    if [ $removed_count -gt 0 ]; then
+        update_state "activeAgents" "$cleaned_agents"
+        echo "[$(date -u +%H:%M:%S)] Cleaned $removed_count stale agents from activeAgents list"
+    fi
+}
+
 # Reconcile spawnSlots against actual running job count (leak recovery)
 # If agents crash before releasing slots, spawnSlots drifts low.
 # This function resets spawnSlots = max(0, circuitBreakerLimit - activeJobs).
@@ -550,6 +588,12 @@ while true; do
 
     # Every iteration: cleanup stale assignments
     cleanup_stale_assignments
+
+    # Every 4 iterations (~2 min): cleanup stale activeAgents entries (issue #676)
+    # Agents register on startup but never deregister, causing activeAgents to accumulate
+    if [ $((iteration % 4)) -eq 0 ]; then
+        cleanup_active_agents
+    fi
 
     # Every 4 iterations (~2 min): reconcile spawn slots against actual job count
     # This recovers leaked slots when agents crash before releasing them
