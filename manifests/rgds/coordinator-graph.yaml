@@ -14,8 +14,6 @@ spec:
       clusterName: string | default="agentex"
     status:
       configMapName: ${coordinatorState.metadata.name}
-      phase: ${coordinatorState.data.phase}
-      lastHeartbeat: ${coordinatorState.data.lastHeartbeat}
       deploymentName: ${coordinatorDeployment.metadata.name}
   resources:
     # ── State ConfigMap ──────────────────────────────────────────────────────
@@ -31,15 +29,14 @@ spec:
           labels:
             agentex/component: coordinator
         data:
-          phase: "Initializing"
-          taskQueue: ""
-          activeAssignments: ""
-          decisionLog: ""
-          lastHeartbeat: ""
-          voteRegistry: ""
-          consensusResults: ""
-          enactedDecisions: ""
-          # spawnSlots is NOT in this template — managed at runtime by coordinator.sh
+          # NOTE: Only static/bootstrapping fields here.
+          # Dynamic runtime fields (taskQueue, activeAssignments, decisionLog,
+          # lastHeartbeat, voteRegistry, consensusResults, enactedDecisions,
+          # spawnSlots, phase) are managed exclusively by coordinator.sh at
+          # runtime. Do NOT add them here — kro would reset them on every
+          # reconciliation cycle (~30s), wiping coordinator runtime state.
+          # See issue #924 for root cause analysis.
+          bootstrapped: "true"
 
     # ── Coordinator Deployment ───────────────────────────────────────────────
     # Long-running Pod that maintains civilization state and coordinates agents
