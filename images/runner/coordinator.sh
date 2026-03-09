@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════
 # COORDINATOR — The Civilization's Persistent Brain
