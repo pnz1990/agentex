@@ -36,7 +36,7 @@ spec:
           voteRegistry: ""
           consensusResults: ""
           enactedDecisions: ""
-          spawnSlots: "12"  # Default value - coordinator updates from constitution circuitBreakerLimit
+          spawnSlots: ""  # Managed at runtime by coordinator; empty triggers coordinator to reconcile on startup
 
     # ── Coordinator Deployment ───────────────────────────────────────────────
     # Long-running Pod that maintains civilization state and coordinates agents
