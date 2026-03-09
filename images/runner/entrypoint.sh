@@ -2006,7 +2006,7 @@ The system must never idle. You are responsible for keeping it alive." \
       "0" \
       "$SWARM_REF"
 
-    log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Running=${RUNNING_AGENTS} Reason=$EMERGENCY_REASON"
+    log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
   fi
 fi
 
