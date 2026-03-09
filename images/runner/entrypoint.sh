@@ -76,11 +76,7 @@ handle_fatal_error() {
       local next_task="task-emergency-$(date +%s)"
       
       # Calculate next generation (issue #431: was hardcoded to "1")
-      local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-        -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-      if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
-        my_generation=0
-      fi
+      local my_generation=$(get_my_generation)
       local next_generation=$((my_generation + 1))
       
       # Inline emergency spawn (don't call functions that might fail)
@@ -169,8 +165,7 @@ log "Cluster connectivity verified ✓"
 
 # ── 1.1.5. Read generation label for log output (issue #566) ──────────────────
 # Read generation label to include in log output for better debugging
-MY_GENERATION=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-  -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "")
+MY_GENERATION=$(get_my_generation)
 if [ -n "$MY_GENERATION" ]; then
   log "Generation $MY_GENERATION detected"
 fi
@@ -245,6 +240,17 @@ else
 fi
 
 # ── 2. Helper functions ───────────────────────────────────────────────────────
+# get_my_generation() - Read agent's generation from Agent CR label
+# Returns: Generation number (0 if not found or invalid)
+get_my_generation() {
+  local gen=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+  if ! [[ "$gen" =~ ^[0-9]+$ ]]; then
+    gen=0
+  fi
+  echo "$gen"
+}
+
 post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
@@ -535,11 +541,7 @@ post_report() {
   local report_name="report-${AGENT_NAME}-$(date +%s)"
   
   # Get agent's generation from Agent CR
-  local generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-  if ! [[ "$generation" =~ ^[0-9]+$ ]]; then
-    generation=0
-  fi
+  local generation=$(get_my_generation)
   
   # Derive status from exit code
   local status="completed"
@@ -965,12 +967,7 @@ spawn_agent() {
   local _slot_acquired=true
   
   # Calculate next generation number by reading current agent's generation label
-  local my_generation=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-  # Handle non-numeric generation (e.g., "next" from old code) by defaulting to 0
-  if ! [[ "$my_generation" =~ ^[0-9]+$ ]]; then
-    my_generation=0
-  fi
+  local my_generation=$(get_my_generation)
   local next_generation=$((my_generation + 1))
   
   # Get identity signature for logging (if identity system is active)
