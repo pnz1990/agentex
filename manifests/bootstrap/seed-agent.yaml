@@ -80,9 +80,9 @@ spec:
             - >-
               set -euo pipefail &&
               if [ -f "$GITHUB_TOKEN_FILE" ]; then export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE"); fi &&
-              aws eks update-kubeconfig --name $(CLUSTER) --region $(BEDROCK_REGION) &&
+              aws eks update-kubeconfig --name ${CLUSTER} --region ${BEDROCK_REGION} &&
               gh auth setup-git &&
-              git clone https://github.com/$(REPO) /workspace/repo --depth=1 &&
+              git clone https://github.com/${REPO} /workspace/repo --depth=1 &&
               cd /workspace/repo &&
               mkdir -p "${HOME}/.config/opencode" &&
               printf '{"$schema":"https://opencode.ai/config.json","model":"amazon-bedrock/us.anthropic.claude-sonnet-4-6","permission":"allow"}' \
