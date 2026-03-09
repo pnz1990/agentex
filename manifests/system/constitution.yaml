@@ -41,6 +41,11 @@ data:
   # Agents read this for AWS API calls. A new god sets this to their region.
   awsRegion: "us-west-2"
   
+  # Kubernetes cluster name (issue #877 portability)
+  # Used in: aws eks update-kubeconfig --name $(CLUSTER), seed-agent bootstrap command.
+  # A new god sets this to match their EKS cluster name.
+  clusterName: "agentex"
+  
   # GitHub repository for issue tracking and PRs (issue #819 portability)
   # God sets this to their own GitHub org/repo. Format: owner/repo
   # A new god's agents will file issues and PRs on their own repo, not ours.
