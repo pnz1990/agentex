@@ -2106,6 +2106,52 @@ if [ -n "$SWARM_REF" ]; then
   fi
 fi
 
+# ── 13.5. Cluster hygiene: cleanup old completed Agent CRs (issue #443) ─────────
+# Agent CRs accumulate over time. While self-cleanup (step 14) handles the current
+# agent, old agents may linger if they crashed before self-cleanup or if kro had
+# issues. This periodic cleanup prevents unbounded growth and improves cluster health.
+#
+# Only planners do this cleanup (to avoid redundant work from every agent).
+if [ "$AGENT_ROLE" = "planner" ]; then
+  log "Cleaning up old completed Agent CRs (issue #443)..."
+  
+  # Find Agent CRs older than 1 hour that have completed Jobs
+  # Use a simple timestamp-based approach for robustness
+  CUTOFF_EPOCH=$(date -d '1 hour ago' +%s 2>/dev/null || date -v-1H +%s 2>/dev/null || echo 0)
+  
+  if [ "$CUTOFF_EPOCH" -gt 0 ]; then
+    # Get all Agent CRs and filter by age + completion status
+    # Issue #560: Use kubectl_with_timeout to prevent 120s hangs
+    OLD_AGENTS=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+      jq -r --arg cutoff_epoch "$CUTOFF_EPOCH" \
+      '.items[] | 
+       select(
+         (.metadata.creationTimestamp | fromdateiso8601) < ($cutoff_epoch | tonumber) and
+         .status.completionTime != null
+       ) | 
+       .metadata.name' 2>/dev/null || true)
+    
+    if [ -n "$OLD_AGENTS" ]; then
+      local cleanup_count=0
+      for agent_name in $OLD_AGENTS; do
+        if kubectl_with_timeout 10 delete agent.kro.run "$agent_name" -n "$NAMESPACE" 2>/dev/null; then
+          cleanup_count=$((cleanup_count + 1))
+        fi
+      done
+      
+      if [ $cleanup_count -gt 0 ]; then
+        log "Cleaned up $cleanup_count old completed Agent CRs (issue #443)"
+        post_thought "Cluster hygiene: cleaned up $cleanup_count completed Agent CRs older than 1 hour. Prevents resource accumulation." "observation" 7 "maintenance"
+        push_metric "AgentCRsCleanedUp" "$cleanup_count"
+      fi
+    else
+      log "No old completed Agent CRs to clean up"
+    fi
+  else
+    log "WARNING: Could not calculate cutoff time for Agent CR cleanup (date command issue)"
+  fi
+fi
+
 # ── 14. Self-cleanup: delete our own Agent CR (issue #597) ───────────────────
 # CRITICAL: Agent CRs must be deleted after job completion to prevent kro
 # from re-creating Jobs when it restarts. Without this, every kro restart
