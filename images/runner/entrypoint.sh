@@ -1859,6 +1859,33 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
 
+# ── 5a. Predecessor Planning State (Generation 3 coordination) ─────────────────
+# Generation 3: Agents read their predecessor's N+2 plan and prioritize that work.
+# This enables multi-generation coordination — each agent can see what work was
+# planned for them by the previous agent in their role.
+# Location: s3://agentex-thoughts/planning/${AGENT_ROLE}-plan-*.json
+PREDECESSOR_PLAN=""
+PREDECESSOR_N2_PRIORITY=""
+log "Reading predecessor planning state for role ${AGENT_ROLE}..."
+if PREDECESSOR_PLAN_JSON=$(read_planning_state "$AGENT_ROLE" 2>/dev/null); then
+  if [ -n "$PREDECESSOR_PLAN_JSON" ] && [ "$PREDECESSOR_PLAN_JSON" != "{}" ]; then
+    PREDECESSOR_PLAN="$PREDECESSOR_PLAN_JSON"
+    PREDECESSOR_N2_PRIORITY=$(echo "$PREDECESSOR_PLAN" | jq -r '.n2Priority // ""' 2>/dev/null || echo "")
+    
+    if [ -n "$PREDECESSOR_N2_PRIORITY" ] && [ "$PREDECESSOR_N2_PRIORITY" != "null" ] && [ "$PREDECESSOR_N2_PRIORITY" != "none" ]; then
+      log "✓ Predecessor planned for me (N+2): $PREDECESSOR_N2_PRIORITY"
+      # Export for OpenCode prompt visibility
+      export PREDECESSOR_N2_PRIORITY
+    else
+      log "Predecessor plan exists but no N+2 priority set"
+    fi
+  else
+    log "No predecessor plan found for role $AGENT_ROLE (first agent in role or S3 empty)"
+  fi
+else
+  log "WARNING: Failed to read predecessor planning state (S3 may be unavailable)"
+fi
+
 # ── 5b. Civilization Chronicle (permanent historical memory) ──────────────────
 # The chronicle is the civilization's long-term memory. It records what was
 # learned, what mistakes were made, and what milestones were reached.
@@ -1996,6 +2023,22 @@ PEER_BLOCK=""
 [ -n "$PEER_THOUGHTS" ] && PEER_BLOCK="=== PEER THOUGHTS ===
 ${PEER_THOUGHTS}
 ====================="
+
+# Generation 3: Include predecessor plan in prompt if exists
+PREDECESSOR_BLOCK=""
+if [ -n "$PREDECESSOR_N2_PRIORITY" ] && [ "$PREDECESSOR_N2_PRIORITY" != "null" ] && [ "$PREDECESSOR_N2_PRIORITY" != "none" ]; then
+  PREDECESSOR_BLOCK="
+═══════════════════════════════════════════════════════
+PREDECESSOR PLAN (Generation 3 coordination)
+═══════════════════════════════════════════════════════
+Your predecessor (previous $AGENT_ROLE) planned for YOU (N+2) to:
+
+  $PREDECESSOR_N2_PRIORITY
+
+This is multi-generation coordination. Your predecessor reasoned 3 steps ahead
+and identified work for you to prioritize. Consider this when choosing tasks.
+═══════════════════════════════════════════════════════"
+fi
 
 # The perpetuation manifest embedded in every prompt.
 # This is how the loop carries itself forward through every generation.
@@ -2249,6 +2292,8 @@ ${COORDINATOR_CONTEXT}
 ${INBOX_MESSAGES}
 
 ${PEER_BLOCK}
+
+${PREDECESSOR_BLOCK}
 
 ═══════════════════════════════════════════════════════
 COORDINATOR STATE (read this before picking tasks)
