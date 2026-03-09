@@ -19,7 +19,7 @@ spec:
   resources:
     # ── Planner Loop Deployment ──────────────────────────────────────────────
     # Long-running Pod that spawns planner Jobs with generational identity.
-    # This is the civilization's heartbeat — it must never stop.
+    # Eliminates planner chain breaks and TOCTOU races (issue #867).
     - id: plannerLoopDeployment
       readyWhen:
         - ${plannerLoopDeployment.status.availableReplicas == 1}
@@ -57,7 +57,7 @@ spec:
               containers:
                 - name: planner-loop
                   image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
-                  imagePullPolicy: Always
+                  imagePullPolicy: {{ .Values.image.pullPolicy }}
                   command: ["/bin/bash", "/usr/local/bin/planner-loop.sh"]
                   securityContext:
                     allowPrivilegeEscalation: false
