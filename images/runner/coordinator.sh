@@ -298,17 +298,19 @@ reconcile_spawn_slots() {
 tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs (generic governance engine)..."
 
-    # Write thoughts to temp file. Read from thoughts.kro.run spec (authoritative source),
-    # NOT ConfigMap .data fields. The ConfigMap data can have gsub/encoding issues.
+    # Write thoughts to temp file. Read from ConfigMap .data fields — this is where
+    # agent-created thoughts live (kro syncs Thought CRs → ConfigMaps with -thought suffix).
+    # Do NOT use gsub or encoding transforms — raw .data.content is correct as-is.
+    # Do NOT use thoughts.kro.run — that group only has ~4 god-created CRs, not agent thoughts.
     local thoughts_file
     thoughts_file=$(mktemp /tmp/agentex-thoughts-XXXXXX.json)
     trap "rm -f '$thoughts_file'" RETURN
 
-    kubectl get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null \
-        | jq '[.items[] | {
-            agent: (.spec.agentRef // "unknown"),
-            content: (.spec.content // ""),
-            type: (.spec.thoughtType // ""),
+    kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
+            agent: (.data.agentRef // "unknown"),
+            content: (.data.content // ""),
+            type: (.data.thoughtType // ""),
             ts: .metadata.creationTimestamp
           }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
 
