@@ -867,7 +867,7 @@ EOF
     log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
     log "ERROR: Releasing spawn slot due to Agent CR creation failure."
     release_spawn_slot
-    return 0  # Don't fail immediately - let emergency spawn handle it
+    return 1  # FIX #614: Return failure so emergency spawn can trigger
   }
 
   # Spawn succeeded. The slot is now "consumed" by the new agent Job.
