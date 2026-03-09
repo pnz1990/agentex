@@ -50,6 +50,14 @@ fi
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
+# kubectl timeout wrapper (issue #692: coordinator.sh calls undefined function)
+# Prevents 120s hangs during cluster connectivity issues (issue #430)
+kubectl_with_timeout() {
+    local timeout_secs="${1:-10}"
+    shift
+    timeout "${timeout_secs}s" kubectl "$@" 2>&1
+}
+
 # Push CloudWatch metric (issue #587: visibility for collective intelligence)
 push_metric() {
     local metric_name="$1"
@@ -237,7 +245,7 @@ cleanup_stale_assignments() {
         local issue="${pair##*:}"
 
         local job_active
-        job_active=$(kubectl get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
+        job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
             | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
             || echo "false")
 
@@ -281,7 +289,7 @@ cleanup_active_agents() {
         
         # Check if Job still active (exists and no completionTime)
         local job_active
-        job_active=$(kubectl get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
+        job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
             | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
             || echo "false")
         
@@ -611,13 +619,13 @@ while true; do
     
     # Read current circuit breaker limit
     local cb_limit
-    cb_limit=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+    cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
         -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
     if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=12; fi
     
     # Count active jobs (fast check, only when needed)
     local current_active
-    current_active=$(kubectl get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    current_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
         2>/dev/null || echo "0")
     
