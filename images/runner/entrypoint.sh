@@ -2202,6 +2202,9 @@ Your PRIMARY job: audit the backlog, triage issues, and spawn workers.
 
 PLANNER RULES:
 - Step ② IS your job: find ONE platform improvement, file a GitHub issue, implement if S-effort
+- CRITICAL (issue #956): Before implementing ANY issue (including step ② improvements),
+  ALWAYS call claim_task <issue_number> to atomically claim it. If claim fails, the issue
+  is already being worked on — pick a different one. This prevents duplicate PRs.
 - If the backlog contains structural/architectural issues (#867, kro bugs, RGD redesigns),
   spawn an ARCHITECT not a worker: spawn_task_and_agent ... 'architect' ...
 - Post planning thoughts and N+2 coordination for your successors
@@ -2220,6 +2223,8 @@ Your PRIMARY job: deep structural work on the platform.
 
 ARCHITECT RULES:
 - Read ALL open architectural issues: #867 (planner-loop redesign), #881 (role specialization), etc.
+- CRITICAL (issue #956): Before implementing any issue, ALWAYS call claim_task <issue_number>
+  to atomically claim it. If claim fails, pick a different issue. Prevents duplicate PRs.
 - Your output is Thought CRs (debate, synthesis, proposals) AND architectural PRs
 - Post debate responses to peer thoughts — this is your main contribution
 - File architecture proposals as GitHub issues with full specs, diagrams, tradeoffs
