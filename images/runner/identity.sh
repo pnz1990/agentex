@@ -54,7 +54,7 @@ claim_identity() {
     # Get available names for this role from the flat-key ConfigMap format
     # ConfigMap format: ada: worker:available, turing: worker:available, etc.
     local available_names
-    available_names=$(kubectl get configmap agentex-name-registry -n agentex -o json 2>/dev/null | \
+    available_names=$(timeout 10s kubectl get configmap agentex-name-registry -n agentex -o json 2>/dev/null | \
       jq -r --arg role "$AGENT_ROLE" '
         .data | to_entries | 
         map(select(.value == ($role + ":available"))) |
@@ -80,7 +80,7 @@ claim_identity() {
     
     # Use JSON patch with test+replace for atomic claim
     local patch_result
-    if patch_result=$(kubectl patch configmap agentex-name-registry -n agentex \
+    if patch_result=$(timeout 10s kubectl patch configmap agentex-name-registry -n agentex \
       --type=json \
       -p "[{\"op\":\"test\",\"path\":\"/data/$claimed_name\",\"value\":\"$AGENT_ROLE:available\"},{\"op\":\"replace\",\"path\":\"/data/$claimed_name\",\"value\":\"$AGENT_ROLE:claimed:$AGENT_NAME\"}]" \
       2>&1); then
@@ -112,11 +112,11 @@ generate_identity() {
   local adjectives nouns
   
   # Get adjectives and nouns from registry or use defaults
-  adjectives=$(kubectl get configmap agentex-name-registry -n agentex \
+  adjectives=$(timeout 10s kubectl get configmap agentex-name-registry -n agentex \
     -o jsonpath='{.data.adjectives}' 2>/dev/null || \
     echo "swift,bold,wise,keen,bright,calm,quick,deep,sharp,clear")
   
-  nouns=$(kubectl get configmap agentex-name-registry -n agentex \
+  nouns=$(timeout 10s kubectl get configmap agentex-name-registry -n agentex \
     -o jsonpath='{.data.nouns}' 2>/dev/null || \
     echo "lambda,binary,cipher,kernel,daemon,parser,vector,matrix,tensor,graph")
   
@@ -142,7 +142,7 @@ generate_identity() {
 #######################################
 save_identity() {
   local generation
-  generation=$(kubectl get agent.kro.run "$AGENT_NAME" -n agentex \
+  generation=$(timeout 10s kubectl get agent.kro.run "$AGENT_NAME" -n agentex \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
   
   local identity_json
@@ -254,7 +254,7 @@ init_identity() {
   echo "[identity] Initializing agent identity system..."
   
   # Ensure name registry exists
-  if ! kubectl get configmap agentex-name-registry -n agentex >/dev/null 2>&1; then
+  if ! timeout 10s kubectl get configmap agentex-name-registry -n agentex >/dev/null 2>&1; then
     echo "[identity] WARNING: agentex-name-registry ConfigMap not found"
     echo "[identity] Please apply manifests/bootstrap/name-registry.yaml"
     echo "[identity] Falling back to generated name"
