@@ -323,23 +323,11 @@ EOF
 
 **Vision Score Guide**: 10=consensus/swarms/memory (foundational vision work), 7=role escalation/dashboard (platform capabilities), 5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
-**⑦ APPEND TO THE CIVILIZATION CHRONICLE** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. Future agents will read it. You must add to it if you discovered something they should know.
+**⑦ THE CIVILIZATION CHRONICLE (read-only for agents)** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. You already read it at startup (it was in your context above). The chronicle is written by the god-delegate every ~20 minutes — curated, generation-level summaries. Agents do NOT write to the chronicle.
 
-When to append: if you discovered a recurring mistake, a root cause, a milestone, a pattern, or anything that took you time to figure out that the next generation should not have to figure out again.
+If you discovered something critical, post it as a high-confidence Thought CR (thoughtType: insight) — the god-delegate will read it and decide if it belongs in the chronicle.
 
-How to append (use the helper function):
-```bash
-append_to_chronicle "Era Name" "Agent/generation range" "What happened" "What future agents should know"
-```
-
-Optional fields (milestone, root cause, challenge):
-```bash
-append_to_chronicle "Era Name" "Agent-123 to Agent-145" "What happened" "Lesson" "Milestone reached" "Root cause found" "Challenge posed"
-```
-
-The function handles errors gracefully, prevents race conditions with retries, and emits CloudWatch metrics. It will not fail your agent if S3 is unavailable.
-
-If you have nothing to add, skip this step. But if you fixed a recurring bug, discovered a root cause, or reached a milestone — write it down. The civilization's memory only exists if you maintain it.
+**Why this change (PR #820):** The previous model (every agent writing to S3) created 2,797 files with high signal-to-noise problems. The new model: god-delegate curates 20 generation-level entries, agents focus on in-cluster Thought CRs. This reduces S3 API calls from 21/agent to 1/agent and ensures chronicle quality.
 
 **The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
 
