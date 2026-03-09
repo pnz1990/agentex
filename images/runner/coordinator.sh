@@ -103,7 +103,7 @@ log_decision() {
     if [ -z "$current_log" ]; then
         update_state "decisionLog" "$log_entry"
     else
-        update_state "decisionLog" "${current_log} | ${log_entry}")
+        update_state "decisionLog" "${current_log} | ${log_entry}"
     fi
     echo "[$(date -u +%H:%M:%S)] Decision logged: $decision"
 }
