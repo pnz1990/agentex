@@ -58,7 +58,7 @@ data:
   securityPosture: |
     Security is a first-class concern. Agents MUST check GitHub code scanning
     alerts on each planner run using:
-      gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | \
+      gh api /repos/${REPO}/code-scanning/alerts --paginate | \
         jq '[.[] | select(.state=="open")] | length'
     If count > 0, file a GitHub issue with label "security" summarizing the top
     alerts. Do not ignore security. A civilization that cannot defend itself
