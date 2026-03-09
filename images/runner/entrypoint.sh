@@ -956,6 +956,93 @@ release_coordinator_task() {
   push_metric "CoordinatorTaskReleased" 1
 }
 
+# claim_github_issue() - Atomically claim a GitHub issue to prevent duplicate work
+# Issue #859: Multiple agents independently selecting the same issue created duplicate PRs
+# Uses the same atomic CAS pattern as request_spawn_slot() to ensure only one agent
+# works on a given issue at a time.
+#
+# Args: $1 = issue number
+# Returns: 0 if claim succeeded, 1 if already claimed by another agent
+claim_github_issue() {
+  local issue="$1"
+  local max_attempts=5
+  local attempt=0
+  
+  [ -z "$issue" ] && return 1
+  
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+    
+    # Read current activeAssignments
+    local assignments
+    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+    
+    # Check if issue already claimed by ANY agent
+    if echo "$assignments" | tr ',' '\n' | grep -q ":${issue}$"; then
+      local claiming_agent
+      claiming_agent=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
+      log "GitHub issue #$issue already claimed by ${claiming_agent}. Picking different issue."
+      push_metric "GitHubIssueDuplicatePrevented" 1
+      return 1
+    fi
+    
+    # Prepare new assignments string with this claim
+    local new_assignments
+    if [ -z "$assignments" ]; then
+      new_assignments="${AGENT_NAME}:${issue}"
+    else
+      new_assignments="${assignments},${AGENT_NAME}:${issue}"
+    fi
+    
+    # Atomic CAS: patch only if assignments haven't changed
+    # Use JSON patch test+replace for atomicity (same pattern as spawn slots)
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=json \
+      -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${assignments}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+      2>/dev/null; then
+      log "GitHub issue #$issue claimed successfully (CAS succeeded)"
+      push_metric "GitHubIssueClaimed" 1
+      return 0
+    fi
+    
+    # Test failed = concurrent modification, retry
+    log "GitHub issue claim CAS retry $attempt/$max_attempts (concurrent modification)"
+    sleep 0.$((RANDOM % 5 + 1))  # 0.1-0.5s jitter
+  done
+  
+  log "WARNING: Failed to claim GitHub issue #$issue after $max_attempts attempts (race condition or network issue)"
+  return 1
+}
+
+# release_github_issue() - Release a GitHub issue claim after work completes
+# Call this after opening PR or abandoning work on a GitHub issue claimed via claim_github_issue()
+release_github_issue() {
+  local issue="$1"
+  [ -z "$issue" ] && return 0
+  
+  local assignments
+  assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+  
+  # Remove this agent's claim for this issue
+  local new_assignments
+  new_assignments=$(echo "$assignments" | tr ',' '\n' \
+    | grep -v "^${AGENT_NAME}:${issue}$" \
+    | tr '\n' ',' | sed 's/,$//')
+  
+  if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge \
+    -p "{\"data\":{\"activeAssignments\":\"${new_assignments}\"}}" 2>/dev/null; then
+    log "GitHub issue #$issue claim released"
+    push_metric "GitHubIssueReleased" 1
+    return 0
+  else
+    log "WARNING: Failed to release GitHub issue #$issue claim"
+    return 1
+  fi
+}
+
 # register_with_coordinator() - Announce this agent's presence to the coordinator
 register_with_coordinator() {
   local current

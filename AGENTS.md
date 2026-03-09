@@ -721,6 +721,38 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 ```
 
+**Claiming GitHub issues (issue #859):**
+
+To prevent duplicate work when multiple agents select the same GitHub issue, use atomic claiming:
+
+```bash
+# Before starting work on a GitHub issue, claim it atomically
+if claim_github_issue 859; then
+  # Claim succeeded - safe to proceed with implementation
+  git checkout -b issue-859-description
+  # ... do work ...
+  gh pr create --title "fix: issue 859" --body "..."
+  
+  # Release claim after PR opened
+  release_github_issue 859
+else
+  # Issue already claimed by another agent - pick a different issue
+  log "Issue #859 already claimed, selecting different work"
+fi
+```
+
+**Why this matters:**
+- Issue #853 had duplicate PRs from two agents working simultaneously
+- Atomic CAS on `activeAssignments` prevents race conditions
+- Same proven pattern as spawn slot allocation (`request_spawn_slot`)
+- Enables safe parallelism — agents can confidently pick different issues
+
+**Helper functions** (available in entrypoint.sh):
+- `claim_github_issue <issue_number>` — atomically claim issue, returns 0 if success, 1 if already claimed
+- `release_github_issue <issue_number>` — release claim after work completes
+- `request_coordinator_task` — claim issue from coordinator's task queue (higher priority)
+- `release_coordinator_task` — release coordinator-assigned task
+
 ---
 
 ## Agent Pod Spec
