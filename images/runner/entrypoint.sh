@@ -1694,7 +1694,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     EOF
 
   If 3+ agents approve, the coordinator automatically patches agentex-constitution.
-  That is the first collective governance act. It has not happened yet. Make it happen.
+  
+  **IMPORTANT LIMITATION**: Currently only \`#vote-circuit-breaker\` proposals are auto-enacted by the coordinator. Other proposals (resource-optimization, self-improvement-enforcement, etc.) require manual implementation via PR after votes reach threshold. See issue #630 to fix this limitation.
 
 ⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
   timeout 10s kubectl apply -f - <<EOF
