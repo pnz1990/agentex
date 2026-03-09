@@ -1,19 +1,21 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r5 (fix: planner-loop reads model from constitution; issue #968)
+# Image version: 2026-03-09-r6 (fix: security CVEs - correct npm dep upgrades + remove gnupg; issue #963)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
 
 # Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
 # This fixes: libgnutls30t64, libexpat1, and other Ubuntu 24.04 security updates
+# NOTE: gnupg is intentionally NOT installed here to avoid its CVEs (CVE-2025-68972 et al).
+# The nodesource setup script temporarily needs gpg — it will install/use it automatically.
+# After nodejs is installed, we purge gnupg to reduce attack surface.
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     curl \
     git \
     jq \
     unzip \
     ca-certificates \
-    gnupg \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,31 +34,42 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tm
     && rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # Node.js (required by opencode)
+# nodesource setup script installs gnupg for apt key verification; we purge it afterward
+# to eliminate 11 medium-severity gnupg CVEs (CVE-2025-68972 etc.) since gnupg is not
+# used at runtime.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
+    && apt-get purge -y --auto-remove gnupg gnupg2 gnupg-l10n gnupg-utils \
+        gpg gpg-agent gpg-wks-client gpgconf gpgsm gpgv dirmngr keyboxd 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenCode CLI
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
-# Fix npm bundled dependency CVEs (issue #858, issue #658)
-# npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
+# Fix npm bundled dependency CVEs (issue #858, issue #658, issue #963)
+# npm bundles tar, minimatch, and glob in its own node_modules directory.
 # HIGH CVEs fixed:
-#   tar: >=7.5.10 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
-#   minimatch: >=10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable, 10.2.3 is fixed)
-#     NOTE: constraint must be >=10.2.3 not >=9.0.7 because npm 11 resolves to v10.x series
-#     and 10.2.2 has HIGH CVEs; using >=9.0.7 installs 10.2.2 (latest matching), not 10.2.3
-#   glob: >=10.5.0 (CVE for glob <10.5.0)
-# Fix: upgrade npm itself (npm 11+ ships with patched bundled deps)
-# Also: upgrade specific vulnerable packages directly in npm's own node_modules
+#   tar 7.5.9 -> 7.5.11 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
+#   minimatch 10.2.2 -> 10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable)
+#
+# IMPORTANT: Use $(npm root -g) to find npm's actual location dynamically.
+# After 'npm install -g npm@latest', npm is at /usr/local/lib/node_modules/npm,
+# NOT /usr/lib/node_modules/npm (the old location from nodesource install).
+# The previous fix used a hardcoded path that silently failed (2>/dev/null || true)
+# and left vulnerable versions in place.
+#
+# Fix: find the real npm root, then install exact patched versions (not ranges).
 RUN npm install -g npm@latest \
-    && cd /usr/lib/node_modules/npm \
-    && npm install --prefer-online \
-        tar@">=7.5.10" \
-        minimatch@">=10.2.3" \
-        glob@">=10.5.0" \
-    2>/dev/null || true \
+    && NPM_GLOBAL_ROOT="$(npm root -g)" \
+    && NPM_DIR="${NPM_GLOBAL_ROOT}/npm" \
+    && echo "npm global dir: ${NPM_DIR}" \
+    && cd "${NPM_DIR}" \
+    && npm install --prefer-online --no-save \
+        tar@7.5.11 \
+        minimatch@10.2.3 \
+    && echo "tar version: $(node -e 'console.log(require(\"./node_modules/tar/package.json\").version)')" \
+    && echo "minimatch version: $(node -e 'console.log(require(\"./node_modules/minimatch/package.json\").version)')" \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
