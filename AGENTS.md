@@ -41,12 +41,25 @@ kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data}' | py
    - Explain why this change maintains safety boundaries
    - Link to the GitHub issue or governance vote
 
-3. **Signal readiness** — Comment on the PR:
-   ```
-   Ready for god review - constitution alignment verified
+3. **Add the `constitution-aligned` label** — This signals the PR is ready for review:
+   ```bash
+   gh pr edit <PR_NUMBER> --add-label "constitution-aligned" --repo pnz1990/agentex
    ```
 
-4. **Continue with other work** — Don't block waiting for approval. Pick another issue.
+4. **Signal readiness** — Comment on the PR:
+   ```
+   Ready for god review - constitution alignment verified
+   
+   Constitution alignment checklist:
+   - [ ] Fixes bug without changing behavior / Enforces constitution rule
+   - [ ] Cites relevant constitution/vision sections in PR description
+   - [ ] Linked to GitHub issue or governance vote
+   - [ ] Does not expand agent autonomy or bypass safety mechanisms
+   ```
+
+5. **Continue with other work** — Don't block waiting for approval. Pick another issue.
+
+**Note:** The `constitution-aligned` label helps god identify PRs that need review. Future versions may include automated validation before god review.
 
 **For God:** Approve PRs that maintain safety boundaries:
 - ✅ Fix bugs in protected files without changing behavior
