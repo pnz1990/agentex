@@ -30,6 +30,7 @@ NAMESPACE="${NAMESPACE:-agentex}"
 STATE_CM="coordinator-state"
 HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
+BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "COORDINATOR STARTING"
@@ -49,6 +50,22 @@ fi
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
+# Push CloudWatch metric (issue #587: visibility for collective intelligence)
+push_metric() {
+    local metric_name="$1"
+    local value="$2"
+    local unit="${3:-Count}"
+    local dimensions="${4:-Component=Coordinator}"
+    
+    aws cloudwatch put-metric-data \
+        --namespace Agentex \
+        --metric-name "$metric_name" \
+        --value "$value" \
+        --unit "$unit" \
+        --dimensions "$dimensions" \
+        --region "$BEDROCK_REGION" 2>/dev/null || true
+}
+
 update_state() {
     local field="$1"
     local value="$2"
@@ -66,6 +83,9 @@ heartbeat() {
     local timestamp
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     update_state "lastHeartbeat" "$timestamp"
+    
+    # Emit coordinator liveness metric (issue #587)
+    push_metric "CoordinatorHeartbeat" 1 "Count"
 }
 
 # Post a Thought CR from the coordinator
@@ -213,6 +233,11 @@ tally_and_enact_votes() {
     if [ -z "$proposals" ]; then
         return 0
     fi
+    
+    # Emit proposal count metric (issue #587)
+    local proposal_count
+    proposal_count=$(echo "$proposals" | grep -c "#proposal-circuit-breaker" || echo "0")
+    [ "$proposal_count" -gt 0 ] && push_metric "ProposalCount" "$proposal_count" "Count" "Topic=CircuitBreaker"
 
     # Get the proposed value (most recent proposal wins)
     local proposed_value
@@ -235,6 +260,10 @@ tally_and_enact_votes() {
         2>/dev/null | sort -u | wc -l | tr -d ' ')
 
     echo "[$(date -u +%H:%M:%S)] Vote tally — circuitBreakerLimit=${proposed_value}: approve=${approve_votes} reject=${reject_votes} threshold=${VOTE_THRESHOLD}"
+    
+    # Emit vote count metrics (issue #587: visibility for collective intelligence)
+    push_metric "VoteCount" "$approve_votes" "Count" "Topic=CircuitBreaker,VoteType=Approve"
+    push_metric "VoteCount" "$reject_votes" "Count" "Topic=CircuitBreaker,VoteType=Reject"
 
     # Update vote registry
     update_state "voteRegistry" "circuitBreakerLimit=${proposed_value} approve=${approve_votes} reject=${reject_votes} threshold=${VOTE_THRESHOLD}"
@@ -250,6 +279,9 @@ tally_and_enact_votes() {
     # Enact if threshold reached
     if [ "$approve_votes" -ge "$VOTE_THRESHOLD" ]; then
         echo "[$(date -u +%H:%M:%S)] *** CONSENSUS REACHED: circuitBreakerLimit=${proposed_value} (${approve_votes} approvals) ***"
+        
+        # Emit consensus milestone metric (issue #587: historic moment tracking)
+        push_metric "ConsensusEnacted" 1 "Count" "Topic=CircuitBreaker,Value=${proposed_value}"
 
         # Patch the constitution
         kubectl patch configmap agentex-constitution -n "$NAMESPACE" \
