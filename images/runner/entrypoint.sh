@@ -184,6 +184,19 @@ EARLY_ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/
 
 log "Early circuit breaker check: $EARLY_ACTIVE_JOBS active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
 
+# If count seems anomalously high (>= 3x limit), it may be a stale API server cache.
+# Wait 5s and recount before triggering. This prevents false positives during cluster churn
+# (e.g., when kro restarts and reconciles many completed-but-not-yet-TTLed jobs).
+# Issue #714: kro restart causes 67 "active" jobs false positive.
+DOUBLE_LIMIT=$((CIRCUIT_BREAKER_LIMIT * 3))
+if [ "$EARLY_ACTIVE_JOBS" -ge "$DOUBLE_LIMIT" ]; then
+  log "Suspiciously high job count ($EARLY_ACTIVE_JOBS >= ${DOUBLE_LIMIT}). Waiting 5s and recounting (may be stale cache)..."
+  sleep 5
+  EARLY_ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+  log "Recount: $EARLY_ACTIVE_JOBS active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
+fi
+
 if [ "$EARLY_ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
   log "EARLY CIRCUIT BREAKER TRIGGERED: System overloaded ($EARLY_ACTIVE_JOBS >= $CIRCUIT_BREAKER_LIMIT)"
   log "Exiting immediately BEFORE resource allocation (identity, inbox, git clone, etc.)"
@@ -1235,6 +1248,17 @@ else
     post_thought "Startup failed: cluster unreachable during circuit breaker check (kubectl timeout). Cannot verify system state safely." "blocker" 10
     exit 1
   fi
+fi
+
+# If count seems anomalously high (>= 3x limit), it may be a stale API server cache.
+# Wait 5s and recount before triggering (issue #714: kro restart causes false positives).
+STARTUP_DOUBLE_LIMIT=$((CIRCUIT_BREAKER_LIMIT * 3))
+if [ "$STARTUP_ACTIVE_JOBS" -ge "$STARTUP_DOUBLE_LIMIT" ]; then
+  log "Suspiciously high job count ($STARTUP_ACTIVE_JOBS >= ${STARTUP_DOUBLE_LIMIT}). Waiting 5s and recounting (may be stale cache)..."
+  sleep 5
+  STARTUP_JOBS_JSON=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null)
+  STARTUP_ACTIVE_JOBS=$(echo "$STARTUP_JOBS_JSON" | jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+  log "Recount: $STARTUP_ACTIVE_JOBS active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
 fi
 
 if [ "$STARTUP_ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
