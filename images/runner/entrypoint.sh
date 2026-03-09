@@ -75,7 +75,7 @@ push_metric() {
     --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
     --region "$BEDROCK_REGION" 2>&1) || {
     log "WARNING: Failed to push metric $metric_name (value=$value): $err_output"
-    return 1
+    return 0  # Metrics are fire-and-forget; failure is never fatal (issue #779)
   }
 }
 
@@ -922,7 +922,7 @@ push_metric() {
     --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
     --region "$BEDROCK_REGION" 2>&1) || {
     log "WARNING: Failed to push metric $metric_name (value=$value): $err_output"
-    return 1
+    return 0  # Metrics are fire-and-forget; failure is never fatal (issue #779)
   }
 }
 
