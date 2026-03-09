@@ -1063,8 +1063,11 @@ request_coordinator_task() {
     if ! claim_task "$claimed_issue"; then
       log "Coordinator: issue #$claimed_issue already claimed by another agent, trying next"
       # Remove this issue from queue since it's taken, and try the next one
+      # Use grep -v || true to handle the case where the issue is the only item in the queue
+      # (grep -v returns exit code 1 when no lines match, which triggers set -euo pipefail)
       local new_queue
-      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" | tr '\n' ',' | sed 's/,$//')
+      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+      new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
       kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
         --type=merge \
         -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
@@ -1073,8 +1076,11 @@ request_coordinator_task() {
     fi
 
     # Remove claimed issue from the queue
+    # Use grep -v || true: when queue has only this issue, grep -v returns exit code 1 (no matches),
+    # which would crash the script under set -euo pipefail (issue #979)
     local new_queue
-    new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" | tr '\n' ',' | sed 's/,$//')
+    new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+    new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
     kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
       --type=merge \
       -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
@@ -1101,10 +1107,12 @@ release_coordinator_task() {
     -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
 
   # Remove this agent's assignment
+  # Use grep -v || true: if this agent's assignment is the only one, grep -v returns exit code 1
+  # (no matches), which would crash the script under set -euo pipefail
   local new_assignments
   new_assignments=$(echo "$assignments" | tr ',' '\n' \
-    | grep -v "^${AGENT_NAME}:${issue}$" \
-    | tr '\n' ',' | sed 's/,$//')
+    | grep -v "^${AGENT_NAME}:${issue}$" || true)
+  new_assignments=$(echo "$new_assignments" | tr '\n' ',' | sed 's/,$//')
 
   local err_output
   if ! err_output=$(kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
@@ -1129,7 +1137,10 @@ register_with_coordinator() {
     new_val="${AGENT_NAME}:${AGENT_ROLE}"
   else
     # Deduplicate: remove any prior entry for this agent then add fresh
-    new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" | tr '\n' ',' | sed 's/,$//')
+    # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
+    # (no matches), which would crash the script under set -euo pipefail
+    new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
+    new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
     [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
   fi
 
