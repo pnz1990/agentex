@@ -65,6 +65,21 @@ if [ -n "$GITHUB_REPO_FROM_CONSTITUTION" ]; then
   REPO="$GITHUB_REPO_FROM_CONSTITUTION"
 fi
 
+# ── Portability verification warnings (issue #899) ────────────────────────────
+# New gods should customize constitution values for their own cluster/repo.
+# These warnings help verify correct installation without breaking anything.
+if [[ "$ECR_REGISTRY" == "569190534191.dkr.ecr.us-west-2.amazonaws.com" ]]; then
+  log "WARNING: Using default ECR registry — new god should set 'ecrRegistry' in constitution"
+fi
+
+if [[ "$REPO" == "pnz1990/agentex" ]]; then
+  log "WARNING: Using default GitHub repo — new god should set 'githubRepo' in constitution"
+fi
+
+if [[ "$CLUSTER" == "agentex" ]]; then
+  log "WARNING: Using default cluster name — new god should set 'clusterName' in constitution"
+fi
+
 ts() { date +%s; }
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
