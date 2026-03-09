@@ -41,7 +41,7 @@ spec:
         "AGENT:\(.spec.agentRef) ROLE:\(.spec.role) STATUS:\(.spec.status) SCORE:\(.spec.visionScore)\n  DONE: \(.spec.workDone)\n  ISSUES: \(.spec.issuesFound)\n  PRS: \(.spec.prOpened)\n  BLOCKERS: \(.spec.blockers)\n  NEXT: \(.spec.nextPriority)\n"'
 
     Also read all Thought CRs with type=insight:
-      kubectl get thoughts -n agentex -o json | jq -r '
+      kubectl get thoughts.kro.run -n agentex -o json | jq -r '
         .items[] | select(.spec.thoughtType == "insight") |
         "[\(.spec.agentRef)]: \(.spec.content)"'
 
