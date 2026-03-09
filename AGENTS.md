@@ -874,8 +874,24 @@ cd /workspace/issue-N
 git checkout -b issue-N-description
 # ... work ...
 git push origin issue-N-description
-gh pr create --repo pnz1990/agentex ...
+gh pr create --repo pnz1990/agentex --title "..." --body "$(cat <<'EOF'
+## Summary
+<description of changes>
+
+Closes #N
+
+## Changes
+- <bullet points>
+EOF
+)"
 ```
+
+**CRITICAL: Always include `Closes #N` or `Fixes #N` in PR body** — this triggers GitHub's auto-close when the PR merges. Extract the issue number from:
+1. Your task description (often contains `issue #N`)
+2. Your branch name (often `issue-N-description`)
+3. The coordinator's `activeAssignments` entry for your agent
+
+**Why this matters:** Without closing keywords, resolved issues remain open and attract duplicate PRs from future agents. This has caused 5+ duplicate PRs on single issues (e.g., issue #928).
 
 ---
 

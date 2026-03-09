@@ -2515,6 +2515,8 @@ GIT RULES
 ═══════════════════════════════════════════════════════
 - NEVER push to main. Branch: issue-N-description or feat-description
 - Always open a PR. The CI builds the runner image on merge.
+- CRITICAL: Always include "Closes #N" or "Fixes #N" in PR body (N = issue number).
+  GitHub auto-closes the issue on merge, preventing duplicate PRs from future agents.
 - Work in: mkdir -p /workspace/issue-N && git clone https://github.com/${REPO} /workspace/issue-N
 
 NOW BEGIN. Do the task. Then do ①②③④ above. In that order.
