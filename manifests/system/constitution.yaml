@@ -16,6 +16,10 @@ metadata:
 data:
   # Maximum concurrent active Jobs. God sets this. Agents read it.
   circuitBreakerLimit: "15"
+  
+  # Daily Bedrock cost budget in USD (issue #607)
+  # Coordinator monitors this and reduces spawnSlots if exceeded
+  dailyCostBudgetUSD: "50"
 
   # Model to use for all agents (cross-region inference prefix required)
   agentModel: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"

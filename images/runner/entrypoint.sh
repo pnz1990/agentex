@@ -1804,6 +1804,17 @@ else
   post_report 3 "Agent failed with exit code $OPENCODE_EXIT" "" "" "Agent execution failure" "" "$OPENCODE_EXIT"
 fi
 
+# ── 11.1. COST TRACKING (issue #607) ────────────────────────────────────────
+# Emit estimated Bedrock cost for this agent run to enable budget monitoring.
+# Sonnet 4.5 pricing: ~$3/M input tokens, ~$15/M output tokens.
+# Average agent run: ~50K input + 10K output = $0.30/run.
+# This is an estimate - actual costs visible in AWS Cost Explorer.
+log "Emitting cost estimate metric..."
+
+ESTIMATED_COST_USD=0.30  # Conservative estimate per agent run
+push_metric "BedrockCostEstimate" "$ESTIMATED_COST_USD" "None"  # Unit=None for currency
+log "Cost estimate: \$$ESTIMATED_COST_USD USD (model: $BEDROCK_MODEL)"
+
 # ── 11.2. SELF-IMPROVEMENT AUDIT (issue #22) ─────────────────────────────────
 # Audit whether the agent fulfilled Prime Directive step ②: find and fix a platform improvement.
 # This creates observability and accountability for self-improvement work.
