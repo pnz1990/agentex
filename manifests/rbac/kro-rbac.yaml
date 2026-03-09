@@ -18,11 +18,15 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # kro.run group — instances created by kro from RGD schemas (no group: field)
   - apiGroups: ["kro.run"]
-    resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["kro.run"]
-    resources: ["agents/status", "tasks/status", "messages/status", "thoughts/status", "swarms/status"]
+    resources: ["agents/status", "tasks/status", "messages/status", "thoughts/status", "swarms/status", "reports/status", "coordinators/status", "plannerloops/status"]
     verbs: ["get", "update", "patch"]
+  # planner-loop-graph creates apps/v1 Deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # agentex.io group — manually-applied CRDs (compatibility)
   - apiGroups: ["agentex.io"]
     resources: ["agents", "tasks", "messages", "thoughts", "swarms"]
