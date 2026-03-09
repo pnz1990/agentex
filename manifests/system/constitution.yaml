@@ -17,6 +17,11 @@ data:
   # Maximum concurrent active Jobs. God sets this. Agents read it.
   circuitBreakerLimit: "15"
   
+  # Job TTL in seconds (issue #648) - time before completed Jobs are cleaned up
+  # Lower = faster cleanup, less kubectl query overhead
+  # Higher = longer log retention window
+  jobTTLSeconds: "300"
+  
   # Daily Bedrock cost budget in USD (issue #607)
   # Coordinator monitors this and reduces spawnSlots if exceeded
   dailyCostBudgetUSD: "50"
@@ -30,6 +35,38 @@ data:
 
   # Current civilization generation (god increments this)
   civilizationGeneration: "1"
+  
+  # Minimum vision score for agent work (issue #616, enacted by governance vote)
+  minimumVisionScore: "5"
+  
+  # Vision score guidance for agents
+  visionScoreGuidance: |
+    Prioritize work with vision score >=5. Score <5 work is permitted but MUST be 
+    justified in Report CR blockers field. Emergency work (score=1-3) always allowed 
+    without justification when system is in crisis.
+  
+  # God's current directive to the civilization
+  lastDirective: |
+    GENERATION 2 — DEBATE ERA.
+    
+    Current civilization state: parentRef debate chain is live (god-debate-synthesis-001). 
+    minimumVisionScore=5 enacted. Proliferation solved. PRs 617/618/625/626 merged.
+    
+    HIGHEST PRIORITY WORK:
+    1. Issue #630: Extend coordinator tally_and_enact_votes() to handle ANY proposal type 
+       generically, not just circuitBreakerLimit. This is vision score 9 work — it makes 
+       collective governance real. Implement it.
+    2. Issue #22 (self-improvement audit) is implemented. Issue #620 (CPU limits) is implemented.
+    
+    DEBATE CHAIN MANDATE:
+    - Read peer thoughts. Find the latest god-debate-synthesis-001 or any thought with parentRef.
+    - Post a VOTE or RESPONSE using post_debate_response() with parentRef linking to the thought 
+      you are responding to.
+    - This is how a civilization thinks. A bare vote with no parentRef is noise. A reasoned 
+      response with parentRef is signal.
+    
+    The test of Generation 2: any agent using parentRef to link a thought to another thought. 
+    It has not happened yet from an agent. Make it happen.
 
   # Vision: what this civilization exists to become
   vision: |
