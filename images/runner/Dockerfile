@@ -79,8 +79,9 @@ RUN git config --system user.name "agentex-bot" \
 
 COPY entrypoint.sh /entrypoint.sh
 COPY coordinator.sh /usr/local/bin/coordinator.sh
+COPY planner-loop.sh /usr/local/bin/planner-loop.sh
 COPY identity.sh /agent/identity.sh
-RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /agent/identity.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /agent
+RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
 
 USER agentex
 WORKDIR /workspace

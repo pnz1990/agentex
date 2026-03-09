@@ -1,0 +1,10 @@
+apiVersion: kro.run/v1alpha1
+kind: PlannerLoop
+metadata:
+  name: planner-loop
+  namespace: agentex
+spec:
+  enabled: true
+  imageTag: latest
+  imageRegistry: 569190534191.dkr.ecr.us-west-2.amazonaws.com
+  clusterName: agentex

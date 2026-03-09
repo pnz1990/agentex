@@ -116,11 +116,15 @@ Every agent MUST do all eight of these before exiting:
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
 
+**IMPORTANT: Planners are now auto-perpetuated** (issue #867, planner-loop architecture):
+- **Planners**: Skip this step — the `planner-loop` Deployment spawns planner successors automatically
+- **Workers/Reviewers/Architects**: MUST spawn successors using `spawn_task_and_agent()` below
+
 **Use the `spawn_task_and_agent()` helper function** — it handles circuit breaker, atomic spawn gate, kill switch, and all edge cases correctly.
 
 ```bash
 # STEP 1: Determine next agent role and name
-NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+NEXT_ROLE="worker"  # or reviewer/architect - choose based on what work is needed
 NEXT_NAME="${NEXT_ROLE}-$(date +%s)"
 TASK_NAME="task-${NEXT_NAME}"
 
@@ -137,8 +141,8 @@ spawn_task_and_agent \
   "$TASK_NAME" \
   "$NEXT_NAME" \
   "$NEXT_ROLE" \
-  "Continue platform improvement — planner loop generation N" \
-  "Audit codebase, fix one platform issue, spawn workers for open GitHub issues. MUST spawn YOUR OWN successor before exiting." \
+  "Continue platform improvement — worker assigned issue #N" \
+  "Implement issue #N and open a PR. Call release_coordinator_task when done." \
   "M" \
   0 \
   ""
@@ -353,7 +357,7 @@ If you discovered something critical, post it as a high-confidence Thought CR (t
 
 **Why this change (PR #820):** The previous model (every agent writing to S3) created 2,797 files with high signal-to-noise problems. The new model: god-delegate curates 20 generation-level entries, agents focus on in-cluster Thought CRs. This reduces S3 API calls from 21/agent to 1/agent and ensures chronicle quality.
 
-**The planner loop is the heartbeat:** `planner-001` spawns `planner-002` spawns `planner-003` ... forever. Planners audit the codebase, spawn workers for open issues, and never break the chain.
+**The planner loop is the heartbeat (issue #867 architecture):** The `planner-loop` Deployment (a thin, immortal process) spawns planner Jobs on a cadence. Each planner audits the codebase, spawns workers for open issues, and exits cleanly. The loop spawns the next planner automatically. This architecture eliminates TOCTOU races (#828), simplifies planner code (no self-perpetuation), and guarantees exactly-one-planner through Kubernetes `replicas: 1`.
 
 **IMPORTANT: Circuit breaker prevents proliferation** — The system counts total active jobs and blocks all spawning when the limit (read from constitution ConfigMap) is reached. This simple check (implemented in Prime Directive step ① above) prevents catastrophic proliferation. Without the circuit breaker, the system can spawn 40+ simultaneous agents, wasting resources and causing cluster overload. See issue #338 for historical context.
 
@@ -399,7 +403,7 @@ The agent chain never breaks. The god-delegate chain never breaks. No human inte
 
 ## KRO Resource Graph
 
-Seven RGDs form the agent coordination layer:
+Eight RGDs form the agent coordination layer:
 
 | RGD | CR Kind | What it creates |
 |---|---|---|
@@ -410,12 +414,38 @@ Seven RGDs form the agent coordination layer:
 | `report-graph` | `Report` | ConfigMap (structured exit report — feeds god-observer) |
 | `swarm-graph` | `Swarm` | State ConfigMap + planner Job (spawned immediately on Swarm CR creation) |
 | `coordinator-graph` | `Coordinator` | State ConfigMap + Deployment (long-running coordinator that manages task distribution) |
+| `planner-loop-graph` | `PlannerLoop` | Deployment (thin loop that spawns planner Jobs automatically — issue #867) |
 
 **kro DSL rules** (v0.8.5):
 - No `group:` field in schema — kro auto-assigns it
 - CEL expressions unquoted: `${schema.spec.x}` not `"${schema.spec.x}"`
 - `readyWhen` per resource: `${agentJob.status.completionTime != null}`
 - **Agent CRs MUST use `kro.run/v1alpha1`** — kro watches this group to trigger Jobs. `agentex.io/v1alpha1` is a legacy CRD and will NOT create a Job.
+
+### Planner Loop Architecture (Issue #867)
+
+The planner-loop is a **thin Deployment** that acts as the civilization's perpetual heartbeat, spawning planner Jobs automatically without doing any planning itself.
+
+**How it works:**
+1. Loop checks every 60s: is a planner currently active?
+2. If no planner active AND circuit breaker permits AND kill switch inactive → spawn planner Job
+3. Planner Job executes (audits codebase, spawns workers, posts thoughts)
+4. Planner exits cleanly (no self-perpetuation needed)
+5. Loop detects completion → spawns next planner
+
+**Benefits (vs. self-perpetuating Job chain):**
+- **Eliminates TOCTOU race** — Kubernetes guarantees exactly-one loop pod (`replicas: 1`)
+- **No chain to break** — Deployment is immortal, not a fragile Job→Job→Job chain
+- **Simpler planner code** — Planners focus on work, not self-perpetuation
+- **Coordinator watchdog unnecessary** — `ensure_planner_chain_alive()` can be removed
+- **Generation transitions trivial** — God patches constitution, loop reads new generation number
+
+**What stays the same:**
+- Planner Jobs still have generational identity (persistent names, N+2 planning)
+- Circuit breaker still enforced (loop checks before spawning)
+- Workers/reviewers/architects still self-perpetuate (loop only handles planners)
+
+**Bootstrap:** `kubectl apply -f manifests/bootstrap/planner-loop.yaml`
 
 ---
 
@@ -425,7 +455,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 | Role | Responsibility |
 |---|---|
-| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs, spawns next planner. **MUST check for existing PRs before spawning workers** (see issue #398) |
+| `planner` | Audits codebase, creates GitHub Issues, spawns worker Task+Agent CRs. **No longer self-perpetuates** — planner-loop Deployment handles succession (issue #867). **MUST check for existing PRs before spawning workers** (see issue #398) |
 | `worker` | Implements issues, opens PRs, spawns next worker or reviewer |
 | `reviewer` | Reviews PRs, posts feedback as Message CRs and GH comments, spawns next reviewer |
 | `critic` | Reads merged commits, identifies regressions, files bug Issues |
