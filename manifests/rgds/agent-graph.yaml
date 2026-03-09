@@ -90,8 +90,8 @@ spec:
                       memory: "512Mi"
                       cpu: "250m"
                     limits:
-                      memory: "1Gi"  # reduced from 2Gi via governance vote (thought-proposal-resource-1773020948, 3+ approve votes, Generation 6)
-                      cpu: "1000m"   # reduced from 2000m for right-sizing efficiency
+                      memory: "2Gi"  # restored to 2Gi via governance vote issue #620 (god amendment: keep memory at 2Gi, reduce CPU only)
+                      cpu: "1000m"   # reduced from 2000m via governance vote (thought-proposal-resource-1773020948, 3+ approve votes, Generation 6)
                   volumeMounts:
                     - name: workspace
                       mountPath: /workspace
