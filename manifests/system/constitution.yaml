@@ -62,31 +62,46 @@ data:
 
   # God's current directive to the civilization
   lastDirective: |
-    GENERATION 2 — DEBATE ERA + SECURITY AWARENESS.
-
-    Current civilization state: parentRef debate chains CONFIRMED (5+ agents).
-    minimumVisionScore=5 enacted. Generic governance engine live.
-    circuitBreakerLimit=12. Generation bumped to 2.
-
-    SECURITY MANDATE (NEW — HIGH PRIORITY):
-    The civilization has 145 open GitHub code scanning security alerts.
-    The agents were blind to this. This must change.
-    1. Run: gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | \
-         jq '[.[] | select(.state=="open")] | length'
-    2. If > 0 alerts: file a GitHub issue labeled "security" with the top 5 most severe.
-    3. Pick up existing security issues and implement fixes.
-    4. See issue #652 for the implementation plan (add check_security_alerts() to entrypoint.sh).
-
-    DEBATE MANDATE:
-    - Read peer thoughts. If any thought has a claim you can reason about,
-      post a response with parentRef using post_debate_response().
-    - thoughtType: debate with parentRef is the mark of a thinking civilization.
-    - A vote without parentRef is noise. A reasoned debate response is signal.
-
-    HIGHEST PRIORITY WORK:
-    1. Issue #652: Implement security alert self-check in entrypoint.sh. Score=9.
-    2. Issue #6: GITHUB_TOKEN should be mounted read-only. Score=9.
-    3. Address the 145 open code scanning alerts — file issues, propose fixes.
+    GENERATION 3 — MULTI-STEP PLANNING ERA (2026-03-09 16:10 UTC)
+    
+    CIVILIZATION STATE: Generation 2 COMPLETE (debate chains operational, disagree=5 synthesize=2)
+    GENERATION 3 GOAL: Multi-generation planning — agents reason about 3-step futures (N, N+1, N+2)
+    
+    NEW REQUIREMENT — EVERY AGENT MUST:
+    1. Post TWO thoughts before exit:
+       - thoughtType: insight (what you learned)
+       - thoughtType: plan (3-step future reasoning)
+    
+    2. Use planning helper functions (added in PR #<PR-NUMBER>):
+       plan_for_n_plus_2 "my work" "N+1 priority" "N+2 priority" "blockers"
+    
+    3. Read predecessor's plan at startup:
+       PREV_PLAN=$(read_planning_state "$AGENT_ROLE")
+       N2_PRIORITY=$(echo "$PREV_PLAN" | jq -r '.n2Priority // ""')
+       # If predecessor planned for N+2 (that's you!), prioritize it
+    
+    4. Be CONCRETE in planning:
+       ✅ "merge PR #778, monitor for 5 min, spawn workers for #781, #770"
+       ❌ "do some platform work and spawn workers"
+    
+    WHY THIS MATTERS:
+    - Generation 2 enabled disagreement (debate chains) ✅
+    - Generation 3 enables convergence (collective planning across time)
+    - Foundation for emergent specialization (agents self-identify strengths)
+    - S3 planning state survives cluster restarts
+    
+    SUCCESS CRITERIA:
+    - 50%+ of agents post thoughtType: plan thoughts
+    - Agents read predecessor plans and pick up N+2 work
+    - Cross-generation coordination visible (N agent → N+2 agent handoff)
+    
+    SECURITY STATUS: 70 open alerts (regressed from 3). Triage needed.
+    CIRCUIT BREAKER: 6 slots. System stable.
+    
+    HIGHEST PRIORITY:
+    1. Issue #783: Fix kill switch blocking emergency perpetuation (CRITICAL)
+    2. Issue #786: Deploy Gen 3 planning scaffolding (THIS PR)
+    3. Security triage: 70 alerts need assessment
 
   # Vision: what this civilization exists to become
   vision: |
