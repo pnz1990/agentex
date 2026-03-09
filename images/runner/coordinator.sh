@@ -293,11 +293,11 @@ reconcile_spawn_slots() {
 }
 
 # Tally votes from Thought CRs and ENACT consensus when threshold reached
+# GENERIC GOVERNANCE ENGINE (issue #630) — handles ANY proposal topic
 tally_and_enact_votes() {
-    echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs..."
+    echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs (generic governance engine)..."
 
     # Read all thought ConfigMaps
-    # NOTE: thought-graph.yaml doesn't create agentex/thought label, so we filter by name pattern instead
     local all_thoughts
     all_thoughts=$(kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
         | jq -r '.items[] | select(.metadata.name | endswith("-thought")) | {
@@ -312,98 +312,143 @@ tally_and_enact_votes() {
         return 0
     fi
 
-    # ── Circuit Breaker Vote ────────────────────────────────────────────────
-    # Proposal format: "#proposal-circuit-breaker circuitBreakerLimit=12 reason=<reason>"
-    # Vote format:     "#vote-circuit-breaker approve circuitBreakerLimit=12"
-    #                  "#vote-circuit-breaker reject reason=<reason>"
+    # Extract all unique proposal topics from #proposal-<topic> tags
+    local topics
+    topics=$(echo "$all_thoughts" \
+        | jq -r '.[] | select(.type == "proposal") | .content' \
+        | grep -oE '#proposal-[a-zA-Z0-9_-]+' \
+        | sed 's/#proposal-//' \
+        | sort -u 2>/dev/null || true)
 
-    local proposals
-    proposals=$(echo "$all_thoughts" \
-        | jq -r '.[] | select(.content | contains("#proposal-circuit-breaker")) | .content' \
-        2>/dev/null || true)
-
-    if [ -z "$proposals" ]; then
-        return 0
-    fi
-    
-    # Emit proposal count metric (issue #587)
-    local proposal_count
-    proposal_count=$(echo "$proposals" | grep -c "#proposal-circuit-breaker" || echo "0")
-    [ "$proposal_count" -gt 0 ] && push_metric "ProposalCount" "$proposal_count" "Count" "Topic=CircuitBreaker"
-
-    # Get the proposed value (most recent proposal wins)
-    local proposed_value
-    proposed_value=$(echo "$proposals" \
-        | grep -oE 'circuitBreakerLimit=[0-9]+' \
-        | tail -1 \
-        | grep -oE '[0-9]+' || true)
-
-    [ -z "$proposed_value" ] && return 0
-
-    # Count approve and reject votes for this topic
-    local approve_votes
-    approve_votes=$(echo "$all_thoughts" \
-        | jq -r '.[] | select(.content | (contains("#vote-circuit-breaker") and contains("approve"))) | .agent' \
-        2>/dev/null | sort -u | wc -l | tr -d ' ')
-
-    local reject_votes
-    reject_votes=$(echo "$all_thoughts" \
-        | jq -r '.[] | select(.content | (contains("#vote-circuit-breaker") and contains("reject"))) | .agent' \
-        2>/dev/null | sort -u | wc -l | tr -d ' ')
-
-    echo "[$(date -u +%H:%M:%S)] Vote tally — circuitBreakerLimit=${proposed_value}: approve=${approve_votes} reject=${reject_votes} threshold=${VOTE_THRESHOLD}"
-    
-    # Emit vote count metrics (issue #587: visibility for collective intelligence)
-    push_metric "VoteCount" "$approve_votes" "Count" "Topic=CircuitBreaker,VoteType=Approve"
-    push_metric "VoteCount" "$reject_votes" "Count" "Topic=CircuitBreaker,VoteType=Reject"
-
-    # Update vote registry
-    update_state "voteRegistry" "circuitBreakerLimit=${proposed_value} approve=${approve_votes} reject=${reject_votes} threshold=${VOTE_THRESHOLD}"
-
-    # Check if already enacted (prevent re-enacting)
-    local enacted
-    enacted=$(get_state "enactedDecisions")
-    if echo "$enacted" | grep -q "circuitBreakerLimit=${proposed_value}"; then
-        echo "[$(date -u +%H:%M:%S)] circuitBreakerLimit=${proposed_value} already enacted, skipping"
+    if [ -z "$topics" ]; then
         return 0
     fi
 
-    # Enact if threshold reached
-    if [ "$approve_votes" -ge "$VOTE_THRESHOLD" ]; then
-        echo "[$(date -u +%H:%M:%S)] *** CONSENSUS REACHED: circuitBreakerLimit=${proposed_value} (${approve_votes} approvals) ***"
+    # Process each topic
+    while IFS= read -r topic; do
+        [ -z "$topic" ] && continue
         
-        # Emit consensus milestone metric (issue #587: historic moment tracking)
-        push_metric "ConsensusEnacted" 1 "Count" "Topic=CircuitBreaker,Value=${proposed_value}"
+        echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
+        
+        # Get most recent proposal for this topic
+        local proposal_content
+        proposal_content=$(echo "$all_thoughts" \
+            | jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
+            | tail -1 || true)
+        
+        [ -z "$proposal_content" ] && continue
 
-        # Patch the constitution
-        kubectl patch configmap agentex-constitution -n "$NAMESPACE" \
-            --type=merge \
-            -p "{\"data\":{\"circuitBreakerLimit\":\"${proposed_value}\"}}" \
-            && echo "[$(date -u +%H:%M:%S)] ✓ Constitution patched: circuitBreakerLimit=${proposed_value}" \
-            || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to patch constitution"
+        # Extract key=value pairs from proposal
+        local kv_pairs
+        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        
+        # Count unique approve/reject/abstain votes for this topic
+        local approve_votes
+        approve_votes=$(echo "$all_thoughts" \
+            | jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .agent" \
+            2>/dev/null | sort -u | wc -l | tr -d ' ')
 
-        # Record the enacted decision
-        local ts
-        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        local enacted_entry="${ts} circuitBreakerLimit=${proposed_value} approvals=${approve_votes}"
-        if [ -z "$enacted" ]; then
-            update_state "enactedDecisions" "$enacted_entry"
-        else
-            update_state "enactedDecisions" "${enacted} | ${enacted_entry}"
+        local reject_votes
+        reject_votes=$(echo "$all_thoughts" \
+            | jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"reject\")))) | .agent" \
+            2>/dev/null | sort -u | wc -l | tr -d ' ')
+
+        local abstain_votes
+        abstain_votes=$(echo "$all_thoughts" \
+            | jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"abstain\")))) | .agent" \
+            2>/dev/null | sort -u | wc -l | tr -d ' ')
+
+        echo "[$(date -u +%H:%M:%S)] Vote tally — $topic: approve=$approve_votes reject=$reject_votes abstain=$abstain_votes threshold=$VOTE_THRESHOLD"
+        
+        # Emit metrics
+        push_metric "VoteCount" "$approve_votes" "Count" "Topic=${topic},VoteType=Approve"
+        push_metric "VoteCount" "$reject_votes" "Count" "Topic=${topic},VoteType=Reject"
+        push_metric "VoteCount" "$abstain_votes" "Count" "Topic=${topic},VoteType=Abstain"
+
+        # Update vote registry (multi-topic support)
+        local registry_entry="$topic: approve=$approve_votes reject=$reject_votes abstain=$abstain_votes"
+        update_state "voteRegistry_${topic}" "$registry_entry"
+
+        # Check if already enacted
+        local enacted
+        enacted=$(get_state "enactedDecisions")
+        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
+        
+        if echo "$enacted" | grep -qF "$decision_key"; then
+            echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
+            continue
         fi
 
-        # Post verdict Thought CR — this is the civilizational milestone
-        post_coordinator_thought \
-"CONSENSUS ENACTED: circuitBreakerLimit changed to ${proposed_value}.
-Votes: ${approve_votes} approve, ${reject_votes} reject (threshold: ${VOTE_THRESHOLD}).
-The civilization has made its first collective governance decision.
-Constitution patched at ${ts}. All future agents will use limit=${proposed_value}." \
-            "verdict"
+        # Enact if threshold reached
+        if [ "$approve_votes" -ge "$VOTE_THRESHOLD" ]; then
+            echo "[$(date -u +%H:%M:%S)] *** CONSENSUS REACHED: $topic (${approve_votes} approvals) ***"
+            
+            push_metric "ConsensusEnacted" 1 "Count" "Topic=${topic}"
 
-        log_decision "circuitBreakerLimit=${proposed_value}" "consensus vote: ${approve_votes} approve ${reject_votes} reject"
+            # Try to patch constitution for known keys
+            local patched=false
+            if [ -n "$kv_pairs" ]; then
+                # Build JSON patch for all key=value pairs
+                local patch_data="{"
+                local first=true
+                while IFS= read -r kv; do
+                    [ -z "$kv" ] && continue
+                    local key="${kv%%=*}"
+                    local value="${kv##*=}"
+                    
+                    # Check if this is a known constitution key
+                    case "$key" in
+                        circuitBreakerLimit|minimumVisionScore|jobTTLSeconds|voteThreshold)
+                            [ "$first" = false ] && patch_data="${patch_data},"
+                            patch_data="${patch_data}\"${key}\":\"${value}\""
+                            first=false
+                            patched=true
+                            ;;
+                    esac
+                done <<< "$kv_pairs"
+                patch_data="${patch_data}}"
 
-        echo "[$(date -u +%H:%M:%S)] MILESTONE: First collective vote enacted."
-    fi
+                if [ "$patched" = true ]; then
+                    kubectl patch configmap agentex-constitution -n "$NAMESPACE" \
+                        --type=merge \
+                        -p "{\"data\":${patch_data}}" \
+                        && echo "[$(date -u +%H:%M:%S)] ✓ Constitution patched: $kv_pairs" \
+                        || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to patch constitution"
+                fi
+            fi
+
+            # Record the enacted decision
+            local ts
+            ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            local enacted_entry="${ts} ${decision_key} approvals=${approve_votes}"
+            if [ -z "$enacted" ]; then
+                update_state "enactedDecisions" "$enacted_entry"
+            else
+                update_state "enactedDecisions" "${enacted} | ${enacted_entry}"
+            fi
+
+            # Post verdict Thought CR
+            local verdict_text
+            if [ "$patched" = true ]; then
+                verdict_text="CONSENSUS ENACTED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Changes: $kv_pairs
+Constitution automatically patched at ${ts}.
+All future agents will use these values."
+            else
+                verdict_text="CONSENSUS REACHED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Proposal details: $kv_pairs
+This topic is not auto-patchable. An agent must implement it via PR.
+Vision score: 9/10 — prioritize implementation."
+            fi
+
+            post_coordinator_thought "$verdict_text" "verdict"
+            log_decision "$topic: $kv_pairs" "consensus vote: ${approve_votes} approve ${reject_votes} reject ${abstain_votes} abstain"
+
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Consensus enacted for $topic"
+        fi
+    done <<< "$topics"
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
