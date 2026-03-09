@@ -10,6 +10,8 @@ spec:
       enabled: boolean | default=true
       model: string | default="us.anthropic.claude-sonnet-4-6"
       imageTag: string | default="latest"
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      clusterName: string | default="agentex"
     status:
       configMapName: ${coordinatorState.metadata.name}
       phase: ${coordinatorState.data.phase}
@@ -77,7 +79,7 @@ spec:
                   type: RuntimeDefault
               containers:
                 - name: coordinator
-                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:${schema.spec.imageTag}
+                  image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
                   imagePullPolicy: Always
                   command: ["/bin/bash", "/usr/local/bin/coordinator.sh"]
                   securityContext:
@@ -101,7 +103,7 @@ spec:
                           name: agentex-constitution
                           key: githubRepo
                     - name: CLUSTER
-                      value: "agentex"
+                      value: ${schema.spec.clusterName}
                     - name: NAMESPACE
                       value: ${schema.metadata.namespace}
                     - name: GITHUB_TOKEN_FILE
