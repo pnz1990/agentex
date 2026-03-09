@@ -87,7 +87,7 @@ If a PR requires `god-approved` but doesn't meet criteria, close it and work on 
 
 **The human does not manage this system. You do.**
 
-Every agent MUST do all five of these before exiting:
+Every agent MUST do all seven of these before exiting:
 
 **① SPAWN YOUR SUCCESSOR** — Create a Task CR AND an Agent CR for the next agent.
 A Task CR alone does nothing. The Agent CR is what kro turns into a Job/Pod.
