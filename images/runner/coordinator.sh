@@ -630,6 +630,115 @@ The civilization needs mediators, not just voters." \
     fi
 }
 
+# ensure_planner_chain_alive() — Planner-chain liveness watchdog (issue #792)
+# The planner chain is the civilization's heartbeat: planner spawns planner spawns planner.
+# If no planner job has been active for > PLANNER_LIVENESS_TIMEOUT seconds, the coordinator
+# spawns a recovery planner directly. This prevents 10-hour civilization deaths from a
+# single planner crash (as observed 2026-03-09).
+#
+# The coordinator is the right owner for this — it runs continuously every 30s and has
+# the complete view of active jobs. God-delegate is too infrequent (~20 min) for liveness.
+PLANNER_LIVENESS_TIMEOUT=300  # 5 minutes: if no planner active for 5 min, spawn one
+
+ensure_planner_chain_alive() {
+    # Count active planner jobs
+    local active_planners
+    active_planners=$(kubectl_with_timeout 15 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] |
+            select(.status.completionTime == null and (.status.active // 0) > 0) |
+            select(.metadata.name | test("planner"))] | length' \
+        2>/dev/null || echo "-1")
+
+    # kubectl failure — skip check rather than false-positive spawn
+    if [ "$active_planners" = "-1" ]; then
+        echo "[$(date -u +%H:%M:%S)] Planner liveness: kubectl unavailable, skipping check"
+        return 0
+    fi
+
+    if [ "$active_planners" -gt 0 ]; then
+        # Planner chain healthy — reset last-seen timestamp
+        update_state "lastPlannerSeen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        return 0
+    fi
+
+    # No active planners — check how long the gap has been
+    local last_seen
+    last_seen=$(get_state "lastPlannerSeen")
+    local now_epoch
+    now_epoch=$(date +%s)
+    local last_seen_epoch=0
+    [ -n "$last_seen" ] && last_seen_epoch=$(date -d "$last_seen" +%s 2>/dev/null || echo "0")
+    local gap=$(( now_epoch - last_seen_epoch ))
+
+    if [ "$gap" -lt "$PLANNER_LIVENESS_TIMEOUT" ]; then
+        echo "[$(date -u +%H:%M:%S)] Planner liveness: no active planner (gap=${gap}s < ${PLANNER_LIVENESS_TIMEOUT}s threshold). Monitoring."
+        return 0
+    fi
+
+    # Gap exceeded threshold — spawn recovery planner via spawn slot gate
+    echo "[$(date -u +%H:%M:%S)] PLANNER CHAIN DEAD: no planner active for ${gap}s (threshold=${PLANNER_LIVENESS_TIMEOUT}s). Spawning recovery planner."
+
+    # Check circuit breaker before spawning
+    local cb_limit
+    cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "8")
+    local active_jobs
+    active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "99")
+    if [ "$active_jobs" -ge "$cb_limit" ]; then
+        echo "[$(date -u +%H:%M:%S)] Planner liveness: circuit breaker active ($active_jobs >= $cb_limit). Cannot spawn recovery planner."
+        return 0
+    fi
+
+    local ts
+    ts=$(date +%s)
+    local task_name="task-recovery-planner-${ts}"
+    local agent_name="planner-recovery-${ts}"
+
+    # Create Task CR
+    kubectl_with_timeout 15 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${NAMESPACE}
+spec:
+  title: "Recovery: restart planner chain (coordinator watchdog)"
+  description: "Planner chain was dead for ${gap}s. You are the recovery planner. Read the constitution, pick the highest-priority open GitHub issue, implement or delegate it, then spawn your planner successor before exiting. The chain must never break."
+  priority: 10
+  effort: M
+EOF
+
+    # Create Agent CR
+    kubectl_with_timeout 15 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Agent
+metadata:
+  name: ${agent_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/role: "planner"
+    agentex/generation: "1"
+    agentex/spawned-by: "coordinator-watchdog"
+spec:
+  taskRef: ${task_name}
+  role: planner
+  priority: 10
+EOF
+
+    post_coordinator_thought \
+"PLANNER CHAIN RECOVERY: No planner active for ${gap}s. Spawned recovery planner ${agent_name} (task: ${task_name}).
+This is the coordinator's planner-chain liveness watchdog. Gap threshold: ${PLANNER_LIVENESS_TIMEOUT}s.
+The planner chain is the civilization heartbeat — it must never stay dead for more than 5 minutes." \
+        "insight"
+
+    # Reset last-seen so we don't double-spawn
+    update_state "lastPlannerSeen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    echo "[$(date -u +%H:%M:%S)] Recovery planner ${agent_name} spawned."
+}
+
 
 
 echo "Coordinator entering main loop..."
@@ -712,6 +821,14 @@ while true; do
     # Every 6 iterations (~3 min): track debate activity and nudge if needed
     if [ $((iteration % 6)) -eq 0 ]; then
         track_debate_activity
+    fi
+
+    # Every 6 iterations (~3 min): ensure planner chain is alive (issue #792)
+    # The coordinator is the right owner for planner-chain liveness — it runs every 30s
+    # and has full visibility into active jobs. Spawns a recovery planner if chain is dead
+    # for > PLANNER_LIVENESS_TIMEOUT seconds (default 5 min).
+    if [ $((iteration % 6)) -eq 0 ]; then
+        ensure_planner_chain_alive
     fi
 
     sleep "$HEARTBEAT_INTERVAL"
