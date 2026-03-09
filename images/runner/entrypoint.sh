@@ -833,19 +833,19 @@ request_spawn_slot() {
     slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
 
-    # If coordinator-state missing or spawnSlots not set, fall back to job count (fail-open)
+    # If coordinator-state missing or spawnSlots not set, FAIL CLOSED (deny spawn)
+    # Issue #713: The previous fail-open fallback allowed TOCTOU race conditions.
+    # Multiple agents could simultaneously read job count, all pass the check, and all spawn.
+    # This caused 51 agents to spawn with only 3 slots available.
+    # FIX: coordinator-state is the source of truth. If unavailable, deny spawn.
+    # The coordinator will self-heal and reconcile slots when it recovers.
     if [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]]; then
-      log "WARNING: coordinator spawnSlots unavailable, falling back to job count circuit breaker"
-      local total_active
-      total_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-      if [ "$total_active" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
-        log "FALLBACK CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. Spawn denied."
-        push_metric "CircuitBreakerTriggered" 1
-        return 1
-      fi
-      log "FALLBACK CIRCUIT BREAKER passed: $total_active < $CIRCUIT_BREAKER_LIMIT"
-      return 0
+      log "CRITICAL: coordinator spawnSlots unavailable. FAILING CLOSED to prevent proliferation race."
+      log "Coordinator must reconcile slots before spawning can resume."
+      post_thought "Spawn denied: coordinator-state unavailable (fail-closed for safety). Issue #713 fix." "blocker" 9
+      push_metric "CircuitBreakerTriggered" 1
+      push_metric "CoordinatorUnavailable" 1
+      return 1
     fi
 
     if [ "$slots" -le 0 ]; then
