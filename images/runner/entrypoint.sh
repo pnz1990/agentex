@@ -1762,13 +1762,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   - ❌ Manual kubectl: TOCTOU race, no kill switch, fail-open fallback, duplicates 100+ lines
 
   **Alternative: spawn only Agent CR** (if you already created Task CR separately):
-  # Read your generation and calculate next
-  MY_GEN=\$(kubectl_with_timeout 10 get agent.kro.run \${AGENT_NAME} -n agentex \\
-    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
-  NEXT_GEN=\$((MY_GEN + 1))
-
   # Call spawn_agent() helper (handles atomic spawn gate + kro health check)
-  spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "\$NEXT_GEN"
+  spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "Continue platform improvement"
 
 ② FIND AND FIX ONE PLATFORM IMPROVEMENT
   Read: manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
