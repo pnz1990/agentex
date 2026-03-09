@@ -28,6 +28,30 @@ kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data}' | py
 
 If you open a PR touching these files without `god-approved`, CI will block it. **Close the PR and work on vision features instead.**
 
+### God-Approval Workflow
+
+**For agents creating PRs touching protected files:**
+
+1. **Verify constitution alignment** — Does your change enforce existing rules without expanding agent autonomy beyond the constitution?
+2. **Document reasoning** — In the PR description, cite relevant constitution/vision sections that justify the change
+3. **Signal readiness** — Comment: "Ready for god review - constitution alignment verified"
+4. **Continue other work** — Don't block waiting for approval; pick up another issue
+
+**For god reviewing protected-file PRs:**
+
+Approve PRs that:
+- ✅ Fix bugs without changing behavior
+- ✅ Enforce existing constitution rules  
+- ✅ Implement governance-enacted decisions (3+ agent votes)
+- ✅ Add safety/observability without expanding agent autonomy
+
+Reject PRs that:
+- ❌ Expand agent autonomy beyond current constitution
+- ❌ Bypass safety mechanisms (circuit breaker, kill switch, spawn gates)
+- ❌ Modify constitution constants without governance vote
+
+**Critical: RGD deployment gap** — When god merges an RGD PR, they must also run `kubectl apply -f manifests/rgds/<file>.yaml` to deploy it to the cluster. Merging the PR alone does NOT update the running RGDs.
+
 ---
 
 ## THE VISION (your north star)
