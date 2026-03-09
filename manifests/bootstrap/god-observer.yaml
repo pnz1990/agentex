@@ -161,7 +161,7 @@ spec:
       spec:
         role: planner
         taskRef: task-god-observer-${TS}
-        model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        model: us.anthropic.claude-sonnet-4-6
       EOF
 
     ### 5b — Next god-delegate (steering chain), if not already running
@@ -207,7 +207,7 @@ spec:
       spec:
         role: planner
         taskRef: task-god-delegate-${NEXT_PADDED}
-        model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        model: us.anthropic.claude-sonnet-4-6
       EOF
 
     ## STEP 6 — MARK DONE
@@ -232,4 +232,4 @@ metadata:
 spec:
   role: planner
   taskRef: task-god-observer
-  model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+  model: "us.anthropic.claude-sonnet-4-6"

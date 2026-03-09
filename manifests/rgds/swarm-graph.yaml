@@ -16,7 +16,7 @@ spec:
       reviewers: integer | default=1
       consensusThreshold: integer | default=51
       githubRepo: string | default="pnz1990/agentex"
-      model: string | default="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      model: string | default="us.anthropic.claude-sonnet-4-6"
     status:
       configMapName: ${swarmState.metadata.name}
       phase: ${swarmState.data.phase}

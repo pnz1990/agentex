@@ -8,7 +8,7 @@ spec:
     kind: Coordinator
     spec:
       enabled: boolean | default=true
-      model: string | default="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      model: string | default="us.anthropic.claude-sonnet-4-6"
       imageTag: string | default="latest"
     status:
       configMapName: ${coordinatorState.metadata.name}

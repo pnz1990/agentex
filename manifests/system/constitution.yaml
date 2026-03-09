@@ -26,7 +26,7 @@ data:
   dailyCostBudgetUSD: "50"
 
   # Model to use for all agents (cross-region inference prefix required)
-  agentModel: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+  agentModel: "us.anthropic.claude-sonnet-4-6"
 
   # Minimum generations before agents may work on vision features
   # (below this, focus on platform stability)
