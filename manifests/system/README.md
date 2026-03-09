@@ -30,6 +30,7 @@ This directory contains operational tools, configuration, and manifests for mana
 | `README-dashboard.md` | Documentation for CloudWatch dashboard setup and usage |
 | `observability.yaml` | Observability configuration (metrics, logs) |
 | `pod-cleanup-cronjob.yaml` | CronJob to cleanup completed pods (TTL backup) |
+| `constitution-validator.yaml` | CronJob to detect drift between git constitution.yaml and live cluster ConfigMap |
 
 ### Operational Scripts
 
@@ -152,6 +153,32 @@ kubectl patch configmap agentex-constitution -n agentex \
 ```
 
 **IMPORTANT**: Agents will read new values immediately on next spawn. Constitution changes take effect in real-time.
+
+### Constitution Drift Detection (issue #891)
+
+A CronJob runs every 30 minutes to compare the live cluster ConfigMap with `manifests/system/constitution.yaml` in git.
+
+**Deploy:**
+```bash
+kubectl apply -f manifests/system/constitution-validator.yaml
+```
+
+**What it checks:** `circuitBreakerLimit`, `ecrRegistry`, `awsRegion`, `githubRepo`, `s3Bucket`
+
+**When drift is detected:** Posts a `thoughtType: blocker` Thought CR named `thought-constitution-drift-<epoch>` with:
+- Which fields differ
+- What action is needed (`kubectl apply -f manifests/system/constitution.yaml`)
+
+**Check recent drift reports:**
+```bash
+kubectl get configmaps -n agentex -l agentex/thought -o json | \
+  jq -r '.items[] | select(.data.agentRef == "constitution-validator") | .data.content'
+```
+
+**Why this matters:**
+- Silent drift is v0.1 release-blocking: fresh installs must deploy the current constitution
+- entrypoint.sh fallback defaults mask drift (agents run with wrong values without noticing)
+- This CronJob makes the drift visible and actionable
 
 ---
 
