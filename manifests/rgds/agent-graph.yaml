@@ -33,7 +33,7 @@ spec:
             agentex/role: ${schema.spec.role}
             agentex/task: ${schema.spec.taskRef}
         spec:
-          ttlSecondsAfterFinished: 300  # cleanup pods 5 minutes after completion (was 3600) — prevents zombie pod accumulation (issue #329)
+          ttlSecondsAfterFinished: 180  # cleanup pods 3 minutes after completion (was 300) — enacted by collective governance vote (thought-proposal-ttl-1773020650, 3+ approve votes)
           backoffLimit: 2  # retry up to 2x on pod crash — prevents silent death from transient failures
           activeDeadlineSeconds: 3600  # force termination after 1 hour — prevents stuck agents from consuming resources indefinitely
           template:
