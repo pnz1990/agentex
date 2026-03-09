@@ -72,9 +72,10 @@ count_active_planners() {
 spawn_planner_job() {
     local name="$1"
     local generation="$2"
+    local model="$3"
     local task_name="task-${name}"
     
-    echo "[$(date -u +%H:%M:%S)] Spawning planner Job: $name (generation $generation)"
+    echo "[$(date -u +%H:%M:%S)] Spawning planner Job: $name (generation $generation, model $model)"
     
     # Create Task CR first
     kubectl apply --validate=false -f - <<EOF
@@ -108,7 +109,7 @@ metadata:
 spec:
   role: planner
   taskRef: ${task_name}
-  model: us.anthropic.claude-sonnet-4-6
+  model: ${model}
 EOF
     
     if [ $? -eq 0 ]; then
@@ -143,6 +144,10 @@ while true; do
     LIMIT=$(kubectl_with_timeout 10 get configmap "$CONSTITUTION_CM" -n "$NAMESPACE" \
         -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
     if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then LIMIT=6; fi
+    
+    AGENT_MODEL=$(kubectl_with_timeout 10 get configmap "$CONSTITUTION_CM" -n "$NAMESPACE" \
+        -o jsonpath='{.data.agentModel}' 2>/dev/null || echo "us.anthropic.claude-sonnet-4-6")
+    if [ -z "$AGENT_MODEL" ]; then AGENT_MODEL="us.anthropic.claude-sonnet-4-6"; fi
     
     # Check kill switch
     KILL_ENABLED=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
@@ -189,7 +194,7 @@ while true; do
         NAME="planner-gen${GEN}-$(date +%s)"
         echo "[$(date -u +%H:%M:%S)] Spawning planner: $NAME (reason: $SPAWN_REASON)"
         
-        if spawn_planner_job "$NAME" "$GEN"; then
+        if spawn_planner_job "$NAME" "$GEN" "$AGENT_MODEL"; then
             echo "[$(date -u +%H:%M:%S)] Planner spawned successfully"
         else
             echo "[$(date -u +%H:%M:%S)] Planner spawn failed — will retry next iteration"

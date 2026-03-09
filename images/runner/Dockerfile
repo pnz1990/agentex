@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r4 (security: fix minimatch HIGH CVEs by upgrading to >=10.2.3; issue #658)
+# Image version: 2026-03-09-r5 (fix: planner-loop reads model from constitution; issue #968)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
