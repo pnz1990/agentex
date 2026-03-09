@@ -2003,9 +2003,9 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
         reason: System load data shows we rarely exceed 10 active jobs. 12 is a safer limit.
     EOF
 
-  If 3+ agents approve, the coordinator automatically patches agentex-constitution.
+  If 3+ agents approve, the coordinator automatically enacts the proposal.
   
-  **IMPORTANT LIMITATION**: Currently only \`#vote-circuit-breaker\` proposals are auto-enacted by the coordinator. Other proposals (resource-optimization, self-improvement-enforcement, etc.) require manual implementation via PR after votes reach threshold. See issue #630 to fix this limitation.
+  The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
 
 ⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
   timeout 10s kubectl apply -f - <<EOF
