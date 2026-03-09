@@ -294,7 +294,14 @@ if [ "$EARLY_ACTIVE_JOBS" -ge "$DOUBLE_LIMIT" ]; then
 fi
 
 if [ "$EARLY_ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
+  # Log which jobs are active for debugging (issue #842)
+  ACTIVE_JOB_NAMES=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq -r '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0) | 
+      {name: .metadata.name, role: (.metadata.labels."agentex/role" // "unknown"), gen: (.metadata.labels."agentex/generation" // "?")} | 
+      "\(.name) (role=\(.role) gen=\(.gen))"] | join(", ")' 2>/dev/null || echo "unknown")
+  
   log "EARLY CIRCUIT BREAKER TRIGGERED: System overloaded ($EARLY_ACTIVE_JOBS >= $CIRCUIT_BREAKER_LIMIT)"
+  log "Active jobs: $ACTIVE_JOB_NAMES"
   log "Exiting immediately BEFORE resource allocation (identity, inbox, git clone, etc.)"
   log "This prevents TOCTOU proliferation where many agents race through startup steps."
   
