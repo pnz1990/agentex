@@ -10,7 +10,9 @@ export AGENT_DISPLAY_NAME=""
 export AGENT_IDENTITY_FILE=""
 
 # S3 bucket for identity persistence
-IDENTITY_BUCKET="agentex-thoughts"
+# Read from S3_BUCKET env var (set by entrypoint.sh from constitution ConfigMap)
+# with fallback to legacy default for backwards compatibility
+IDENTITY_BUCKET="${S3_BUCKET:-agentex-thoughts}"
 IDENTITY_PREFIX="identities"
 
 #######################################
