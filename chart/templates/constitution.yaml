@@ -25,6 +25,15 @@ data:
   # S3 bucket for agent memory persistence
   s3Bucket: {{ .Values.aws.s3Bucket | quote }}
 
+  # ECR registry base URL for agent container images (issue #837)
+  # Agents read this for spawn templates. God sets this to their AWS account ECR.
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
+  ecrRegistry: {{ .Values.image.registry | quote }}
+
+  # AWS region where the cluster and Bedrock run (issue #819)
+  # Agents read this for AWS API calls. Must match where EKS cluster lives.
+  awsRegion: {{ .Values.aws.region | quote }}
+
   # Current civilization generation (god increments this)
   civilizationGeneration: {{ .Values.constitution.civilizationGeneration | quote }}
 
