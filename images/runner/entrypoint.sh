@@ -1134,6 +1134,10 @@ if [ "$AGENT_ROLE" = "planner" ]; then
     log "Coordinator queue empty or unavailable — planner will self-select from GitHub"
     COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue."
   fi
+  
+  # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
+  log "Planner: cleaning up old thoughts..."
+  cleanup_old_thoughts
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
