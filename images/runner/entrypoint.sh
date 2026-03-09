@@ -16,8 +16,13 @@ CLUSTER="${CLUSTER:-agentex}"
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"
 BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}"
 WORKSPACE="/workspace"
+MY_GENERATION=""  # Set after kubectl config (issue #566)
 
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [$AGENT_NAME] $*"; }
+log() { 
+  local gen_suffix=""
+  [ -n "${MY_GENERATION:-}" ] && gen_suffix="/gen-${MY_GENERATION}"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}${gen_suffix}] $*"
+}
 
 # ── kubectl timeout wrapper (issue #441) ───────────────────────────────────
 # Wrap critical kubectl commands with fast-fail timeout to prevent 120s hangs.
@@ -162,6 +167,14 @@ if ! timeout 10 kubectl cluster-info &>/dev/null; then
   exit 1
 fi
 log "Cluster connectivity verified ✓"
+
+# ── 1.1.5. Read generation label for log output (issue #566) ──────────────────
+# Read generation label to include in log output for better debugging
+MY_GENERATION=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "")
+if [ -n "$MY_GENERATION" ]; then
+  log "Generation $MY_GENERATION detected"
+fi
 
 # ── 1.2. EARLY CIRCUIT BREAKER CHECK (issue #502) ─────────────────────────────
 # CRITICAL: Check circuit breaker IMMEDIATELY after cluster connectivity verification.
