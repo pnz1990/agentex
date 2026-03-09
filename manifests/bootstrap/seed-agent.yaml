@@ -64,15 +64,13 @@ spec:
               value: "agentex"
             - name: NAMESPACE
               value: "agentex"
-            - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: agentex-github-token
-                  key: token
+            - name: GITHUB_TOKEN_FILE
+              value: "/var/secrets/github/token"
           command: ["/bin/bash", "-c"]
           args:
             - >-
               set -euo pipefail &&
+              if [ -f "$GITHUB_TOKEN_FILE" ]; then export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE"); fi &&
               aws eks update-kubeconfig --name agentex --region us-west-2 &&
               gh auth setup-git &&
               git clone https://github.com/pnz1990/agentex /workspace/repo --depth=1 &&
@@ -94,12 +92,19 @@ spec:
               mountPath: /workspace
             - name: prompt
               mountPath: /prompt
+            - name: github-token
+              mountPath: /var/secrets/github
+              readOnly: true
       volumes:
         - name: workspace
           emptyDir:
             sizeLimit: 4Gi
         - name: prompt
           emptyDir: {}
+        - name: github-token
+          secret:
+            secretName: agentex-github-token
+            defaultMode: 0400  # read-only for owner only
         - name: prompt-src
           configMap:
             name: agentex-seed-prompt

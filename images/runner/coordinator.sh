@@ -48,6 +48,17 @@ if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
     kubectl config use-context local
 fi
 
+# ── Configure GitHub Authentication (issue #6) ───────────────────────────────
+# Read GitHub token from read-only file mount instead of environment variable
+if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
+  export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
+  echo "GitHub token loaded from read-only file mount"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  echo "GitHub token loaded from environment variable (legacy)"
+else
+  echo "WARNING: No GitHub token available - gh CLI commands will fail"
+fi
+
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
 # kubectl timeout wrapper (issue #692: prevent 120s hangs during cluster connectivity issues)
