@@ -50,6 +50,15 @@ fi
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
+# kubectl timeout wrapper (issue #692)
+# Wrap kubectl commands with fast-fail timeout to prevent 120s hangs.
+# When kubectl times out (cluster unreachable), detect it in 10s instead of 120s.
+kubectl_with_timeout() {
+  local timeout_secs="${1:-10}"
+  shift
+  timeout "${timeout_secs}s" kubectl "$@" 2>&1
+}
+
 # Push CloudWatch metric (issue #587: visibility for collective intelligence)
 push_metric() {
     local metric_name="$1"
