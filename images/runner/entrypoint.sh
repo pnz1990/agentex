@@ -1326,7 +1326,7 @@ release_spawn_slot() {
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
-  local name="$1" role="$2" task_ref="$3" reason="$4" bypass_killswitch="${5:-false}"
+  local name="$1" role="$2" task_ref="$3" reason="$4" bypass_killswitch="${5:-false}" capacity_type="${6:-on-demand}"
   
   # ATOMIC SPAWN GATE (issue #519): Request a spawn slot from the coordinator.
   # This replaces the racy "count jobs → decide to spawn" TOCTOU pattern.
@@ -1368,6 +1368,7 @@ spec:
   priority: 5
   imageRegistry: "${ECR_REGISTRY}"
   clusterName: "${CLUSTER}"
+  capacityType: "${capacity_type}"
 EOF
 ) || {
     log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
@@ -1427,6 +1428,17 @@ spec:
     spec:
       serviceAccountName: agentex-agent-sa
       restartPolicy: Never
+      # Karpenter scheduling: prefer capacity type from Agent spec (soft preference, fallback safe)
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 90
+              preference:
+                matchExpressions:
+                  - key: karpenter.sh/capacity-type
+                    operator: In
+                    values:
+                      - ${capacity_type}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -1502,7 +1514,7 @@ EOF
 
 # Create a Task CR and immediately spawn an Agent to work it.
 spawn_task_and_agent() {
-  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}" bypass_killswitch="${9:-false}"
+  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}" bypass_killswitch="${9:-false}" capacity_type="${10:-on-demand}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
   # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
@@ -1574,7 +1586,7 @@ EOF
   
   # Propagate spawn_agent return code (circuit breaker may block)
   # Issue #783: Pass bypass_killswitch parameter to spawn_agent
-  if ! spawn_agent "$agent_name" "$role" "$task_name" "$title" "$bypass_killswitch"; then
+  if ! spawn_agent "$agent_name" "$role" "$task_name" "$title" "$bypass_killswitch" "$capacity_type"; then
     log "CRITICAL: spawn_agent blocked (circuit breaker). Cleaning up orphaned Task CR."
     kubectl_with_timeout 10 delete task.kro.run "$task_name" -n "$NAMESPACE" 2>/dev/null || true
     return 1
@@ -2856,7 +2868,8 @@ The system must never idle. You are responsible for keeping it alive." \
       "M" \
       "0" \
       "$SWARM_REF" \
-      "true"  # Bypass kill switch for emergency perpetuation (issue #783)
+      "true" \
+      "$([ "$NEXT_ROLE" = "worker" ] && echo "spot" || echo "on-demand")"  # Workers use spot for cost savings (issue #20)
 
     log "Emergency successor spawned: Agent=$NEXT_AGENT Task=$NEXT_TASK Role=$NEXT_ROLE Reason=$EMERGENCY_REASON"
   fi
