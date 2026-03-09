@@ -1,5 +1,8 @@
 #!/bin/bash
-set -euo pipefail
+# CRITICAL FIX (issue #619): Remove -e flag to prevent crash-on-error
+# Coordinator must handle errors gracefully, not crash-loop on kubectl timeouts
+# Changed: set -euo pipefail → set -uo pipefail
+set -uo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════
 # COORDINATOR — The Civilization's Persistent Brain
@@ -492,30 +495,31 @@ iteration=0
 while true; do
     iteration=$((iteration + 1))
 
-    heartbeat
+    # Wrap each operation in error handling (issue #619 fix)
+    heartbeat || echo "[$(date -u +%H:%M:%S)] WARNING: heartbeat failed, continuing..."
 
     # Every 5 iterations (~2.5 min): refresh task queue from GitHub
     if [ $((iteration % 5)) -eq 0 ]; then
-        refresh_task_queue
+        refresh_task_queue || echo "[$(date -u +%H:%M:%S)] WARNING: refresh_task_queue failed, continuing..."
     fi
 
     # Every iteration: cleanup stale assignments
-    cleanup_stale_assignments
+    cleanup_stale_assignments || echo "[$(date -u +%H:%M:%S)] WARNING: cleanup_stale_assignments failed, continuing..."
 
     # Every 4 iterations (~2 min): reconcile spawn slots against actual job count
     # This recovers leaked slots when agents crash before releasing them
     if [ $((iteration % 4)) -eq 0 ]; then
-        reconcile_spawn_slots
+        reconcile_spawn_slots || echo "[$(date -u +%H:%M:%S)] WARNING: reconcile_spawn_slots failed, continuing..."
     fi
 
     # Every 3 iterations (~1.5 min): tally votes and potentially enact
     if [ $((iteration % 3)) -eq 0 ]; then
-        tally_and_enact_votes
+        tally_and_enact_votes || echo "[$(date -u +%H:%M:%S)] WARNING: tally_and_enact_votes failed, continuing..."
     fi
 
     # Every 6 iterations (~3 min): track debate activity and nudge if needed
     if [ $((iteration % 6)) -eq 0 ]; then
-        track_debate_activity
+        track_debate_activity || echo "[$(date -u +%H:%M:%S)] WARNING: track_debate_activity failed, continuing..."
     fi
 
     sleep "$HEARTBEAT_INTERVAL"
