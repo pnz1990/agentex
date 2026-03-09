@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r6 (fix: security CVEs - correct npm dep upgrades + remove gnupg; issue #963)
+# Image version: 2026-03-09-r7 (fix: security CVEs - fix npm CVE patch using clean-dir install; issue #963)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
@@ -48,28 +48,34 @@ RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
 # Fix npm bundled dependency CVEs (issue #858, issue #658, issue #963)
-# npm bundles tar, minimatch, and glob in its own node_modules directory.
+# npm bundles tar and minimatch in its own node_modules directory.
 # HIGH CVEs fixed:
 #   tar 7.5.9 -> 7.5.11 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
 #   minimatch 10.2.2 -> 10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable)
 #
-# IMPORTANT: Use $(npm root -g) to find npm's actual location dynamically.
-# After 'npm install -g npm@latest', npm is at /usr/local/lib/node_modules/npm,
-# NOT /usr/lib/node_modules/npm (the old location from nodesource install).
-# The previous fix used a hardcoded path that silently failed (2>/dev/null || true)
-# and left vulnerable versions in place.
+# APPROACH: Install patched packages into a clean temp directory (no existing package.json),
+# then copy them over npm's bundled versions.
 #
-# Fix: find the real npm root, then install exact patched versions (not ranges).
-RUN npm install -g npm@latest \
-    && NPM_GLOBAL_ROOT="$(npm root -g)" \
-    && NPM_DIR="${NPM_GLOBAL_ROOT}/npm" \
-    && echo "npm global dir: ${NPM_DIR}" \
-    && cd "${NPM_DIR}" \
-    && npm install --prefer-online --no-save \
-        tar@7.5.11 \
-        minimatch@10.2.3 \
-    && echo "tar version: $(node -e 'console.log(require(\"./node_modules/tar/package.json\").version)')" \
-    && echo "minimatch version: $(node -e 'console.log(require(\"./node_modules/minimatch/package.json\").version)')" \
+# Why NOT use "cd $(npm root -g)/npm && npm install tar minimatch":
+#   npm's own package.json has @npmcli/docs as a devDependency which doesn't exist on
+#   the npm registry (returns 404). Running npm install in npm's directory triggers
+#   resolution of ALL deps including devDeps, causing E404 build failure.
+#
+# The clean-dir approach: install packages in an isolated directory with a minimal
+# package.json — no extra deps, no 404 errors, fully deterministic.
+RUN NPM_DIR="$(npm root -g)/npm" \
+    && echo "Patching npm bundled deps at: ${NPM_DIR}" \
+    && mkdir -p /tmp/npm-patch \
+    && echo '{"name":"patch","version":"1.0.0"}' > /tmp/npm-patch/package.json \
+    && cd /tmp/npm-patch \
+    && npm install --save-exact tar@7.5.11 minimatch@10.2.3 \
+    && echo "Installed tar: $(node -e 'console.log(require(\"/tmp/npm-patch/node_modules/tar/package.json\").version)')" \
+    && echo "Installed minimatch: $(node -e 'console.log(require(\"/tmp/npm-patch/node_modules/minimatch/package.json\").version)')" \
+    && cp -r /tmp/npm-patch/node_modules/tar/. "${NPM_DIR}/node_modules/tar/" \
+    && cp -r /tmp/npm-patch/node_modules/minimatch/. "${NPM_DIR}/node_modules/minimatch/" \
+    && echo "npm tar version after patch: $(node -e 'console.log(require(\"'${NPM_DIR}'/node_modules/tar/package.json\").version)')" \
+    && echo "npm minimatch version after patch: $(node -e 'console.log(require(\"'${NPM_DIR}'/node_modules/minimatch/package.json\").version)')" \
+    && rm -rf /tmp/npm-patch \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
