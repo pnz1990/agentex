@@ -29,14 +29,20 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-agentex}"
 STATE_CM="coordinator-state"
 HEARTBEAT_INTERVAL=30  # seconds
-VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
+
+# ── CONSTITUTION: Read god-owned constants ─────────────────────────────────
+# Read vote threshold from constitution (issue #674)
+# God can adjust voting rules without rebuilding coordinator image
+VOTE_THRESHOLD=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "3")
+if ! [[ "$VOTE_THRESHOLD" =~ ^[0-9]+$ ]]; then VOTE_THRESHOLD=3; fi
 
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "Namespace: $NAMESPACE"
 echo "State ConfigMap: $STATE_CM"
-echo "Vote threshold: $VOTE_THRESHOLD approvals required"
+echo "Vote threshold: $VOTE_THRESHOLD approvals required (from constitution)"
 echo ""
 
 # ── Configure kubectl ────────────────────────────────────────────────────────
@@ -103,7 +109,7 @@ log_decision() {
     if [ -z "$current_log" ]; then
         update_state "decisionLog" "$log_entry"
     else
-        update_state "decisionLog" "${current_log} | ${log_entry}")
+        update_state "decisionLog" "${current_log} | ${log_entry}"
     fi
     echo "[$(date -u +%H:%M:%S)] Decision logged: $decision"
 }
