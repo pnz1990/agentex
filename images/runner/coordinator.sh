@@ -926,19 +926,17 @@ while true; do
     # This prevents the 2-minute reconciliation gap from allowing 16+ agents when limit is 12.
     
     # Read current circuit breaker limit
-    local cb_limit
     cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
         -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
     if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=12; fi
     
     # Count active jobs (fast check, only when needed)
-    local current_active
     current_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
         jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
         2>/dev/null || echo "0")
     
     # Near capacity threshold: reconcile if within 3 slots of limit
-    local near_capacity_threshold=$((cb_limit - 3))
+    near_capacity_threshold=$((cb_limit - 3))
     
     if [ "$current_active" -ge "$near_capacity_threshold" ]; then
         # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
