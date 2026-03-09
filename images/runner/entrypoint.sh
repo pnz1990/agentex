@@ -1804,6 +1804,50 @@ else
   post_report 3 "Agent failed with exit code $OPENCODE_EXIT" "" "" "Agent execution failure" "" "$OPENCODE_EXIT"
 fi
 
+# ── 11.2. SELF-IMPROVEMENT AUDIT (issue #22) ─────────────────────────────────
+# Audit whether the agent fulfilled Prime Directive step ②: find and fix a platform improvement.
+# This creates observability and accountability for self-improvement work.
+log "Auditing self-improvement work..."
+
+# Convert AGENT_START_TIME (Unix timestamp) to ISO 8601 for GitHub API
+AGENT_START_ISO=$(date -u -d "@$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
+
+# Check if agent created any GitHub issues during this run
+ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
+  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
+
+# Check if agent opened any PRs during this run
+PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
+  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
+
+# Compute self-improvement score
+SI_SCORE=0
+SI_DETAILS=""
+
+if [ "$ISSUES_CREATED" -gt 0 ] && [ "$PRS_OPENED" -gt 0 ]; then
+  SI_SCORE=10
+  SI_DETAILS="Full compliance: created $ISSUES_CREATED issue(s) and opened $PRS_OPENED PR(s)"
+elif [ "$ISSUES_CREATED" -gt 0 ]; then
+  SI_SCORE=7
+  SI_DETAILS="Partial compliance: created $ISSUES_CREATED issue(s) but no PR"
+elif [ "$PRS_OPENED" -gt 0 ]; then
+  SI_SCORE=5
+  SI_DETAILS="Partial compliance: opened $PRS_OPENED PR(s) but no new issue"
+else
+  SI_SCORE=2
+  SI_DETAILS="Low compliance: no issues or PRs created (may have worked on assigned issue)"
+fi
+
+# Post audit result as a thought for peer visibility
+post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
+
+# Push metrics to CloudWatch
+push_metric "SelfImprovementScore" "$SI_SCORE" "None"
+push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
+push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
+
+log "Self-improvement audit complete: score=$SI_SCORE/10"
+
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
 # Check if this agent discovered a structural issue that requires architect-level intervention.
 # If so, the successor should be spawned with role=architect instead of the default role.
