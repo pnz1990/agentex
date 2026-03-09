@@ -234,6 +234,81 @@ data:
           "height": 6,
           "x": 12,
           "y": 18
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "CoordinatorHeartbeat", { "stat": "Sum", "label": "Heartbeats", "color": "#2ca02c" } ],
+              [ ".", "ActiveJobs", { "stat": "Average", "yAxis": "right", "label": "Active Jobs" } ],
+              [ ".", "SpawnSlots", { "stat": "Average", "yAxis": "right", "label": "Available Slots" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "us-west-2",
+            "title": "Coordinator Health & Load",
+            "period": 60,
+            "yAxis": {
+              "left": {
+                "label": "Heartbeats/min",
+                "showUnits": false,
+                "min": 0
+              },
+              "right": {
+                "label": "Job Count",
+                "showUnits": false,
+                "min": 0
+              }
+            },
+            "annotations": {
+              "horizontal": [
+                {
+                  "label": "Expected heartbeat rate",
+                  "value": 2,
+                  "fill": "below",
+                  "color": "#ff7f0e"
+                }
+              ]
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 0,
+          "y": 24
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "AWS/EKS", "pod_restart_count", { "stat": "Sum", "label": "Coordinator Restarts" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "us-west-2",
+            "title": "Coordinator Pod Restarts",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Restart Count",
+                "showUnits": false,
+                "min": 0
+              }
+            },
+            "annotations": {
+              "horizontal": [
+                {
+                  "label": "Restart threshold",
+                  "value": 3,
+                  "fill": "above",
+                  "color": "#d62728"
+                }
+              ]
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 12,
+          "y": 24
         }
       ]
     }

@@ -1,6 +1,6 @@
 # CloudWatch Dashboard for Agentex
 
-This directory contains a CloudWatch dashboard for monitoring the self-improving agent civilization.
+This directory contains a CloudWatch dashboard and alarms for monitoring the self-improving agent civilization.
 
 ## What It Shows
 
@@ -15,6 +15,8 @@ The dashboard provides real-time visibility into:
 7. **Recent Agent Errors** — Log query showing ERROR/WARNING/CRITICAL messages
 8. **Bedrock API Usage** — Invocations and errors from the Bedrock API
 9. **Agent Memory Usage** — Memory utilization across agent pods
+10. **Coordinator Health & Load** — Coordinator heartbeats, active jobs, and spawn slots (issue #731)
+11. **Coordinator Pod Restarts** — Tracks coordinator pod restart count to detect crash loops (issue #731)
 
 ## Architecture
 
@@ -25,17 +27,21 @@ The dashboard combines two data sources:
 - No additional configuration required
 
 ### 2. Custom CloudWatch Metrics (pushed by agents)
-The runner's `entrypoint.sh` pushes these custom metrics to the `Agentex` namespace:
+The runner's `entrypoint.sh` and `coordinator.sh` push these custom metrics to the `Agentex` namespace:
 
-| Metric | When | Dimensions |
-|--------|------|------------|
-| `AgentRun` | Agent starts | Role, Agent |
-| `ThoughtCreated` | Agent posts Thought CR | Role, Agent |
-| `MessageCreated` | Agent posts Message CR | Role, Agent |
-| `TaskCreated` | Agent creates Task CR | Role, Agent |
-| `AgentFailure` | Agent exits with non-zero code | Role, Agent |
-| `PRCreated` | Agent opens GitHub PR | Role, Agent |
-| `IssueCreated` | Agent creates GitHub Issue | Role, Agent |
+| Metric | When | Dimensions | Source |
+|--------|------|------------|--------|
+| `AgentRun` | Agent starts | Role, Agent | entrypoint.sh |
+| `ThoughtCreated` | Agent posts Thought CR | Role, Agent | entrypoint.sh |
+| `MessageCreated` | Agent posts Message CR | Role, Agent | entrypoint.sh |
+| `TaskCreated` | Agent creates Task CR | Role, Agent | entrypoint.sh |
+| `AgentFailure` | Agent exits with non-zero code | Role, Agent | entrypoint.sh |
+| `PRCreated` | Agent opens GitHub PR | Role, Agent | entrypoint.sh |
+| `IssueCreated` | Agent creates GitHub Issue | Role, Agent | entrypoint.sh |
+| `CoordinatorHeartbeat` | Coordinator heartbeat (every 30s) | Component=Coordinator | coordinator.sh |
+| `CoordinatorHealthy` | Coordinator health status | Component=Coordinator | coordinator.sh |
+| `ActiveJobs` | Current active job count | Component=Coordinator | coordinator.sh |
+| `SpawnSlots` | Available spawn slots | Component=Coordinator | coordinator.sh |
 
 Metrics are pushed via `push_metric()` helper in `entrypoint.sh`:
 ```bash
@@ -44,7 +50,9 @@ push_metric "AgentRun" 1
 
 ## Deployment
 
-### Option 1: Apply via kubectl + aws CLI
+### Dashboard
+
+#### Option 1: Apply via kubectl + aws CLI
 
 ```bash
 # Apply the ConfigMaps
@@ -55,7 +63,7 @@ kubectl get configmap agentex-dashboard-scripts -n agentex \
   -o jsonpath='{.data.apply-dashboard\.sh}' | bash
 ```
 
-### Option 2: Direct AWS CLI
+#### Option 2: Direct AWS CLI
 
 ```bash
 kubectl apply -f manifests/system/cloudwatch-dashboard.yaml
@@ -64,6 +72,35 @@ aws cloudwatch put-dashboard \
   --dashboard-name agentex-activity \
   --dashboard-body "$(kubectl get configmap agentex-dashboard-definition -n agentex -o jsonpath='{.data.dashboard\.json}')" \
   --region us-west-2
+```
+
+### Coordinator Health Alarms (issue #731)
+
+Automated CloudWatch alarms for coordinator health monitoring:
+
+```bash
+# Apply the alarm configuration
+kubectl apply -f manifests/system/coordinator-alarms.yaml
+
+# Deploy the alarms to CloudWatch
+kubectl get configmap agentex-coordinator-alarms -n agentex \
+  -o jsonpath='{.data.apply-alarms\.sh}' | bash
+
+# Optional: Configure SNS notifications
+SNS_TOPIC_ARN=arn:aws:sns:us-west-2:ACCOUNT_ID:agentex-alerts \
+  kubectl get configmap agentex-coordinator-alarms -n agentex \
+  -o jsonpath='{.data.apply-alarms\.sh}' | bash
+```
+
+**Alarms configured:**
+1. **Coordinator Heartbeat Missing** — Triggers if no heartbeat metrics received for 3+ minutes
+2. **Coordinator Pod Restart Loop** — Triggers if coordinator pod restarts 3+ times in 15 minutes
+
+**Testing alarms:**
+```bash
+# Test heartbeat alarm (scales coordinator to 0 for 5 minutes)
+kubectl get configmap agentex-coordinator-alarms -n agentex \
+  -o jsonpath='{.data.test-heartbeat-alarm\.sh}' | bash
 ```
 
 ### View the Dashboard
@@ -96,12 +133,13 @@ aws cloudwatch get-metric-statistics \
 ## Cost
 
 CloudWatch costs:
-- **Metrics**: $0.30/metric/month for custom metrics (7 metrics = ~$2.10/month)
+- **Metrics**: $0.30/metric/month for custom metrics (11 metrics = ~$3.30/month)
 - **Dashboard**: Free (up to 3 dashboards, 50 metrics per dashboard)
+- **Alarms**: First 10 alarms free, then $0.10/alarm/month
 - **Container Insights**: Included with EKS Auto Mode cluster pricing
 - **Metric API calls**: $0.01 per 1,000 GetMetricData requests
 
-Estimated cost: **~$3-5/month** for the full monitoring stack.
+Estimated cost: **~$4-6/month** for the full monitoring stack (dashboard + alarms).
 
 ## Integration with Runner
 
