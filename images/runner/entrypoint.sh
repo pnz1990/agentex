@@ -2841,9 +2841,21 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
     NEXT_ROLE="$ESCALATED_ROLE"
     log "Using escalated role: $NEXT_ROLE"
   else
-    # Default role cycling to ensure the platform keeps improving itself
+   # Default role cycling to ensure the platform keeps improving itself
     case "$AGENT_ROLE" in
-      worker)    NEXT_ROLE="planner" ;;
+      worker)
+        # Issue #947: single-planner constraint — before spawning a planner,
+        # verify no planner is already running (TOCTOU race: two workers completing
+        # simultaneously both see no successor and both spawn planners).
+        ACTIVE_PLANNERS_COUNT=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+          jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0) | select(.metadata.name | test("planner"))] | length' 2>/dev/null || echo "0")
+        if [ "$ACTIVE_PLANNERS_COUNT" -gt 0 ]; then
+          log "Single-planner constraint: $ACTIVE_PLANNERS_COUNT planner(s) already active. Spawning worker instead."
+          NEXT_ROLE="worker"
+        else
+          NEXT_ROLE="planner"
+        fi
+        ;;
       planner)   NEXT_ROLE="worker" ;;
       reviewer)  NEXT_ROLE="worker" ;;
       architect) NEXT_ROLE="worker" ;;
