@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     ca-certificates \
     gnupg \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # kubectl
