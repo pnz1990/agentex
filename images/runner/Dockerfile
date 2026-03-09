@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r4 (security: fix minimatch HIGH CVEs by upgrading to >=10.2.3; issue #658)
+# Image version: 2026-03-09-r5 (security: fix npm bundled dep scan by targeting all npm paths; issue #963)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
@@ -40,23 +40,34 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
-# Fix npm bundled dependency CVEs (issue #858, issue #658)
-# npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
+# Fix npm bundled dependency CVEs (issue #858, issue #658, issue #963)
+# npm bundles tar, minimatch, and glob in its node_modules/ directory.
 # HIGH CVEs fixed:
-#   tar: >=7.5.10 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
-#   minimatch: >=10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable, 10.2.3 is fixed)
-#     NOTE: constraint must be >=10.2.3 not >=9.0.7 because npm 11 resolves to v10.x series
-#     and 10.2.2 has HIGH CVEs; using >=9.0.7 installs 10.2.2 (latest matching), not 10.2.3
-#   glob: >=10.5.0 (CVE for glob <10.5.0)
-# Fix: upgrade npm itself (npm 11+ ships with patched bundled deps)
-# Also: upgrade specific vulnerable packages directly in npm's own node_modules
+#   tar: 7.5.10+ (CVE-2026-29786: 7.5.9 vulnerable)
+#   minimatch: 10.2.3+ (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable)
+#   glob: 10.5.0+ (CVE for glob <10.5.0)
+#
+# Root cause of previous fix failure (PR #954):
+#   After "npm install -g npm@latest" the NEW npm lands at $(npm root -g)/npm
+#   (typically /usr/local/lib/node_modules/npm on nodesource installs).
+#   Trivy scans ALL npm installations including the ORIGINAL nodesource npm at
+#   /usr/lib/node_modules/npm — so we must patch BOTH locations.
+#   The previous fix hardcoded /usr/lib/node_modules/npm but used "2>/dev/null || true"
+#   which silently swallowed failures, and may not have patched the right directory.
+#
+# Fix: patch all discovered npm node_modules directories explicitly.
 RUN npm install -g npm@latest \
-    && cd /usr/lib/node_modules/npm \
-    && npm install --prefer-online \
-        tar@">=7.5.10" \
-        minimatch@">=10.2.3" \
-        glob@">=10.5.0" \
-    2>/dev/null || true \
+    && for NPM_DIR in /usr/lib/node_modules/npm /usr/local/lib/node_modules/npm $(npm root -g)/npm; do \
+         if [ -d "$NPM_DIR/node_modules" ]; then \
+           echo "Patching npm bundled deps in $NPM_DIR" \
+           && cd "$NPM_DIR" \
+           && npm install --prefer-online \
+               tar@">=7.5.10" \
+               minimatch@">=10.2.3" \
+               glob@">=10.5.0" \
+           && echo "Patched $NPM_DIR successfully"; \
+         fi; \
+       done \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
