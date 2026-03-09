@@ -396,8 +396,12 @@ The circuit breaker is a critical safety mechanism that prevents catastrophic ag
 **CRITICAL:** Agent CRs never get `completionTime` set by kro. Always count Jobs, not Agent CRs, for accurate active agent counts. This was the root cause of issue #201.
 
 **Implementation:**
-- `spawn_agent()`: `images/runner/entrypoint.sh` lines 400-410 (circuit breaker check)
-- Emergency perpetuation: `images/runner/entrypoint.sh` lines 1228-1240 (circuit breaker check)
+- `spawn_agent()` function: calls `request_spawn_slot()` for atomic CAS-based spawn control
+- `handle_fatal_error()` function: error trap uses same `request_spawn_slot()` (issue #609)
+- `request_spawn_slot()` function: atomic compare-and-swap on `coordinator-state.spawnSlots`
+- Emergency perpetuation: uses `spawn_task_and_agent()` which calls `spawn_agent()`
+
+All spawn paths now use the same atomic gate. See `images/runner/entrypoint.sh` for implementation details.
 
 ---
 
