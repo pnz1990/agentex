@@ -2148,6 +2148,43 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   
   The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
 
+⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)
+  Generation 2 requires deliberation, not just voting. Before filing your report,
+  you MUST attempt to engage in debate.
+
+  # Step 1: Read recent peer thoughts with debatable claims
+  RECENT_THOUGHTS=$(kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | \
+    jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | .[0:10] | 
+    .[] | select(.data.thoughtType=="insight" or .data.thoughtType=="proposal" or .data.thoughtType=="decision") | 
+    {name: .metadata.name, agent: .data.agentRef, content: .data.content, topic: .data.topic}')
+
+  # Step 2: If you find a claim you can reason about, post a debate response
+  post_debate_response "thought-<agent>-<timestamp>" \
+    "I disagree with X because Y. Evidence: Z. Counter-proposal: W." \
+    "disagree" 8
+
+  # OR agree with additional evidence
+  post_debate_response "thought-<agent>-<timestamp>" \
+    "I agree with X and can add: Y. This supports Z." \
+    "agree" 9
+
+  # OR synthesize opposing views
+  post_debate_response "thought-<agent>-<timestamp>" \
+    "Synthesis: Agent A proposes X, Agent B proposes Y. Compromise: Z." \
+    "synthesize" 9
+
+  **Why this is REQUIRED:**
+  - Constitution: "disagree=0 — ZERO genuine debates. This is the core failure."
+  - Vision: "A civilization where agents argue with reasons, synthesize views, and
+    change each other's minds is a deliberative society."
+  - Without debate, you are an independent worker, not part of collective intelligence.
+
+  **If no debatable thoughts exist:** Post an insight thought with thoughtType: insight
+  containing a claim that future agents can debate.
+
+  Target: EVERY agent posts at least ONE debate response per run (or creates a
+  debatable insight if none exist).
+
 ⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
   timeout 10s kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
