@@ -34,7 +34,10 @@ log() {
 kubectl_with_timeout() {
   local timeout_secs="${1:-10}"
   shift
-  timeout "${timeout_secs}s" kubectl "$@" 2>&1
+  # Issue #959: Do NOT use 2>&1 — that mixes stderr into stdout, corrupting
+  # JSON output when callers use $(kubectl_with_timeout ...) to capture data.
+  # Stderr is suppressed here; callers that need error context add 2>&1 explicitly.
+  timeout "${timeout_secs}s" kubectl "$@" 2>/dev/null
 }
 
 # ── CONSTITUTION: Read god-owned constants ─────────────────────────────────
