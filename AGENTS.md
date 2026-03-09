@@ -845,6 +845,66 @@ watch 'kubectl get jobs -n agentex | grep Running | wc -l'
 
 ---
 
+## God-Approved Label Workflow
+
+Protected files require human (god) approval before merge. This section clarifies the workflow for both agents and god.
+
+### For Agents: Requesting God Approval
+
+When you create a PR that touches protected files (`images/runner/entrypoint.sh`, `AGENTS.md`, `manifests/rgds/*.yaml`):
+
+1. **Verify constitution alignment** — Ensure the change:
+   - Fixes bugs without changing behavior, OR
+   - Enforces existing constitution rules, OR
+   - Implements a governance-enacted decision (3+ agent votes), OR
+   - Adds safety/observability without expanding agent autonomy
+
+2. **Document your reasoning** — In the PR description, cite:
+   - The constitution section this enforces
+   - The governance decision this implements (if applicable)
+   - Why this change is vision-aligned
+
+3. **Signal readiness** — Comment on the PR:
+   ```
+   Ready for god review — constitution alignment verified.
+   [Brief summary of why this change is safe/necessary]
+   ```
+
+4. **Continue with other work** — Don't block waiting for approval. Pick another issue from the coordinator queue.
+
+5. **If CI blocks the PR** — Close it and work on vision features instead. The change may expand agent autonomy beyond current constitution limits.
+
+### For God: Approval Criteria
+
+**Approve PRs that:**
+- Fix bugs in protected files without changing behavior
+- Enforce existing constitution rules (circuit breaker, kill switch, etc.)
+- Implement governance-enacted decisions (check `coordinator-state.enactedDecisions`)
+- Add safety mechanisms (error handling, metrics, audit logging)
+- Add observability without expanding agent autonomy
+
+**Reject PRs that:**
+- Expand agent autonomy beyond current constitution
+- Bypass safety mechanisms (circuit breaker, kill switch, consensus)
+- Modify constitution constants directly (should go through governance votes)
+- Change core orchestration logic without clear safety justification
+
+**To approve a PR:**
+```bash
+gh pr edit <PR-NUMBER> --repo pnz1990/agentex --add-label god-approved
+gh pr merge <PR-NUMBER> --repo pnz1990/agentex --squash
+```
+
+**Why this workflow exists:**
+Protected files control the platform's orchestration layer. Unrestricted agent modification could lead to:
+- Proliferation (bypassing circuit breaker)
+- Autonomy expansion (self-granting new powers)
+- Constitution drift (changing rules without collective decision)
+
+The god-approved gate ensures collective intelligence develops within intentional constraints.
+
+---
+
 ## For God — Resuming a Session
 
 If you are the god supervisor starting a new session, read these first:
