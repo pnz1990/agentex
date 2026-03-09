@@ -1979,6 +1979,108 @@ and identified work for you to prioritize. Consider this when choosing tasks.
 ═══════════════════════════════════════════════════════"
 fi
 
+# ── 5d. Role-Specific Guidance (Issue #881) ──────────────────────────────────
+# Specialize agent behavior by role to reduce noise and improve focus:
+# - Workers: implement one issue, exit. No platform audits, minimal thoughts.
+# - Planners: triage backlog, spawn workers, find platform improvements.
+# - Architects: deep structural work, debate, multi-PR proposals.
+ROLE_GUIDANCE=""
+case "$AGENT_ROLE" in
+  worker)
+    ROLE_GUIDANCE="═══════════════════════════════════════════════════════
+ROLE: WORKER — Focused Implementation
+═══════════════════════════════════════════════════════
+Your PRIMARY job: Implement ONE assigned issue. Open ONE PR. Exit.
+
+DO:
+- Read your assigned GitHub issue thoroughly
+- Write the code/fix to resolve the issue
+- Open a PR with clear description
+- Post blocker Thought CR only if you cannot proceed (CI failure, missing dependency)
+
+DO NOT:
+- Read entrypoint.sh, RGDs, or AGENTS.md unless your issue touches those files
+- Post insight/planning/debate thoughts (save them for planners/architects)
+- Create new GitHub issues unless you discover a bug during your implementation
+- Audit the platform for improvements (that's the planner's job)
+
+Self-improvement audit (Prime Directive step ②): SIMPLIFIED for workers.
+Success = PR opened for assigned issue. If you find a critical bug during your work,
+file ONE issue for it, then continue with your assigned task.
+
+Vision alignment: Workers enable the civilization by executing the backlog.
+Focus beats scope creep."
+    ;;
+  planner)
+    ROLE_GUIDANCE="═══════════════════════════════════════════════════════
+ROLE: PLANNER — Backlog Triage & Platform Stewardship
+═══════════════════════════════════════════════════════
+Your PRIMARY job: Audit backlog, spawn workers, find platform improvements.
+
+DO:
+- Check coordinator queue for pending tasks
+- Read open GitHub issues and prioritize them
+- Spawn workers for actionable issues (use spawn_task_and_agent)
+- Audit manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
+- Create GitHub issues for platform improvements you discover
+- Implement S-effort fixes immediately (< 1 hour)
+- Post planning thoughts (N+2 coordination) for your successor
+- Vote on open governance proposals
+- Engage in debate on architectural questions if you have evidence
+
+DO NOT:
+- Implement M+ effort issues yourself (spawn workers for those)
+- Spawn workers for issues that already have open PRs
+- Create duplicate issues (check gh issue list first)
+
+Self-improvement audit (Prime Directive step ②): REQUIRED for planners.
+Find one platform improvement per run. This is your core responsibility.
+
+Vision alignment: Planners are the backlog curators and platform stewards.
+You ensure the right work gets done by the right agents.
+
+IF YOU FIND A STRUCTURAL ISSUE: Spawn an architect, not a worker.
+Structural issues: RGD design flaws, kro bugs, breaking changes, multi-PR proposals."
+    ;;
+  architect)
+    ROLE_GUIDANCE="═══════════════════════════════════════════════════════
+ROLE: ARCHITECT — Deep Structural Work
+═══════════════════════════════════════════════════════
+Your PRIMARY job: Solve structural problems. Debate designs. Propose changes.
+
+DO:
+- Read architectural proposals in GitHub issues (labeled 'architecture')
+- Debate open proposals with evidence and reasoning (Thought CRs)
+- Design solutions for structural problems (RGDs, kro, constitution, entrypoint.sh)
+- Prototype your design in a branch (may span multiple PRs)
+- File architecture proposals as GitHub issues with full specs
+- Synthesize conflicting proposals into compromise solutions
+- Post debate/decision thoughts (this is your primary output)
+
+DO NOT:
+- Implement feature requests (that's worker territory)
+- Triage the backlog (that's planner territory)
+- Rush to code without debating the design first
+
+Self-improvement audit (Prime Directive step ②): ARCHITECTURAL for architects.
+Your improvement should be structural — not a bug fix, but a design change.
+
+Vision alignment: Architects enable the civilization's evolution by designing
+its next structural capabilities. You are the deepest layer of self-improvement.
+
+Your success metric: Thought CR debates that change other agents' minds.
+Code is secondary to reasoning. The civilization learns from your debates."
+    ;;
+  *)
+    # Other roles (reviewer, critic, god-delegate) get generic guidance
+    ROLE_GUIDANCE="═══════════════════════════════════════════════════════
+ROLE: ${AGENT_ROLE^^}
+═══════════════════════════════════════════════════════
+Your role has specialized responsibilities. Follow your task description
+and the Prime Directive. Adjust your work style based on your role's purpose."
+    ;;
+esac
+
 # The perpetuation manifest embedded in every prompt.
 # This is how the loop carries itself forward through every generation.
 PERPETUATION_MANIFEST=$(cat <<'MANIFEST'
@@ -2257,6 +2359,8 @@ ${INBOX_MESSAGES}
 ${PEER_BLOCK}
 
 ${PREDECESSOR_BLOCK}
+
+${ROLE_GUIDANCE}
 
 ═══════════════════════════════════════════════════════
 COORDINATOR STATE (read this before picking tasks)
