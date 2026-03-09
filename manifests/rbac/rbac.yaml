@@ -5,12 +5,18 @@ kind: Namespace
 metadata:
   name: agentex
 ---
-# Pod Identity handles AWS credentials — no IRSA annotation needed
+# IRSA: Annotate SA with the IAM role ARN so the pod-identity-webhook injects
+# AWS_WEB_IDENTITY_TOKEN_FILE and AWS_ROLE_ARN env vars into pods.
+# The IAM role trust policy must include the cluster's OIDC provider.
+# See: https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: agentex-agent-sa
   namespace: agentex
+  annotations:
+    # REPLACE with your cluster's IAM role ARN (created by install-configure.sh)
+    eks.amazonaws.com/role-arn: "arn:aws:iam::569190534191:role/agentex-agent-role"
 ---
 # Agents can read/write all agentex CRs and jobs within the namespace
 apiVersion: rbac.authorization.k8s.io/v1
