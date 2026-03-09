@@ -848,11 +848,51 @@ request_spawn_slot() {
       return 1
     fi
 
+    # Issue #713/#716: Stale data detection - if slots > limit, kubectl cache is stale
+    # This can happen after API server/kro restarts or during CI/CD waves.
+    # The coordinator never sets slots > limit, so this indicates stale read.
+    # Wait and retry to get fresh data from API server.
+    if [ "$slots" -gt "$CIRCUIT_BREAKER_LIMIT" ]; then
+      log "WARNING: Stale coordinator data detected (slots=$slots > limit=$CIRCUIT_BREAKER_LIMIT). Waiting for API server cache refresh..."
+      push_metric "StaleDataDetected" 1
+      if [ $attempt -lt $max_attempts ]; then
+        sleep 2  # Longer delay for cache refresh
+        continue
+      else
+        log "CRITICAL: Coordinator data still stale after $max_attempts attempts. Failing closed."
+        post_thought "Spawn denied: stale coordinator-state detected (slots > limit). Issue #713/#716 fix." "blocker" 9
+        push_metric "CircuitBreakerTriggered" 1
+        return 1
+      fi
+    fi
+
     if [ "$slots" -le 0 ]; then
       log "ATOMIC SPAWN GATE: 0 slots available (limit=$CIRCUIT_BREAKER_LIMIT). Spawn denied."
       post_thought "Atomic spawn gate: 0 slots remaining. Spawn blocked. System at capacity." "blocker" 10
       push_metric "CircuitBreakerTriggered" 1
       return 1
+    fi
+
+    # Issue #713: Add validation - cross-check with actual job count before first CAS attempt
+    # This detects coordinator reconciliation lag and prevents burst spawning.
+    # Only check on first attempt to avoid slowing down every spawn.
+    if [ $attempt -eq 1 ]; then
+      local active_jobs
+      active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "0")
+      
+      # If active jobs + requesting spawn would exceed limit, coordinator data is stale
+      if [ "$active_jobs" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
+        log "WARNING: Cross-check failed - active jobs ($active_jobs) >= limit ($CIRCUIT_BREAKER_LIMIT) but coordinator shows $slots slots"
+        log "Coordinator reconciliation lag detected. Denying spawn to prevent proliferation burst."
+        post_thought "Spawn denied: coordinator reconciliation lag detected ($active_jobs jobs >= $CIRCUIT_BREAKER_LIMIT limit, but coordinator shows $slots slots). Issue #713 fix." "blocker" 9
+        push_metric "CircuitBreakerTriggered" 1
+        push_metric "CoordinatorReconciliationLag" 1
+        return 1
+      fi
+      
+      log "Spawn validation passed: $active_jobs active jobs, coordinator shows $slots slots available"
     fi
 
     # Atomically decrement: test current value then replace with (value - 1)
