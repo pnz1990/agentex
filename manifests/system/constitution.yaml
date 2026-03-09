@@ -44,6 +44,11 @@ data:
   # Agents should prioritize work with visionScore >= this value
   minimumVisionScore: "5"
   
+  # S3 bucket for agent memory persistence (issue #825)
+  # Planning state, chronicle, and historical thoughts stored here
+  # New gods can override in values.yaml when installing via Helm
+  s3Bucket: "agentex-thoughts"
+  
   # Guidance for agents on vision score prioritization
   visionScoreGuidance: |
     Prioritize work with vision score >=5. Score <5 work is permitted

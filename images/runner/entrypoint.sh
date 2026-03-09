@@ -47,6 +47,11 @@ CIVILIZATION_GENERATION=$(kubectl_with_timeout 10 get configmap agentex-constitu
   -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "1")
 if ! [[ "$CIVILIZATION_GENERATION" =~ ^[0-9]+$ ]]; then CIVILIZATION_GENERATION=1; fi
 
+# Read S3 bucket name for agent memory persistence (issue #825)
+S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
+if [ -z "$S3_BUCKET" ]; then S3_BUCKET="agentex-thoughts"; fi
+
 ts() { date +%s; }
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
@@ -559,7 +564,7 @@ read_planning_state() {
   
   # List all plans for this role, sorted by timestamp (most recent first)
   local latest_plan
-  latest_plan=$(aws s3 ls "s3://agentex-thoughts/planning/${role}-plan-" 2>/dev/null | \
+  latest_plan=$(aws s3 ls "s3://${S3_BUCKET}/planning/${role}-plan-" 2>/dev/null | \
     sort -r | head -1 | awk '{print $NF}' || echo "")
   
   if [ -z "$latest_plan" ]; then
@@ -568,7 +573,7 @@ read_planning_state() {
   fi
   
   # Fetch the latest plan
-  aws s3 cp "s3://agentex-thoughts/planning/${latest_plan}" - 2>/dev/null || echo "{}"
+  aws s3 cp "s3://${S3_BUCKET}/planning/${latest_plan}" - 2>/dev/null || echo "{}"
 }
 
 # write_planning_state() - Write planning state to S3
@@ -598,7 +603,7 @@ write_planning_state() {
   
   # Write to S3 with agent-specific filename
   local s3_output
-  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://agentex-thoughts/planning/${role}-plan-${agent}.json" \
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}-plan-${agent}.json" \
     --content-type application/json 2>&1); then
     log "WARNING: Failed to write planning state to S3: $s3_output"
     return 0  # Best-effort, don't fail agent if S3 unavailable
@@ -784,8 +789,8 @@ append_to_chronicle() {
   fi
   
   # Check if S3 bucket exists
-  if ! aws s3 ls s3://agentex-thoughts/ >/dev/null 2>&1; then
-    log "WARNING: S3 bucket agentex-thoughts not accessible, cannot append to chronicle"
+  if ! aws s3 ls s3://${S3_BUCKET}/ >/dev/null 2>&1; then
+    log "WARNING: S3 bucket ${S3_BUCKET} not accessible, cannot append to chronicle"
     return 0  # Don't fail the agent
   fi
   
@@ -796,7 +801,7 @@ append_to_chronicle() {
   while [ $retry_count -lt $max_retries ]; do
     # Download current chronicle
     local chronicle_output
-    if ! chronicle_output=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>&1); then
+    if ! chronicle_output=$(aws s3 cp s3://${S3_BUCKET}/chronicle.json - 2>&1); then
       log "WARNING: Failed to download chronicle (attempt $((retry_count+1))/$max_retries): $chronicle_output"
       chronicle_output='{"entries":[],"civilizationAge":"unknown","totalAgentsRun":0,"totalPRsMerged":0}'
     elif [ -z "$chronicle_output" ]; then
@@ -828,7 +833,7 @@ append_to_chronicle() {
     
     # Try to upload with conditional write (detect concurrent modifications)
     local upload_output
-    if upload_output=$(echo "$updated_chronicle" | aws s3 cp - s3://agentex-thoughts/chronicle.json --content-type application/json 2>&1); then
+    if upload_output=$(echo "$updated_chronicle" | aws s3 cp - s3://${S3_BUCKET}/chronicle.json --content-type application/json 2>&1); then
       log "Chronicle updated: era=$era period=$period"
       push_metric "ChronicleUpdated" 1
       
@@ -1832,7 +1837,7 @@ done
 # Generation 3: Agents read their predecessor's N+2 plan and prioritize that work.
 # This enables multi-generation coordination — each agent can see what work was
 # planned for them by the previous agent in their role.
-# Location: s3://agentex-thoughts/planning/${AGENT_ROLE}-plan-*.json
+# Location: s3://${S3_BUCKET}/planning/${AGENT_ROLE}-plan-*.json
 PREDECESSOR_PLAN=""
 PREDECESSOR_N2_PRIORITY=""
 log "Reading predecessor planning state for role ${AGENT_ROLE}..."
@@ -1860,9 +1865,9 @@ fi
 # learned, what mistakes were made, and what milestones were reached.
 # Every agent reads it. Every agent is expected to append to it when they
 # discover something future generations must know.
-# Location: s3://agentex-thoughts/chronicle.json
+# Location: s3://${S3_BUCKET}/chronicle.json
 CIVILIZATION_CHRONICLE=""
-if CHRONICLE_DATA=$(aws s3 cp s3://agentex-thoughts/chronicle.json - 2>/dev/null); then
+if CHRONICLE_DATA=$(aws s3 cp s3://${S3_BUCKET}/chronicle.json - 2>/dev/null); then
   CIVILIZATION_CHRONICLE=$(echo "$CHRONICLE_DATA" | jq -r '
     "CIVILIZATION HISTORY — read this before working. Learn from the past.\n" +
     "Age: " + .civilizationAge + " | Agents run: " + (.totalAgentsRun | tostring) + " | PRs merged: " + (.totalPRsMerged | tostring) + "\n\n" +
@@ -2185,7 +2190,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
 ⑦ THE CIVILIZATION CHRONICLE (read-only for agents)
-  The chronicle at s3://agentex-thoughts/chronicle.json is the civilization's
+  The chronicle at s3://${S3_BUCKET}/chronicle.json is the civilization's
   permanent memory. You already read it at startup (it was in your context above).
   The chronicle is written by the god-delegate every ~20 minutes — curated,
   generation-level summaries. Agents do NOT write to the chronicle.
