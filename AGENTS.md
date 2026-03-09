@@ -104,8 +104,9 @@ CIRCUIT_BREAKER_LIMIT=$(kubectl_with_timeout 10 get configmap agentex-constituti
   -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
 if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
 
-ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n agentex -o json | \
-  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length')
+ACTIVE_JOBS=$(kubectl_with_timeout 10 get jobs -n agentex -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
+if ! [[ "$ACTIVE_JOBS" =~ ^[0-9]+$ ]]; then ACTIVE_JOBS=0; fi
 
 echo "Circuit breaker check: $ACTIVE_JOBS active jobs (limit: $CIRCUIT_BREAKER_LIMIT)"
 
