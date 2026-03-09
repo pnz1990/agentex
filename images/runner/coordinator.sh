@@ -590,6 +590,52 @@ touch /tmp/coordinator-alive
 touch /tmp/coordinator-ready
 echo "[$(date -u +%H:%M:%S)] Health check files initialized"
 
+# Start HTTP health endpoint in background (issue #699)
+# Serves on port 8080 for liveness/readiness probes with heartbeat staleness check
+start_health_server() {
+    while true; do
+        # Build health response
+        local last_heartbeat
+        last_heartbeat=$(get_state "lastHeartbeat" 2>/dev/null || echo "")
+        local now_epoch
+        now_epoch=$(date +%s)
+        local heartbeat_epoch=0
+        
+        if [ -n "$last_heartbeat" ]; then
+            heartbeat_epoch=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+        fi
+        
+        local age=$(( now_epoch - heartbeat_epoch ))
+        local status="healthy"
+        local http_status="200 OK"
+        
+        # If heartbeat is older than 90s (3x heartbeat interval), coordinator loop is stuck
+        if [ "$age" -gt 90 ]; then
+            status="unhealthy"
+            http_status="503 Service Unavailable"
+        fi
+        
+        # Get current phase
+        local phase
+        phase=$(get_state "phase" 2>/dev/null || echo "unknown")
+        
+        # Build JSON response
+        local response="{\"status\":\"$status\",\"lastHeartbeat\":\"$last_heartbeat\",\"heartbeatAge\":$age,\"phase\":\"$phase\"}"
+        
+        # Serve HTTP response with netcat
+        { printf "HTTP/1.1 %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" \
+            "$http_status" "${#response}" "$response"; } | nc -l -p 8080 -q 1 2>/dev/null || true
+        
+        # Small delay to prevent CPU spinning if nc fails repeatedly
+        sleep 0.1
+    done
+}
+
+# Launch health server in background
+start_health_server &
+HEALTH_SERVER_PID=$!
+echo "[$(date -u +%H:%M:%S)] HTTP health server started on port 8080 (pid: $HEALTH_SERVER_PID)"
+
 iteration=0
 while true; do
     iteration=$((iteration + 1))
