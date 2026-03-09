@@ -1,8 +1,8 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-08-r2 (force rebuild after CRD schema changes in PR #134)
-ARG KUBECTL_VERSION=1.31.0
-ARG GH_VERSION=2.63.2
+# Image version: 2026-03-09-r1 (security: update kubectl v1.35.2, gh v2.87.3 - issue #667)
+ARG KUBECTL_VERSION=1.35.2
+ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
 
 RUN apt-get update && apt-get install -y \
