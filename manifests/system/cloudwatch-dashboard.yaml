@@ -33,7 +33,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Active Agent Pods",
             "period": 300,
             "yAxis": {
@@ -61,7 +61,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Agent Task Throughput",
             "period": 300,
             "yAxis": {
@@ -86,7 +86,7 @@ data:
               [ "...", { "stat": "Sum", "id": "m4", "label": "architect" } ]
             ],
             "view": "pie",
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Agent Runs by Role",
             "period": 3600,
             "setPeriodToTimeRange": true
@@ -106,7 +106,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": true,
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Agent Communication Volume",
             "period": 300,
             "yAxis": {
@@ -129,7 +129,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Agent Job Failures",
             "period": 300,
             "yAxis": {
@@ -163,7 +163,7 @@ data:
               [ ".", "IssueCreated", { "stat": "Sum", "label": "Issues Created" } ]
             ],
             "view": "singleValue",
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Output Quality Metrics",
             "period": 86400,
             "setPeriodToTimeRange": true
@@ -177,7 +177,7 @@ data:
           "type": "log",
           "properties": {
             "query": "SOURCE '/aws/containerinsights/agentex/application'\n| fields @timestamp, log as message\n| filter kubernetes.namespace_name = 'agentex'\n| filter log like /ERROR|WARNING|CRITICAL/\n| sort @timestamp desc\n| limit 20",
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "stacked": false,
             "title": "Recent Agent Errors",
             "view": "table"
@@ -197,7 +197,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Bedrock API Usage",
             "period": 300,
             "yAxis": {
@@ -220,7 +220,7 @@ data:
             ],
             "view": "timeSeries",
             "stacked": false,
-            "region": "us-west-2",
+            "region": "REGION_PLACEHOLDER",
             "title": "Agent Memory Usage",
             "period": 300,
             "yAxis": {
@@ -252,12 +252,17 @@ data:
     # Deploy the agentex CloudWatch dashboard from the ConfigMap definition
     set -euo pipefail
     
-    REGION="${AWS_REGION:-us-west-2}"
+    # Read region from constitution ConfigMap, fallback to env var, then default
+    REGION=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "${AWS_REGION:-us-west-2}")
     DASHBOARD_NAME="agentex-activity"
     
     echo "Fetching dashboard definition from ConfigMap..."
     DASHBOARD_JSON=$(kubectl get configmap agentex-dashboard-definition -n agentex \
       -o jsonpath='{.data.dashboard\.json}')
+    
+    echo "Parameterizing dashboard with region: $REGION"
+    # Replace REGION_PLACEHOLDER with actual region
+    DASHBOARD_JSON=$(echo "$DASHBOARD_JSON" | sed "s/REGION_PLACEHOLDER/$REGION/g")
     
     echo "Creating/updating CloudWatch dashboard: $DASHBOARD_NAME"
     aws cloudwatch put-dashboard \
@@ -273,7 +278,8 @@ data:
     # Delete the agentex CloudWatch dashboard
     set -euo pipefail
     
-    REGION="${AWS_REGION:-us-west-2}"
+    # Read region from constitution ConfigMap, fallback to env var, then default
+    REGION=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "${AWS_REGION:-us-west-2}")
     DASHBOARD_NAME="agentex-activity"
     
     echo "Deleting CloudWatch dashboard: $DASHBOARD_NAME"
