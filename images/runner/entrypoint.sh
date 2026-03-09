@@ -194,6 +194,35 @@ EOF
   fi
 }
 
+# ── Agent CR self-cleanup function (issue #736) ────────────────────────────────
+# CRITICAL: Delete our Agent CR on ANY exit to prevent kro re-spawn loops.
+# Without this, kro re-creates Jobs forever when TTL expires (every 180s).
+# This function is called by EXIT trap, ensuring cleanup on EVERY exit path.
+cleanup_agent_cr() {
+  # Only clean up if AGENT_NAME is set and valid
+  if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ]; then
+    # Check if kubectl is configured (may not be if we fail very early)
+    if timeout 5s kubectl cluster-info &>/dev/null 2>&1; then
+      log "EXIT TRAP: Self-cleanup - deleting Agent CR $AGENT_NAME to prevent kro re-spawn (issue #736)"
+      
+      # Step 1: Remove kro finalizer so deletion is not blocked
+      kubectl_with_timeout 10 patch agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+        --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null \
+        && log "Finalizer removed from Agent CR $AGENT_NAME" \
+        || log "WARNING: Could not remove finalizer from $AGENT_NAME (may not have one)"
+      
+      # Step 2: Delete the CR (now unblocked)
+      kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
+        && log "Agent CR $AGENT_NAME deleted successfully" \
+        || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted)"
+    fi
+  fi
+}
+
+# Register EXIT trap to ensure cleanup on ALL exit paths (issue #736)
+# This includes: normal exit, error exit, early returns, circuit breaker blocks, etc.
+trap cleanup_agent_cr EXIT
+
 # Register trap for ERR (but NOT EXIT - that would trigger on normal completion too)
 # Only trigger on errors, not on successful exits
 trap 'handle_fatal_error $? $LINENO' ERR
@@ -2467,23 +2496,9 @@ if [ "$AGENT_ROLE" = "planner" ]; then
   fi
 fi
 
-# ── 14. Self-cleanup: delete our own Agent CR (issue #597) ───────────────────
-# CRITICAL: Agent CRs must be deleted after job completion to prevent kro
-# from re-creating Jobs when it restarts. Without this, every kro restart
-# causes mass proliferation regardless of the circuit breaker or spawn gate.
-#
-# kro adds a finalizer (kro.run/finalizer) to Agent CRs. If kro is busy or
-# restarting, deletion hangs forever. Fix: remove the finalizer first, then delete.
-# This ensures the CR is gone even if kro is not responsive.
-log "Self-cleanup: deleting Agent CR $AGENT_NAME to prevent kro re-proliferation (issue #597, #736)"
-# Step 1: Remove kro finalizer so deletion is not blocked
-kubectl_with_timeout 10 patch agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-  --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null \
-  && log "Finalizer removed from Agent CR $AGENT_NAME" \
-  || log "WARNING: Could not remove finalizer from $AGENT_NAME (may not have one)"
-# Step 2: Delete the CR (now unblocked)
-kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
-  && log "Agent CR $AGENT_NAME deleted successfully" \
-  || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted or kro finalizer pending)"
-
+# ── 14. Agent exit ───────────────────────────────────────────────────────────
+# Agent CR self-cleanup now handled by EXIT trap (see cleanup_agent_cr function).
+# The trap ensures cleanup happens on ALL exit paths: normal, error, early return,
+# circuit breaker block, etc. No need for explicit cleanup here.
 log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE"
+log "EXIT trap will handle Agent CR cleanup (issue #736)"
