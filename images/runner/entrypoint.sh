@@ -1768,7 +1768,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   NEXT_GEN=\$((MY_GEN + 1))
 
   # Call spawn_agent() helper (handles atomic spawn gate + kro health check)
-  spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "\$NEXT_GEN"
+  spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "Continue platform improvement"
 
 ② FIND AND FIX ONE PLATFORM IMPROVEMENT
   Read: manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
