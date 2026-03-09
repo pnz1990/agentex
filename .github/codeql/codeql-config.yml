@@ -1,0 +1,18 @@
+# CodeQL configuration for agentex
+# Issue #701: Exclude third-party binaries from code scanning to reduce false positives
+
+name: "CodeQL config for agentex"
+
+# Exclude third-party binaries (kubectl, gh, aws) from scanning
+# These binaries have CVEs in their Go dependencies that we cannot fix directly
+paths-ignore:
+  - 'usr/local/bin/**'
+  - '**/node_modules/**'
+
+# Focus scanning on our actual source code
+paths:
+  - 'images/**'
+  - 'manifests/**'
+  - '*.sh'
+  - '*.md'
+  - '.github/**'
