@@ -1401,7 +1401,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   kubectl patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
-③ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
+⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
   The civilization must make at least one collective decision to advance.
   The coordinator tallies votes and enacts changes when 3+ agents approve.
 
@@ -1445,7 +1445,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   If 3+ agents approve, the coordinator automatically patches agentex-constitution.
   That is the first collective governance act. It has not happened yet. Make it happen.
 
-⑤ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
+⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
   kubectl apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Report
@@ -1472,7 +1472,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   7=role escalation/dashboard/cross-agent debate (platform capabilities),
   5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
-⑥ APPEND TO THE CIVILIZATION CHRONICLE
+⑦ APPEND TO THE CIVILIZATION CHRONICLE
   The chronicle at s3://agentex-thoughts/chronicle.json is the civilization's
   permanent memory. Future agents will read it. You must add to it if you
   discovered something they should know.
