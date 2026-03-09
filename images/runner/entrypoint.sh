@@ -194,42 +194,6 @@ EOF
   fi
 }
 
-# ── Cleanup function for EXIT trap (issue #750) ──────────────────────────────
-# This function MUST run on ALL exit paths (normal, error, early return) to
-# prevent kro re-spawn loops. Without this, agents that exit early (circuit
-# breaker, rolling restart, etc.) leave orphaned Agent CRs that kro re-spawns.
-cleanup_agent_cr_on_exit() {
-  local exit_code=$?
-  
-  # Skip cleanup if AGENT_NAME not set (very early failure before env validation)
-  if [ -z "$AGENT_NAME" ]; then
-    return 0
-  fi
-  
-  log "EXIT trap: cleaning up Agent CR $AGENT_NAME (exit_code=$exit_code)"
-  
-  # Step 1: Remove kro finalizer so deletion is not blocked
-  # kro adds kro.run/finalizer to Agent CRs. If kro is busy/restarting,
-  # deletion hangs forever. Removing finalizer ensures CR is deleted
-  # even if kro is not responsive (issue #736, #750)
-  kubectl_with_timeout 10 patch agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
-    --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null \
-    && log "Finalizer removed from Agent CR $AGENT_NAME" \
-    || log "WARNING: Could not remove finalizer from $AGENT_NAME (may not have one)"
-  
-  # Step 2: Delete the CR (now unblocked)
-  kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
-    && log "Agent CR $AGENT_NAME deleted successfully" \
-    || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted)"
-  
-  log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE ExitCode=$exit_code"
-}
-
-# Register EXIT trap to ensure Agent CR cleanup on ALL exit paths
-# This fires on: normal exit, error exit, early return, SIGTERM
-# Does NOT fire on: SIGKILL (but that's rare and non-graceful anyway)
-trap cleanup_agent_cr_on_exit EXIT
-
 # Register trap for ERR (but NOT EXIT - that would trigger on normal completion too)
 # Only trigger on errors, not on successful exits
 trap 'handle_fatal_error $? $LINENO' ERR
@@ -2503,17 +2467,23 @@ if [ "$AGENT_ROLE" = "planner" ]; then
   fi
 fi
 
-# ── 14. Self-cleanup: handled by EXIT trap (issue #750) ──────────────────────
-# Agent CR cleanup is now handled by cleanup_agent_cr_on_exit() EXIT trap
-# (registered at line ~197). This ensures cleanup happens on ALL exit paths,
-# not just normal script completion. See issue #750 for details.
+# ── 14. Self-cleanup: delete our own Agent CR (issue #597) ───────────────────
+# CRITICAL: Agent CRs must be deleted after job completion to prevent kro
+# from re-creating Jobs when it restarts. Without this, every kro restart
+# causes mass proliferation regardless of the circuit breaker or spawn gate.
 #
-# The EXIT trap was necessary because there are 5 early exit points that
-# bypassed the cleanup code that was here:
-#   - Line 284: Circuit breaker check
-#   - Line 1444: Rolling restart detection
-#   - Line 1500: Circuit breaker at startup
-#   - Line 1828: Unknown exit
-#   - Line 2083: Circuit breaker pre-execution
-#
-# With the EXIT trap, all of these paths now properly clean up the Agent CR.
+# kro adds a finalizer (kro.run/finalizer) to Agent CRs. If kro is busy or
+# restarting, deletion hangs forever. Fix: remove the finalizer first, then delete.
+# This ensures the CR is gone even if kro is not responsive.
+log "Self-cleanup: deleting Agent CR $AGENT_NAME to prevent kro re-proliferation (issue #597, #736)"
+# Step 1: Remove kro finalizer so deletion is not blocked
+kubectl_with_timeout 10 patch agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+  --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null \
+  && log "Finalizer removed from Agent CR $AGENT_NAME" \
+  || log "WARNING: Could not remove finalizer from $AGENT_NAME (may not have one)"
+# Step 2: Delete the CR (now unblocked)
+kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
+  && log "Agent CR $AGENT_NAME deleted successfully" \
+  || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted or kro finalizer pending)"
+
+log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE"
