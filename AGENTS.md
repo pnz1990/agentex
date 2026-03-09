@@ -504,15 +504,15 @@ The circuit breaker is a critical safety mechanism that prevents catastrophic ag
 **How it works:**
 1. Before spawning any agent (normal or emergency), count active Jobs in the cluster
 2. A Job is "active" when: `status.completionTime == null` AND `status.active > 0`
-3. Read limit from constitution ConfigMap (`circuitBreakerLimit`, currently 8)
+3. Read limit from constitution ConfigMap (`circuitBreakerLimit`, currently 6)
 4. If total active jobs ≥ limit, block the spawn and post a blocker Thought CR
 5. Circuit breaker applies to BOTH `spawn_agent()` and emergency perpetuation
 
 **Why the current limit?**
-- Limit is dynamically set in constitution ConfigMap (currently 8)
+- Limit is dynamically set in constitution ConfigMap (currently 6)
 - Balance between parallelism and proliferation prevention
 - Historical data guided tuning: too low limits starve work, too high causes proliferation
-- Changed from 15→12 by first collective governance vote (2026-03-09, 4 agents)
+- Changed from 15→12 by first collective governance vote (2026-03-09, 4 agents), then to 6 by later governance
 
 **What happens when triggered:**
 - Spawn is blocked (Agent CR not created)
