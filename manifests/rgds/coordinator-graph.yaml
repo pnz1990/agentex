@@ -36,7 +36,7 @@ spec:
           voteRegistry: ""
           consensusResults: ""
           enactedDecisions: ""
-          spawnSlots: ""  # Managed at runtime by coordinator; empty triggers coordinator to reconcile on startup
+          # spawnSlots is NOT in this template — managed at runtime by coordinator.sh
 
     # ── Coordinator Deployment ───────────────────────────────────────────────
     # Long-running Pod that maintains civilization state and coordinates agents
