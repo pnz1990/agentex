@@ -271,14 +271,12 @@ refresh_task_queue() {
         local sorted_issues
         sorted_issues=$(printf "%b" "$scored_issues" | sort -t: -k1 -rn | cut -d: -f2 | tr '\n' ',' | sed 's/,$//')
 
-        local current_queue
-        current_queue=$(get_state "taskQueue")
-        # Merge new issues with existing queue (deduplicate, preserve priority order)
-        local merged_queue
-        merged_queue=$(echo "${sorted_issues},${current_queue}" | tr ',' '\n' | grep -v '^$' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
-
-        update_state "taskQueue" "$merged_queue"
-        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted): $merged_queue"
+        # Issue #977: Replace queue with fresh open issues from GitHub.
+        # Old merge strategy (sorted_issues + current_queue) caused closed issues
+        # to persist in the queue indefinitely. Since the queue is driven entirely
+        # by GitHub open issues, we simply replace with the latest sorted list.
+        update_state "taskQueue" "$sorted_issues"
+        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted): $sorted_issues"
     fi
 }
 
