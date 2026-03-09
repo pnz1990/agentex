@@ -1,0 +1,56 @@
+# kro Hardening Manifests — Issue #714
+# Prevents EKS Auto Mode from evicting kro pod, which causes dynamic controller to stop reconciling.
+#
+# Problem:
+# - EKS Auto Mode evicts kro for 'Underutilized' (uses < 50m CPU when idle)
+# - After eviction + restart, kro's dynamic controller silently stops reconciling new Agent CRs
+# - No Jobs are created for new Agent CRs → planner chain dies
+#
+# Solution:
+# 1. PodDisruptionBudget: prevent voluntary disruptions
+# 2. PriorityClass: mark kro as system-cluster-critical
+# 3. Higher resource requests: prevent 'Underutilized' eviction
+#
+# Apply: kubectl apply -f manifests/system/kro-hardening.yaml
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kro-pdb
+  namespace: kro-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kro
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: system-cluster-critical-custom
+value: 2000000000  # Same as system-cluster-critical (1 billion above default)
+globalDefault: false
+description: "Used for critical cluster components that should not be preempted"
+
+---
+# Patch to increase kro resource requests
+# Apply manually: kubectl patch deployment kro-controller-manager -n kro-system --patch-file /dev/stdin <<EOF
+# spec:
+#   template:
+#     spec:
+#       priorityClassName: system-cluster-critical-custom
+#       containers:
+#       - name: manager
+#         resources:
+#           requests:
+#             cpu: 100m
+#             memory: 512Mi  # Up from 128Mi to prevent OOM-induced instability
+#           limits:
+#             cpu: 500m
+#             memory: 1Gi
+# EOF
+#
+# Note: kro is installed via Helm. To persist this change, update kro-install.sh
+# to include these values in the helm install command.

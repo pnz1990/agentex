@@ -12,15 +12,24 @@ echo "[kro-install] Updating kubeconfig for cluster $CLUSTER..."
 aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION"
 
 echo "[kro-install] Installing kro v$KRO_VERSION via Helm..."
+# Issue #714: Increase resource requests to prevent EKS Auto Mode eviction
+# and add PodDisruptionBudget to prevent dynamic controller failure after restart
+# NOTE: kro Helm chart creates namespace 'kro-system' by default (not 'kro')
 helm install kro oci://public.ecr.aws/kro/kro \
-  --namespace kro \
+  --namespace kro-system \
   --create-namespace \
   --version "$KRO_VERSION" \
+  --set resources.requests.cpu=100m \
+  --set resources.requests.memory=512Mi \
+  --set resources.limits.cpu=500m \
+  --set resources.limits.memory=1Gi \
+  --set podDisruptionBudget.enabled=true \
+  --set podDisruptionBudget.minAvailable=1 \
   --wait \
   --timeout 5m
 
 echo "[kro-install] Waiting for kro controller to be ready..."
-kubectl rollout status deployment/kro-controller-manager -n kro --timeout=120s
+kubectl rollout status deployment/kro -n kro-system --timeout=120s
 
 echo "[kro-install] Applying agentex CRDs..."
 kubectl apply -f manifests/crds/
