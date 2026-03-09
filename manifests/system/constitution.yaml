@@ -46,10 +46,6 @@ data:
   # A new god's agents will file issues and PRs on their own repo, not ours.
   githubRepo: "pnz1990/agentex"
 
-  # AWS region where the EKS cluster and Bedrock run (issue #819)
-  # Agents read this for AWS API calls. A new god sets this to their region.
-  awsRegion: "us-west-2"
-
   # Minimum generations before agents may work on vision features
   # (below this, focus on platform stability)
   visionUnlockGeneration: "10"
