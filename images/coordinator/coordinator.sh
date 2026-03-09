@@ -186,6 +186,39 @@ cleanup_stale_assignments() {
     [ $stale_count -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Cleaned $stale_count stale assignments"
 }
 
+# Remove completed agents from activeAgents list
+cleanup_active_agents() {
+    local agents
+    agents=$(get_state "activeAgents")
+    [ -z "$agents" ] && return 0
+
+    local cleaned_agents=""
+    local removed_count=0
+
+    IFS=',' read -ra PAIRS <<< "$agents"
+    for pair in "${PAIRS[@]}"; do
+        [ -z "$pair" ] && continue
+        local agent_name="${pair%%:*}"
+
+        # Check if agent's Job is still active
+        local job_active
+        job_active=$(kubectl get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
+            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
+            || echo "false")
+
+        if [ "$job_active" = "true" ]; then
+            [ -n "$cleaned_agents" ] \
+                && cleaned_agents="${cleaned_agents},${pair}" \
+                || cleaned_agents="$pair"
+        else
+            removed_count=$((removed_count + 1))
+        fi
+    done
+
+    update_state "activeAgents" "$cleaned_agents"
+    [ $removed_count -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Cleaned $removed_count completed agents from activeAgents"
+}
+
 # Tally votes from Thought CRs and ENACT consensus when threshold reached
 tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs..."
@@ -312,6 +345,9 @@ while true; do
 
     # Every iteration: cleanup stale assignments
     cleanup_stale_assignments
+
+    # Every iteration: cleanup completed agents from activeAgents
+    cleanup_active_agents
 
     # Every 3 iterations (~1.5 min): tally votes and potentially enact
     if [ $((iteration % 3)) -eq 0 ]; then
