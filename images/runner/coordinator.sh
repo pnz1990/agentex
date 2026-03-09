@@ -300,14 +300,14 @@ tally_and_enact_votes() {
 
     # Read all thought ConfigMaps
     local all_thoughts
+    # Use single jq invocation to avoid control-character parse errors from -r | jq -s pipeline
     all_thoughts=$(kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
-        | jq -r '.items[] | select(.metadata.name | endswith("-thought")) | {
+        | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
             agent: (.data.agentRef // "unknown"),
-            content: (.data.content // ""),
+            content: ((.data.content // "") | gsub("[\\u0000-\\u001f]"; " ")),
             type: (.data.thoughtType // ""),
             ts: .metadata.creationTimestamp
-          }' \
-        | jq -s '.' 2>/dev/null) || all_thoughts="[]"
+          }]' 2>/dev/null) || all_thoughts="[]"
 
     if [ "$all_thoughts" = "[]" ] || [ -z "$all_thoughts" ]; then
         return 0
