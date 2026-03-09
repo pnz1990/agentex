@@ -860,9 +860,88 @@ append_to_chronicle() {
 }
 
 # ── Coordinator integration ───────────────────────────────────────────────────
+# claim_task() - Atomically claim a GitHub issue to prevent duplicate work (issue #859)
+# Uses CAS (compare-and-swap) on coordinator-state.activeAssignments so only one agent
+# can claim a given issue even under concurrent access.
+# Usage: claim_task <issue_number>
+# Returns: 0 if claim succeeded, 1 if already claimed by another agent or on error
+claim_task() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
+
+  local max_attempts=5
+  local attempt=0
+
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+
+    # Read current assignments
+    local assignments
+    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+    # Check if issue is already claimed by any agent
+    if echo "$assignments" | grep -qE "(^|,)[^,]+:${issue}(,|$)"; then
+      # Determine who claimed it
+      local claimer
+      claimer=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
+      if [ "$claimer" = "$AGENT_NAME" ]; then
+        log "Coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
+        return 0
+      fi
+      log "Coordinator: issue #$issue already claimed by $claimer — skipping to avoid duplicate work"
+      push_metric "TaskClaimConflict" 1
+      return 1
+    fi
+
+    # Build new assignments value
+    local new_assignments
+    if [ -z "$assignments" ]; then
+      new_assignments="${AGENT_NAME}:${issue}"
+    else
+      new_assignments="${assignments},${AGENT_NAME}:${issue}"
+    fi
+
+    # Atomic CAS: test current value, only write if unchanged since our read.
+    # Uses JSON patch test+replace to prevent TOCTOU races (same pattern as spawn slots).
+    # If another agent updated activeAssignments between our read and write, the test
+    # will fail and we retry with fresh data.
+    local expected_value="$assignments"
+    if [ -z "$expected_value" ]; then
+      # Field doesn't exist yet: use add operation
+      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=json \
+        -p "[{\"op\":\"add\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+        2>/dev/null; then
+        log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
+        push_metric "TaskClaimed" 1
+        return 0
+      fi
+    else
+      # Field exists: use test+replace for atomic CAS
+      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=json \
+        -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+        2>/dev/null; then
+        log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
+        push_metric "TaskClaimed" 1
+        return 0
+      fi
+    fi
+
+    # CAS failed: another agent concurrently modified activeAssignments — retry with fresh read
+    log "Coordinator: CAS failed for issue #$issue (attempt $attempt/$max_attempts) — retrying"
+    sleep 1
+  done
+
+  log "WARNING: Failed to claim issue #$issue after $max_attempts attempts"
+  return 1
+}
+
 # request_coordinator_task() - Claim an unassigned issue from the coordinator queue
 # Returns: sets COORDINATOR_ISSUE to the claimed issue number, or 0 if none available
 # This is the mechanism that makes planners coordinate instead of acting independently.
+# Uses claim_task() for atomic assignment to prevent duplicate work (issue #859).
 request_coordinator_task() {
   local max_retries=3
   local retry=0
@@ -887,40 +966,31 @@ request_coordinator_task() {
       return 0
     fi
 
-    # Check if already assigned (activeAssignments format: agent1:issue1,agent2:issue2)
-    local assignments
-    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
-
-    if echo "$assignments" | grep -q ":${claimed_issue}$\|:${claimed_issue},"; then
-      log "Coordinator: issue #$claimed_issue already assigned, skipping"
-      COORDINATOR_ISSUE=0
-      return 0
+    # Atomically claim the issue using CAS (issue #859)
+    # This prevents two concurrent agents from both picking the same queue item
+    if ! claim_task "$claimed_issue"; then
+      log "Coordinator: issue #$claimed_issue already claimed by another agent, trying next"
+      # Remove this issue from queue since it's taken, and try the next one
+      local new_queue
+      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" | tr '\n' ',' | sed 's/,$//')
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+      retry=$((retry + 1))
+      continue
     fi
 
-    # Atomically: add to activeAssignments, remove from taskQueue
+    # Remove claimed issue from the queue
     local new_queue
     new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" | tr '\n' ',' | sed 's/,$//')
-
-    local new_assignments
-    if [ -z "$assignments" ]; then
-      new_assignments="${AGENT_NAME}:${claimed_issue}"
-    else
-      new_assignments="${assignments},${AGENT_NAME}:${claimed_issue}"
-    fi
-
-    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
       --type=merge \
-      -p "{\"data\":{\"taskQueue\":\"${new_queue}\",\"activeAssignments\":\"${new_assignments}\"}}" \
-      2>/dev/null; then
-      log "Coordinator: claimed issue #$claimed_issue (queue was: $queue)"
-      push_metric "CoordinatorTaskClaimed" 1
-      COORDINATOR_ISSUE="$claimed_issue"
-      return 0
-    fi
+      -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
 
-    retry=$((retry + 1))
-    sleep 1
+    log "Coordinator: claimed issue #$claimed_issue from queue"
+    push_metric "CoordinatorTaskClaimed" 1
+    COORDINATOR_ISSUE="$claimed_issue"
+    return 0
   done
 
   log "WARNING: Failed to claim task from coordinator after $max_retries retries"
@@ -2648,7 +2718,9 @@ Do the following:
 2. CHECK THE COORDINATOR FIRST: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
    If the coordinator has a queued issue, work on that. Otherwise:
 3. Read open GitHub issues: gh issue list --repo $REPO --state open --limit 20
-4. Pick the highest-priority open issue and implement a fix or feature
+4. Pick the highest-priority open issue and ATOMICALLY CLAIM IT before starting work:
+   claim_task <issue_number>  # Returns 0 if claimed, 1 if already taken by another agent
+   If claim fails, pick a different issue.
 5. Open a PR with your changes
 6. Create a GitHub Issue for any NEW improvement you discover
 7. SPAWN YOUR OWN SUCCESSOR before exiting (see Prime Directive in your prompt)
