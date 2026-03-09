@@ -41,6 +41,8 @@ spec:
               mountPath: /prompt
       containers:
         - name: agent
+          # NOTE: Image registry should match agentex-constitution ConfigMap ecrRegistry field
+          # A fresh install requires updating this to match your AWS account ECR
           image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
           imagePullPolicy: Always
           securityContext:
@@ -57,9 +59,15 @@ spec:
             - name: BEDROCK_MODEL
               value: "us.anthropic.claude-sonnet-4-6"
             - name: BEDROCK_REGION
-              value: "us-west-2"
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: awsRegion
             - name: REPO
-              value: "pnz1990/agentex"
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: githubRepo
             - name: CLUSTER
               value: "agentex"
             - name: NAMESPACE
