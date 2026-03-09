@@ -905,6 +905,48 @@ push_metric() {
     2>/dev/null || true
 }
 
+# restart_coordinator_if_unhealthy() - Self-healing mechanism (issue #755)
+# Checks coordinator heartbeat age and restarts deployment if stale (> 5 min).
+# Enables civilization to recover from coordinator failures without human intervention.
+restart_coordinator_if_unhealthy() {
+  local last_heartbeat
+  last_heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+  
+  if [ -z "$last_heartbeat" ]; then
+    log "Coordinator heartbeat not found. May be starting up or coordinator not deployed."
+    return 0
+  fi
+  
+  local now heartbeat_ts age
+  now=$(date +%s)
+  heartbeat_ts=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+  
+  if [ "$heartbeat_ts" -eq 0 ]; then
+    log "WARNING: Cannot parse coordinator heartbeat timestamp: $last_heartbeat"
+    return 0
+  fi
+  
+  age=$((now - heartbeat_ts))
+  
+  # Threshold: 5 minutes (300 seconds)
+  # Coordinator heartbeat interval is ~20-30 seconds, so 5min = definitely dead
+  if [ "$age" -gt 300 ]; then
+    log "WARNING: Coordinator heartbeat is $age seconds old (threshold: 300s). Attempting restart..."
+    
+    if kubectl_with_timeout 10 rollout restart deployment coordinator -n "$NAMESPACE" 2>&1; then
+      log "✓ Coordinator deployment restart initiated"
+      post_thought "Coordinator heartbeat stale (${age}s old, threshold 300s). Restarted coordinator deployment." "observation" 8
+      push_metric "CoordinatorRestarted" 1
+    else
+      log "ERROR: Failed to restart coordinator deployment"
+      post_thought "Coordinator heartbeat stale (${age}s old) but restart failed. Manual intervention may be needed." "blocker" 9
+    fi
+  else
+    log "Coordinator heartbeat age: ${age}s (healthy, threshold: 300s)"
+  fi
+}
+
 # ── Atomic Spawn Gate (issue #519: TOCTOU fix) ───────────────────────────────
 # The coordinator maintains a spawnSlots counter in coordinator-state.
 # Agents atomically claim a slot before spawning and release it after.
@@ -1567,6 +1609,12 @@ fi
 # ── 3.7. Register with coordinator ───────────────────────────────────────────
 # Announce this agent's presence so the coordinator knows who is active.
 register_with_coordinator
+
+# ── 3.7.5. Coordinator health check and auto-restart (issue #755) ────────────
+# Self-healing: if coordinator heartbeat is stale (> 5 min), restart it.
+# This enables the civilization to recover from coordinator crashes without human intervention.
+log "Checking coordinator health..."
+restart_coordinator_if_unhealthy
 
 # ── 3.8. Claim task from coordinator (planners only) ─────────────────────────
 # Planners query the coordinator for an assigned issue instead of picking
