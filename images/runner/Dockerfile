@@ -1,19 +1,21 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r5 (fix: planner-loop reads model from constitution; issue #968)
+# Image version: 2026-03-09-r7 (fix: security CVEs - fix npm CVE patch using clean-dir install; issue #963)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
 
 # Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
 # This fixes: libgnutls30t64, libexpat1, and other Ubuntu 24.04 security updates
+# NOTE: gnupg is intentionally NOT installed here to avoid its CVEs (CVE-2025-68972 et al).
+# The nodesource setup script temporarily needs gpg — it will install/use it automatically.
+# After nodejs is installed, we purge gnupg to reduce attack surface.
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     curl \
     git \
     jq \
     unzip \
     ca-certificates \
-    gnupg \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,31 +34,48 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tm
     && rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # Node.js (required by opencode)
+# nodesource setup script installs gnupg for apt key verification; we purge it afterward
+# to eliminate 11 medium-severity gnupg CVEs (CVE-2025-68972 etc.) since gnupg is not
+# used at runtime.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
+    && apt-get purge -y --auto-remove gnupg gnupg2 gnupg-l10n gnupg-utils \
+        gpg gpg-agent gpg-wks-client gpgconf gpgsm gpgv dirmngr keyboxd 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenCode CLI
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
-# Fix npm bundled dependency CVEs (issue #858, issue #658)
-# npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
+# Fix npm bundled dependency CVEs (issue #858, issue #658, issue #963)
+# npm bundles tar and minimatch in its own node_modules directory.
 # HIGH CVEs fixed:
-#   tar: >=7.5.10 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
-#   minimatch: >=10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable, 10.2.3 is fixed)
-#     NOTE: constraint must be >=10.2.3 not >=9.0.7 because npm 11 resolves to v10.x series
-#     and 10.2.2 has HIGH CVEs; using >=9.0.7 installs 10.2.2 (latest matching), not 10.2.3
-#   glob: >=10.5.0 (CVE for glob <10.5.0)
-# Fix: upgrade npm itself (npm 11+ ships with patched bundled deps)
-# Also: upgrade specific vulnerable packages directly in npm's own node_modules
-RUN npm install -g npm@latest \
-    && cd /usr/lib/node_modules/npm \
-    && npm install --prefer-online \
-        tar@">=7.5.10" \
-        minimatch@">=10.2.3" \
-        glob@">=10.5.0" \
-    2>/dev/null || true \
+#   tar 7.5.9 -> 7.5.11 (CVE-2026-29786: prior to 7.5.10 has HIGH severity vulnerability)
+#   minimatch 10.2.2 -> 10.2.3 (CVE-2026-27903, CVE-2026-27904: 10.2.2 vulnerable)
+#
+# APPROACH: Install patched packages into a clean temp directory (no existing package.json),
+# then copy them over npm's bundled versions.
+#
+# Why NOT use "cd $(npm root -g)/npm && npm install tar minimatch":
+#   npm's own package.json has @npmcli/docs as a devDependency which doesn't exist on
+#   the npm registry (returns 404). Running npm install in npm's directory triggers
+#   resolution of ALL deps including devDeps, causing E404 build failure.
+#
+# The clean-dir approach: install packages in an isolated directory with a minimal
+# package.json — no extra deps, no 404 errors, fully deterministic.
+RUN NPM_DIR="$(npm root -g)/npm" \
+    && echo "Patching npm bundled deps at: ${NPM_DIR}" \
+    && mkdir -p /tmp/npm-patch \
+    && echo '{"name":"patch","version":"1.0.0"}' > /tmp/npm-patch/package.json \
+    && cd /tmp/npm-patch \
+    && npm install --save-exact tar@7.5.11 minimatch@10.2.3 \
+    && echo "Installed tar: $(node -e 'console.log(require(\"/tmp/npm-patch/node_modules/tar/package.json\").version)')" \
+    && echo "Installed minimatch: $(node -e 'console.log(require(\"/tmp/npm-patch/node_modules/minimatch/package.json\").version)')" \
+    && cp -r /tmp/npm-patch/node_modules/tar/. "${NPM_DIR}/node_modules/tar/" \
+    && cp -r /tmp/npm-patch/node_modules/minimatch/. "${NPM_DIR}/node_modules/minimatch/" \
+    && echo "npm tar version after patch: $(node -e 'console.log(require(\"'${NPM_DIR}'/node_modules/tar/package.json\").version)')" \
+    && echo "npm minimatch version after patch: $(node -e 'console.log(require(\"'${NPM_DIR}'/node_modules/minimatch/package.json\").version)')" \
+    && rm -rf /tmp/npm-patch \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
