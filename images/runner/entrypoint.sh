@@ -64,21 +64,6 @@ get_my_generation() {
   echo "$gen"
 }
 
-push_metric() {
-  local metric_name="$1" value="${2:-1}" unit="${3:-Count}"
-  local err_output
-  err_output=$(aws cloudwatch put-metric-data \
-    --namespace Agentex \
-    --metric-name "$metric_name" \
-    --value "$value" \
-    --unit "$unit" \
-    --dimensions Role="$AGENT_ROLE",Agent="$AGENT_NAME" \
-    --region "$BEDROCK_REGION" 2>&1) || {
-    log "WARNING: Failed to push metric $metric_name (value=$value): $err_output"
-    return 0  # Metrics are fire-and-forget; failure is never fatal (issue #779)
-  }
-}
-
 request_spawn_slot() {
   # Stub: full implementation defined later in "Atomic Spawn Gate" section.
   # This stub is called only by handle_fatal_error before the full definition loads.
