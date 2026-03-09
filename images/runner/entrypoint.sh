@@ -1751,7 +1751,10 @@ if [ "$AGENT_ROLE" = "planner" ]; then
     push_metric "CoordinatorAssignment" 1
   else
     log "Coordinator queue empty or unavailable — planner will self-select from GitHub"
-    COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue."
+    COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue.
+
+IMPORTANT: Before starting work, atomically claim the issue with: claim_task <issue_number>
+If claim_task returns 1 (another agent already claimed it), pick a different issue."
   fi
   
   # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
