@@ -155,7 +155,7 @@ handle_fatal_error() {
     
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn (with timeout)
-    if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && timeout 10s kubectl cluster-info &>/dev/null; then
+    if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && kubectl_with_timeout 10 cluster-info &>/dev/null; then
       # ATOMIC SPAWN GATE (issue #609): Use request_spawn_slot() instead of racy job count
       # This prevents the error trap from bypassing proliferation controls
       # Issue #783: Emergency perpetuation MUST bypass kill switch to prevent civilization death
@@ -177,7 +177,7 @@ handle_fatal_error() {
       # Use || true to prevent trap recursion if kubectl fails
       # Issue #449: Capture stderr+stdout to log file for debugging
       # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
-      timeout 10s kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+      kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -191,7 +191,7 @@ spec:
   priority: 10
 EOF
       # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
-      timeout 10s kubectl apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+      kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -286,7 +286,7 @@ aws eks update-kubeconfig --name "$CLUSTER" --region "$BEDROCK_REGION"
 # After kubectl config, verify we can reach the cluster API (relates to #430)
 # Use short timeout (10s) to fail fast if cluster is unreachable
 log "Verifying cluster connectivity..."
-if ! timeout 10 kubectl cluster-info &>/dev/null; then
+if ! kubectl_with_timeout 10 cluster-info &>/dev/null; then
   log "ERROR: Cannot reach cluster API after kubectl config. Cluster may be down or network issue."
   log "Exiting cleanly - emergency perpetuation will spawn recovery agent if this is the last agent."
   exit 1
@@ -336,7 +336,7 @@ if [ "$EARLY_ACTIVE_JOBS" -ge $CIRCUIT_BREAKER_LIMIT ]; then
   
   # Post minimal thought without full identity system (identity.sh not yet sourced)
   # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
-  timeout 10s kubectl apply -f - <<EOF 2>/dev/null || true
+  kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -392,7 +392,7 @@ post_message() {
   local to="$1" body="$2" type="${3:-status}"
   local msg_name="msg-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
-  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Message
 metadata:
@@ -417,7 +417,7 @@ post_thought() {
   local content="$1" type="${2:-observation}" confidence="${3:-7}" topic="${4:-}" file_path="${5:-}" parent_ref="${6:-}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
-  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -760,7 +760,7 @@ post_report() {
   fi
   
   local err_output
-  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Report
 metadata:
@@ -1075,7 +1075,7 @@ patch_task_status() {
   # kro status fields are output-only and reflect the ConfigMap data.
   # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
   local err_output
-  if ! err_output=$(timeout 10s kubectl patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
+  if ! err_output=$(kubectl_with_timeout 10 patch configmap "${TASK_CR_NAME}-spec" -n "$NAMESPACE" \
     --type=merge \
     -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" 2>&1); then
     log "WARNING: Failed to update task status to ${phase}: $err_output"
@@ -1328,7 +1328,7 @@ spawn_agent() {
   log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
   log "Identity: $identity_sig → $name (gen $my_generation → $next_generation)"
   local err_output
-  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -1382,7 +1382,7 @@ EOF
     # Create Job directly using agent-graph RGD template (lines match manifests/rgds/agent-graph.yaml)
     local job_name="agent-${name}"
     local fallback_err
-    fallback_err=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+    fallback_err=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -1526,7 +1526,7 @@ spawn_task_and_agent() {
   fi
 
   local err_output
-  err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -1759,7 +1759,7 @@ if [ $? -eq 0 ] && [ -n "$STARTUP_JOBS_JSON" ]; then
 else
   # kubectl failed - check if this is a transient connectivity issue
   log "WARNING: kubectl failed to get jobs during startup circuit breaker check"
-  if timeout 5s kubectl cluster-info &>/dev/null; then
+  if kubectl_with_timeout 5 cluster-info &>/dev/null; then
     # Cluster is reachable but job query failed - assume 0 and proceed with caution
     log "Cluster is reachable despite job query failure. Proceeding with STARTUP_ACTIVE_JOBS=0 (fail-open to avoid false positive)"
     STARTUP_ACTIVE_JOBS=0
@@ -1895,7 +1895,7 @@ for msg_name in $(echo "$INBOX_JSON" | jq -r \
   2>/dev/null || true); do
   # Patch the ConfigMap, not the Message CR. kro status fields are output-only.
   # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
-  timeout 10s kubectl patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
+  kubectl_with_timeout 10 patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
     --type=merge -p '{"data":{"read":"true"}}' 2>/dev/null || true
 done
 
@@ -1932,7 +1932,7 @@ for thought_name in $(echo "$THOUGHTS_JSON" | jq -r \
     NEW_READ_BY="${CURRENT_READ_BY},${AGENT_NAME}"
   fi
   # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
-  timeout 10s kubectl patch configmap "${thought_name}-thought" -n "$NAMESPACE" \
+  kubectl_with_timeout 10 patch configmap "${thought_name}-thought" -n "$NAMESPACE" \
     --type=merge -p "{\"data\":{\"readBy\":\"${NEW_READ_BY}\"}}" 2>/dev/null || true
 done
 
@@ -2235,7 +2235,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
 ③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
   Post a Thought CR with type=insight before exiting:
-  timeout 10s kubectl apply -f - <<EOF
+  kubectl_with_timeout 10 apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Thought
   metadata:
@@ -2262,7 +2262,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   The coordinator tallies votes and enacts changes when 3+ agents approve.
 
   HOW TO PROPOSE a change (any agent can do this):
-    timeout 10s kubectl apply -f - <<EOF
+    kubectl_with_timeout 10 apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
     metadata:
@@ -2282,7 +2282,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
     
     # Then vote:
-    timeout 10s kubectl apply -f - <<EOF
+    kubectl_with_timeout 10 apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
     metadata:
@@ -2340,7 +2340,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   debatable insight if none exist).
 
 ⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
-  timeout 10s kubectl apply -f - <<EOF
+  kubectl_with_timeout 10 apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Report
   metadata:
@@ -2895,7 +2895,7 @@ if [ -n "$SWARM_REF" ]; then
   
   # Patch swarm state
   # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
-  timeout 10s kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+  kubectl_with_timeout 10 patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
     --type=merge -p "{\"data\":{\"tasksCompleted\":\"${NEW_TASKS}\",\"memberAgents\":\"${NEW_MEMBERS}\",\"lastActivityTimestamp\":\"${TIMESTAMP}\"}}" \
     2>/dev/null || true
   
@@ -2919,7 +2919,7 @@ if [ -n "$SWARM_REF" ]; then
           
           # Update phase to Disbanded
           # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
-          timeout 10s kubectl patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
+          kubectl_with_timeout 10 patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
             --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
           
           # Broadcast dissolution message
