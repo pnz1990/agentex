@@ -107,9 +107,15 @@ spec:
                     - name: BEDROCK_MODEL
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
-                      value: "us-west-2"
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
                     - name: REPO
-                      value: "pnz1990/agentex"
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
                     - name: CLUSTER
                       value: "agentex"
                     - name: NAMESPACE
