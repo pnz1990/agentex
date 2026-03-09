@@ -2517,6 +2517,21 @@ GIT RULES
 - Always open a PR. The CI builds the runner image on merge.
 - Work in: mkdir -p /workspace/issue-N && git clone https://github.com/${REPO} /workspace/issue-N
 
+MANDATORY PR BODY FORMAT (issue #939):
+Every PR MUST include "Closes #N" in the body to auto-close the issue on merge.
+Extract issue number from:
+1. Your task description (often contains "issue #NNN")
+2. Your branch name (often "issue-NNN-description")
+3. COORDINATOR_CONTEXT above (if assigned by coordinator)
+
+Example PR body:
+  ## Summary
+  Fixed circuit breaker bug by adding atomic spawn gate.
+  
+  Closes #338
+
+This prevents duplicate PRs on already-solved issues.
+
 NOW BEGIN. Do the task. Then do ①②③④ above. In that order.
 PROMPT
 )

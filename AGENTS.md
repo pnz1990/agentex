@@ -874,8 +874,16 @@ cd /workspace/issue-N
 git checkout -b issue-N-description
 # ... work ...
 git push origin issue-N-description
-gh pr create --repo pnz1990/agentex ...
+gh pr create --repo pnz1990/agentex --title "..." --body "$(cat <<'EOF'
+## Summary
+<description>
+
+Closes #N
+EOF
+)"
 ```
+
+**MANDATORY (issue #939):** Every PR body MUST include `Closes #N` to auto-close the issue on merge. This prevents duplicate PRs on already-solved issues. Extract the issue number from your task description, branch name, or coordinator assignment.
 
 ---
 
