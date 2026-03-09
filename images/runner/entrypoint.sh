@@ -251,7 +251,7 @@ EOF
 }
 
 post_thought() {
-  local content="$1" type="${2:-observation}" confidence="${3:-7}"
+  local content="$1" type="${2:-observation}" confidence="${3:-7}" topic="${4:-}" file_path="${5:-}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
   local err_output
   err_output=$(timeout 10s kubectl apply -f - <<EOF 2>&1
@@ -266,6 +266,8 @@ spec:
   taskRef: "${TASK_CR_NAME}"
   thoughtType: "${type}"
   confidence: ${confidence}
+  topic: "${topic}"
+  filePath: "${file_path}"
   content: |
 $(echo "$content" | sed 's/^/    /')
 EOF
@@ -291,6 +293,8 @@ EOF
   "taskRef": "${TASK_CR_NAME}",
   "thoughtType": "${type}",
   "confidence": ${confidence},
+  "topic": "${topic}",
+  "filePath": "${file_path}",
   "timestamp": "${timestamp}",
   "content": $(echo "$content" | jq -Rs .)
 }
@@ -303,6 +307,83 @@ JSON
     if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
       update_identity_stats "thoughtsPosted" 1
     fi
+  fi
+}
+
+# query_thoughts() - Query thoughts by topic, type, confidence, or file path
+# Usage: query_thoughts [--topic TOPIC] [--type TYPE] [--min-confidence N] [--file PATH] [--limit N]
+# Returns formatted thoughts matching the criteria
+query_thoughts() {
+  local topic="" type="" min_conf=7 file_path="" limit=20
+  
+  # Parse arguments
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --topic) topic="$2"; shift 2 ;;
+      --type) type="$2"; shift 2 ;;
+      --min-confidence) min_conf="$2"; shift 2 ;;
+      --file) file_path="$2"; shift 2 ;;
+      --limit) limit="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  
+  # Build label selector
+  local labels=""
+  [ -n "$topic" ] && labels="${labels}agentex/topic=${topic},"
+  [ -n "$type" ] && labels="${labels}agentex/type=${type},"
+  [ -n "$file_path" ] && labels="${labels}agentex/file=${file_path},"
+  labels="${labels%,}"  # Remove trailing comma
+  
+  # Query thoughts
+  local selector_arg=""
+  [ -n "$labels" ] && selector_arg="-l ${labels}"
+  
+  kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" \
+    $selector_arg \
+    --sort-by=.metadata.creationTimestamp \
+    -o json 2>/dev/null | jq -r \
+    --argjson min_conf "$min_conf" \
+    --argjson limit "$limit" \
+    --arg name "$AGENT_NAME" \
+    '.items | 
+     map(select(.spec.confidence >= $min_conf)) |
+     map(select(.spec.agentRef != $name)) |
+     .[-$limit:] |
+     .[] |
+     "[\(.spec.agentRef)/\(.spec.thoughtType)/c=\(.spec.confidence)] \(.spec.content)"' \
+    2>/dev/null || true
+}
+
+# cleanup_old_thoughts() - Delete thoughts older than 24 hours to prevent clutter
+# Should be called periodically by planners
+cleanup_old_thoughts() {
+  local cutoff_time=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  
+  if [ -z "$cutoff_time" ]; then
+    log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
+    return 0
+  fi
+  
+  local old_thoughts=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq -r --arg cutoff "$cutoff_time" \
+    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
+  
+  if [ -z "$old_thoughts" ]; then
+    log "No old thoughts to clean up"
+    return 0
+  fi
+  
+  local count=0
+  for thought_name in $old_thoughts; do
+    if kubectl_with_timeout 10 delete thought.kro.run "$thought_name" -n "$NAMESPACE" 2>/dev/null; then
+      count=$((count + 1))
+    fi
+  done
+  
+  if [ $count -gt 0 ]; then
+    log "Cleaned up $count thoughts older than 24h"
+    post_thought "Cleaned up $count thoughts older than 24 hours to prevent cluster clutter" "observation" 7 "maintenance"
   fi
 }
 
@@ -1053,6 +1134,10 @@ if [ "$AGENT_ROLE" = "planner" ]; then
     log "Coordinator queue empty or unavailable — planner will self-select from GitHub"
     COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue."
   fi
+  
+  # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
+  log "Planner: cleaning up old thoughts..."
+  cleanup_old_thoughts
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
