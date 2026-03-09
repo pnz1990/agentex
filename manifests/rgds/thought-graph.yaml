@@ -30,6 +30,7 @@ spec:
           name: ${schema.metadata.name}-thought
           namespace: ${schema.metadata.namespace}
           labels:
+            agentex/thought: "true"
             agentex/agent: ${schema.spec.agentRef}
             agentex/task: ${schema.spec.taskRef}
             agentex/type: ${schema.spec.thoughtType}
