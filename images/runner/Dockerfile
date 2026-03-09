@@ -37,7 +37,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenCode CLI
-RUN npm install -g opencode-ai@${OPENCODE_VERSION}
+RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
+    && npm cache clean --force
 
 # Fix npm bundled dependency CVEs (issue #858)
 # npm bundles tar, minimatch, and glob in /usr/lib/node_modules/npm/node_modules/
@@ -50,7 +51,8 @@ RUN npm install -g npm@latest \
         tar@">=7.5.10" \
         minimatch@">=9.0.7" \
         glob@">=10.5.0" \
-    2>/dev/null || true
+    2>/dev/null || true \
+    && npm cache clean --force
 
 # ubuntu:24.04 ships with user/group "ubuntu" at UID/GID 1000.
 # Rename it to "agentex" and set up the home directory.
