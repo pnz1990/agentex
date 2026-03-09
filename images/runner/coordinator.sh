@@ -59,6 +59,36 @@ else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
 fi
 
+# ── Initialize coordinator-state fields (issue #940) ─────────────────────────
+# After coordinator restart, some fields may be missing or null. Initialize them
+# to prevent jq parse errors and governance tally loop crashes.
+echo "Initializing coordinator-state fields..."
+for field in activeAgents activeAssignments decisionLog; do
+  val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+  if [ -z "$val" ]; then
+    echo "  Initializing $field (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+  fi
+done
+
+# debateStats needs a valid structured value (not just empty string)
+debate_stats=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)
+if [ -z "$debate_stats" ]; then
+  echo "  Initializing debateStats (was empty/null)"
+  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+    -p '{"data":{"debateStats":"responses=0 threads=0 disagree=0 synthesize=0"}}' 2>/dev/null || true
+fi
+
+# enactedDecisions needs preservation if exists, initialization if not
+enacted=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null)
+if [ -z "$enacted" ]; then
+  echo "  Initializing enactedDecisions (was empty/null)"
+  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+    -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
+fi
+echo "Coordinator-state initialization complete"
+
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
 # kubectl timeout wrapper (issue #692: prevent 120s hangs during cluster connectivity issues)
@@ -578,6 +608,8 @@ tally_and_enact_votes() {
         # Check if already enacted
         local enacted
         enacted=$(get_state "enactedDecisions")
+        # Issue #940: null guard - treat empty/null as empty string
+        [ -z "$enacted" ] && enacted=""
         local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
         
         if echo "$enacted" | grep -qF "$decision_key"; then
