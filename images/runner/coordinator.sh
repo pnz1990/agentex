@@ -892,7 +892,64 @@ if [ -z "$INITIAL_QUEUE" ]; then
     refresh_task_queue
 fi
 
+# ── HTTP Health Endpoint (issue #699) ───────────────────────────────────────
+# Start a background HTTP server that responds to health checks
+# Returns 200 if heartbeat is fresh (< 120s old), 503 if stale
+start_health_endpoint() {
+    local health_port=8080
+    echo "[$(date -u +%H:%M:%S)] Starting HTTP health endpoint on port ${health_port}..."
+    
+    while true; do
+        # Use netcat to listen for HTTP requests
+        # Read the request (we don't parse it, just respond to any GET)
+        response=$(mktemp)
+        
+        # Get lastHeartbeat from ConfigMap
+        last_heartbeat=$(get_state "lastHeartbeat")
+        current_time=$(date +%s)
+        
+        # Calculate age of last heartbeat
+        if [ -n "$last_heartbeat" ]; then
+            heartbeat_epoch=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+            age=$((current_time - heartbeat_epoch))
+        else
+            age=999999  # No heartbeat yet
+        fi
+        
+        # Stale threshold: 120 seconds (4 missed heartbeats)
+        if [ "$age" -lt 120 ]; then
+            # Healthy
+            cat > "$response" <<EOF
+HTTP/1.1 200 OK
+Content-Type: application/json
+Connection: close
+
+{"status":"healthy","lastHeartbeat":"$last_heartbeat","ageSeconds":$age}
+EOF
+        else
+            # Unhealthy
+            cat > "$response" <<EOF
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+Connection: close
+
+{"status":"unhealthy","lastHeartbeat":"$last_heartbeat","ageSeconds":$age,"reason":"heartbeat_stale"}
+EOF
+        fi
+        
+        # Send response using netcat
+        cat "$response" | nc -l -p "$health_port" -q 1 2>/dev/null || true
+        rm -f "$response"
+    done
+}
+
+# Start health endpoint in background
+start_health_endpoint &
+HEALTH_ENDPOINT_PID=$!
+echo "[$(date -u +%H:%M:%S)] HTTP health endpoint started (PID: $HEALTH_ENDPOINT_PID)"
+
 # Create health check files for Kubernetes probes (issue #619)
+# Note: These are legacy - we now have HTTP endpoint, but keep for backward compatibility
 touch /tmp/coordinator-alive
 touch /tmp/coordinator-ready
 echo "[$(date -u +%H:%M:%S)] Health check files initialized"
