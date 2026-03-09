@@ -12,6 +12,12 @@ spec:
       model: string | default="us.anthropic.claude-sonnet-4-6"
       swarmRef: string | default=""
       priority: integer | default=5
+      # Portability fields — read from constitution by spawn_agent() (issue #819)
+      # A new god sets these in constitution ConfigMap; all agents inherit them automatically.
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      awsRegion: string | default="us-west-2"
+      githubRepo: string | default="pnz1990/agentex"
+      clusterName: string | default="agentex"
     status:
       jobName: ${agentJob.metadata.name}
       completionTime: ${agentJob.status.completionTime}
@@ -54,7 +60,7 @@ spec:
                   type: RuntimeDefault
               containers:
                 - name: agent
-                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+                  image: ${schema.spec.imageRegistry}/agentex/runner:latest
                   imagePullPolicy: Always
                   securityContext:
                     allowPrivilegeEscalation: false
@@ -73,11 +79,11 @@ spec:
                     - name: BEDROCK_MODEL
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
-                      value: "us-west-2"
+                      value: ${schema.spec.awsRegion}
                     - name: REPO
-                      value: "pnz1990/agentex"
+                      value: ${schema.spec.githubRepo}
                     - name: CLUSTER
-                      value: "agentex"
+                      value: ${schema.spec.clusterName}
                     - name: NAMESPACE
                       value: "agentex"
                     - name: GITHUB_TOKEN_FILE

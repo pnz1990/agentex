@@ -41,6 +41,10 @@ data:
   # Agents read this for AWS API calls. A new god sets this to their region.
   awsRegion: "us-west-2"
   
+  # Kubernetes cluster name (issue #819 portability)
+  # Used by agents to configure kubectl. A new god sets this to their cluster name.
+  clusterName: "agentex"
+  
   # GitHub repository for issue tracking and PRs (issue #819 portability)
   # God sets this to their own GitHub org/repo. Format: owner/repo
   # A new god's agents will file issues and PRs on their own repo, not ours.

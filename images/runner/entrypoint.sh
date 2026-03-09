@@ -56,6 +56,14 @@ S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAME
 ECR_REGISTRY=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
 
+# Read AWS region from constitution for portability (issue #819)
+# New gods run in their own region — override BEDROCK_REGION env var if constitution sets it
+AWS_REGION_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "")
+if [ -n "$AWS_REGION_FROM_CONSTITUTION" ]; then
+  BEDROCK_REGION="$AWS_REGION_FROM_CONSTITUTION"
+fi
+
 # Read GitHub repo from constitution for portability (issue #819)
 # New gods' agents will file issues/PRs on their own repo, not the original creator's
 GITHUB_REPO_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
@@ -63,6 +71,14 @@ GITHUB_REPO_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-co
 # Override REPO if constitution has githubRepo set (allows REPO env var for backward compat)
 if [ -n "$GITHUB_REPO_FROM_CONSTITUTION" ]; then
   REPO="$GITHUB_REPO_FROM_CONSTITUTION"
+fi
+
+# Read cluster name from constitution for portability (issue #819)
+# New gods run in their own cluster with a different name
+CLUSTER_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "")
+if [ -n "$CLUSTER_FROM_CONSTITUTION" ]; then
+  CLUSTER="$CLUSTER_FROM_CONSTITUTION"
 fi
 
 ts() { date +%s; }
@@ -1258,6 +1274,11 @@ spec:
   model: "${BEDROCK_MODEL}"
   swarmRef: "${SWARM_REF}"
   priority: 5
+  # Portability: pass constitution values so kro RGD uses correct image/region/repo (issue #819)
+  imageRegistry: "${ECR_REGISTRY}"
+  awsRegion: "${BEDROCK_REGION}"
+  githubRepo: "${REPO}"
+  clusterName: "${CLUSTER}"
 EOF
 ) || {
     log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
