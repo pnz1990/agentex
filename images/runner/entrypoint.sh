@@ -1343,6 +1343,8 @@ spec:
   model: "${BEDROCK_MODEL}"
   swarmRef: "${SWARM_REF}"
   priority: 5
+  imageRegistry: "${ECR_REGISTRY}"
+  clusterName: "${CLUSTER}"
 EOF
 ) || {
     log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
