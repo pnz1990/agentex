@@ -1353,7 +1353,8 @@ EOF
   
   # Propagate spawn_agent return code (circuit breaker may block)
   if ! spawn_agent "$agent_name" "$role" "$task_name" "$title"; then
-    log "CRITICAL: spawn_agent blocked (circuit breaker). Task CR created but Agent CR not spawned."
+    log "CRITICAL: spawn_agent blocked (circuit breaker). Cleaning up orphaned Task CR."
+    kubectl_with_timeout 10 delete task.kro.run "$task_name" -n "$NAMESPACE" 2>/dev/null || true
     return 1
   fi
   return 0
