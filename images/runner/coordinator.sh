@@ -470,16 +470,9 @@ update_state "phase" "Active"
 
 # Initialize spawnSlots to circuitBreakerLimit on startup (atomic spawn gate, issue #519)
 # This is the number of concurrent agent spawns permitted.
-INIT_SLOTS=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
-  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
-if ! [[ "$INIT_SLOTS" =~ ^[0-9]+$ ]]; then INIT_SLOTS=12; fi
-CURRENT_SLOTS=$(get_state "spawnSlots")
-if [ -z "$CURRENT_SLOTS" ] || ! [[ "$CURRENT_SLOTS" =~ ^[0-9]+$ ]]; then
-  update_state "spawnSlots" "$INIT_SLOTS"
-  echo "[$(date -u +%H:%M:%S)] Initialized spawnSlots=$INIT_SLOTS (from circuitBreakerLimit)"
-else
-  echo "[$(date -u +%H:%M:%S)] spawnSlots already set: $CURRENT_SLOTS"
-fi
+# IMPORTANT: Always reconcile on startup to recover from any stale state (issue #632)
+echo "[$(date -u +%H:%M:%S)] Running startup spawn slot reconciliation..."
+reconcile_spawn_slots
 
 # Seed the task queue on first start if empty
 INITIAL_QUEUE=$(get_state "taskQueue")
