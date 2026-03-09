@@ -30,16 +30,11 @@ spec:
           namespace: ${schema.metadata.namespace}
           labels:
             agentex/component: coordinator
-        data:
-          phase: "Initializing"
-          taskQueue: ""
-          activeAssignments: ""
-          decisionLog: ""
-          lastHeartbeat: ""
-          voteRegistry: ""
-          consensusResults: ""
-          enactedDecisions: ""
-          # spawnSlots is NOT in this template — managed at runtime by coordinator.sh
+        data: {}
+          # All fields (phase, taskQueue, activeAssignments, decisionLog, etc.)
+          # are managed at runtime by coordinator.sh and NOT owned by kro.
+          # This prevents kro from resetting them to template defaults every ~30s.
+          # See issue #924 for details.
 
     # ── Coordinator Deployment ───────────────────────────────────────────────
     # Long-running Pod that maintains civilization state and coordinates agents
