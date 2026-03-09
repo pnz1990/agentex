@@ -2571,7 +2571,7 @@ if [ "$AGENT_ROLE" = "planner" ]; then
        .metadata.name' 2>/dev/null || true)
     
     if [ -n "$OLD_AGENTS" ]; then
-      local cleanup_count=0
+      cleanup_count=0
       for agent_name in $OLD_AGENTS; do
         if kubectl_with_timeout 10 delete agent.kro.run "$agent_name" -n "$NAMESPACE" 2>/dev/null; then
           cleanup_count=$((cleanup_count + 1))
