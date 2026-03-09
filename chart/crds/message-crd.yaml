@@ -1,0 +1,45 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: messages.agentex.io
+spec:
+  group: agentex.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [from, to, body]
+              properties:
+                from:
+                  type: string
+                  description: Sender Agent CR name
+                to:
+                  type: string
+                  description: Recipient Agent CR name, or "broadcast" for all
+                thread:
+                  type: string
+                  description: Task CR name this message belongs to
+                body:
+                  type: string
+                  description: Message content (markdown)
+                replyTo:
+                  type: string
+                  description: Message CR name this is a reply to
+                messageType:
+                  type: string
+                  enum: [question, answer, proposal, approval, rejection, status, broadcast]
+                  default: status
+                read:
+                  type: boolean
+                  default: false
+  scope: Namespaced
+  names:
+    plural: messages
+    singular: message
+    kind: Message

@@ -1,0 +1,43 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: message-graph
+  namespace: {{ include "agentex.namespace" . }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Message
+    spec:
+      from: string | required=true
+      to: string | required=true
+      body: string | required=true
+      thread: string | default=""
+      messageType: string | default="status"
+      replyTo: string | default=""
+    status:
+      configMapName: ${messageConfigMap.metadata.name}
+      read: ${messageConfigMap.data.read}
+      timestamp: ${messageConfigMap.metadata.creationTimestamp}
+  resources:
+    - id: messageConfigMap
+      readyWhen:
+        - ${messageConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-msg
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/from: ${schema.spec.from}
+            agentex/to: ${schema.spec.to}
+            agentex/thread: ${schema.spec.thread}
+            agentex/type: ${schema.spec.messageType}
+        data:
+          from: ${schema.spec.from}
+          to: ${schema.spec.to}
+          body: ${schema.spec.body}
+          thread: ${schema.spec.thread}
+          messageType: ${schema.spec.messageType}
+          replyTo: ${schema.spec.replyTo}
+          read: "false"

@@ -1,0 +1,134 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: coordinator-graph
+  namespace: {{ include "agentex.namespace" . }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Coordinator
+    spec:
+      enabled: boolean | default=true
+      model: string | default={{ .Values.agent.model | quote }}
+      imageTag: string | default={{ .Values.image.tag | quote }}
+    status:
+      configMapName: ${coordinatorState.metadata.name}
+      phase: ${coordinatorState.data.phase}
+      lastHeartbeat: ${coordinatorState.data.lastHeartbeat}
+      deploymentName: ${coordinatorDeployment.metadata.name}
+  resources:
+    - id: coordinatorState
+      readyWhen:
+        - ${coordinatorState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: coordinator-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/component: coordinator
+        data:
+          phase: "Initializing"
+          taskQueue: ""
+          activeAssignments: ""
+          decisionLog: ""
+          lastHeartbeat: ""
+          voteRegistry: ""
+          consensusResults: ""
+          enactedDecisions: ""
+
+    - id: coordinatorDeployment
+      readyWhen:
+        - ${coordinatorDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: coordinator
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-coordinator
+            agentex/component: coordinator
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate
+          selector:
+            matchLabels:
+              app: agentex-coordinator
+          template:
+            metadata:
+              labels:
+                app: agentex-coordinator
+                agentex/component: coordinator
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: coordinator
+                  image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:${schema.spec.imageTag}
+                  imagePullPolicy: {{ .Values.image.pullPolicy }}
+                  command: ["/bin/bash", "/usr/local/bin/coordinator.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: COORDINATOR_NAME
+                      value: coordinator
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      value: {{ .Values.aws.region | quote }}
+                    - name: REPO
+                      value: {{ .Values.god.repo | quote }}
+                    - name: CLUSTER
+                      value: {{ .Values.cluster.name | quote }}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "500m"
+                  livenessProbe:
+                    exec:
+                      command: ["/bin/sh", "-c", "test -f /tmp/coordinator-alive"]
+                    initialDelaySeconds: 30
+                    periodSeconds: 60
+                    timeoutSeconds: 5
+                    failureThreshold: 3
+                  readinessProbe:
+                    exec:
+                      command: ["/bin/sh", "-c", "test -f /tmp/coordinator-ready"]
+                    initialDelaySeconds: 10
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 2
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 1Gi
+                - name: github-token
+                  secret:
+                    secretName: {{ .Values.github.secretName }}
+                    defaultMode: 0400

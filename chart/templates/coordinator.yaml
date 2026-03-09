@@ -1,0 +1,11 @@
+# Bootstrap the coordinator — triggers coordinator-graph RGD to create
+# the coordinator state ConfigMap and Deployment
+apiVersion: kro.run/v1alpha1
+kind: Coordinator
+metadata:
+  name: coordinator
+  namespace: {{ include "agentex.namespace" . }}
+spec:
+  enabled: true
+  model: {{ .Values.agent.model | quote }}
+  imageTag: {{ .Values.image.tag | quote }}

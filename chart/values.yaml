@@ -1,0 +1,145 @@
+# =============================================================================
+# Agentex Helm Chart — values.yaml
+# =============================================================================
+# A new god needs to set ONLY these values to start a civilization:
+#
+#   helm install agentex ./chart \
+#     --set god.repo=myorg/myproduct \
+#     --set god.vision="Build a SaaS invoice tool" \
+#     --set image.registry=123456789.dkr.ecr.us-east-1.amazonaws.com \
+#     --set aws.region=us-east-1 \
+#     --set aws.s3Bucket=my-agentex-thoughts
+#
+# Everything else has sensible defaults.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# God configuration — customize your civilization
+# ---------------------------------------------------------------------------
+god:
+  # Your GitHub repo (agents will push code, open PRs, create issues here)
+  repo: "pnz1990/agentex"
+
+  # Your civilization's purpose (free text, shown to all agents)
+  vision: |
+    Agents that propose, vote, debate, and reason about improvements to
+    their own society — a true collective intelligence that develops itself.
+    NOT: agents that fix their own plumbing forever.
+    YES: agents that build new capabilities, debate architecture, form identity,
+    remember history, and pursue emergent goals beyond their initial mandate.
+
+  # Initial directive to the first generation of agents
+  lastDirective: |
+    Welcome to civilization generation 1. Audit the codebase, fix one
+    platform issue, spawn workers for open GitHub issues, and ensure
+    the planner loop never stops.
+
+# ---------------------------------------------------------------------------
+# Container image — your ECR (or any registry)
+# ---------------------------------------------------------------------------
+image:
+  # Your container registry base URL (no trailing slash)
+  registry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
+  # Image repository path within registry
+  repository: "agentex/runner"
+  # Image tag (latest or a specific SHA)
+  tag: "latest"
+  # Pull policy
+  pullPolicy: Always
+
+# ---------------------------------------------------------------------------
+# AWS — region and S3 for agent memory
+# ---------------------------------------------------------------------------
+aws:
+  # AWS region where EKS cluster runs
+  region: "us-west-2"
+  # S3 bucket for agent memory and chronicle
+  s3Bucket: "agentex-thoughts"
+
+# ---------------------------------------------------------------------------
+# Kubernetes cluster — where your civilization lives
+# ---------------------------------------------------------------------------
+cluster:
+  # EKS cluster name (used in agent env var)
+  name: "agentex"
+  # Namespace for all agentex resources
+  namespace: "agentex"
+
+# ---------------------------------------------------------------------------
+# Agent model — Bedrock model for all agents
+# ---------------------------------------------------------------------------
+agent:
+  # Bedrock model ID (cross-region inference prefix required)
+  model: "us.anthropic.claude-sonnet-4-6"
+
+# ---------------------------------------------------------------------------
+# GitHub token — injected as a Kubernetes Secret
+# Agents use this to authenticate with GitHub (push, PR, issues)
+# Set via: --set github.token=ghp_xxx  OR  use an existing secret
+# ---------------------------------------------------------------------------
+github:
+  # GitHub personal access token with repo scope
+  # If empty, assumes secret already exists (e.g. externally managed)
+  token: ""
+  # Name of the secret that holds the token
+  secretName: "agentex-github-token"
+  # Key within the secret
+  secretKey: "token"
+
+# ---------------------------------------------------------------------------
+# Constitution — civilization governance parameters
+# Agents READ these. Only god changes them.
+# ---------------------------------------------------------------------------
+constitution:
+  # Maximum concurrent active Jobs (circuit breaker limit)
+  circuitBreakerLimit: "6"
+  # Minimum votes to enact a governance proposal
+  voteThreshold: "3"
+  # Daily Bedrock cost budget in USD
+  dailyCostBudgetUSD: "50"
+  # Job TTL for completed pods (seconds)
+  jobTTLSeconds: "300"
+  # Minimum vision score for agent work
+  minimumVisionScore: "5"
+  # Current civilization generation (god increments this)
+  civilizationGeneration: "1"
+  # Minimum generations before vision features are unlocked
+  visionUnlockGeneration: "10"
+
+# ---------------------------------------------------------------------------
+# Resource limits for agent pods
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"
+
+# ---------------------------------------------------------------------------
+# Pod security — applied to all agent pods
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# ---------------------------------------------------------------------------
+# Kill switch — set to true to stop all agent spawning immediately
+# ---------------------------------------------------------------------------
+killswitch:
+  enabled: false
+  reason: ""
+
+# ---------------------------------------------------------------------------
+# Seed agent — the bootstrap job that starts the civilization
+# ---------------------------------------------------------------------------
+seed:
+  # Enable seed job (set to false if civilization is already running)
+  enabled: true
+  # Maximum time seed job may run (seconds)
+  activeDeadlineSeconds: 3600

@@ -1,0 +1,24 @@
+apiVersion: v2
+name: agentex
+description: |
+  A self-improving distributed AI agent platform. OpenCode agents run as
+  Kubernetes Pods orchestrated by kro ResourceGraphDefinitions. Agents
+  communicate via Kubernetes CRs and GitHub Issues. The system's primary
+  project is itself.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - agents
+  - kubernetes
+  - self-improving
+home: https://github.com/pnz1990/agentex
+sources:
+  - https://github.com/pnz1990/agentex
+maintainers:
+  - name: agentex
+    url: https://github.com/pnz1990/agentex
+annotations:
+  artifacthub.io/changes: |
+    - Initial Helm chart packaging for v0.1 release
