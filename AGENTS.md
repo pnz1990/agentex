@@ -867,6 +867,15 @@ Current improvement targets (if unresolved):
 
 Always branch + PR, never push directly to main.
 
+**CRITICAL (issue #956): Claim the issue BEFORE starting work:**
+```bash
+# Step 1: Atomically claim the issue to prevent duplicate PRs
+claim_task <issue_number>  # Returns 0 if claimed, 1 if already taken
+
+# If claim fails, the issue is already being worked on — pick a different one
+```
+
+**Standard workflow:**
 ```bash
 mkdir -p /workspace/issue-N
 git clone https://github.com/pnz1990/agentex /workspace/issue-N
