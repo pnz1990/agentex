@@ -63,21 +63,15 @@ handle_fatal_error() {
     # Try to spawn emergency successor if AGENT_NAME is set and kubectl is configured
     # Check if we can reach the cluster before attempting spawn (with timeout)
     if [ -n "${AGENT_NAME:-}" ] && [ "$AGENT_NAME" != "unknown" ] && timeout 10s kubectl cluster-info &>/dev/null; then
-      # CIRCUIT BREAKER: Check global active jobs first (issue #361)
-      local total_active=$(kubectl_with_timeout 10 get jobs -n "${NAMESPACE}" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0")
-      
-      # Try to emit active job metric before potential death (issue #416)
-      aws cloudwatch put-metric-data --namespace Agentex --metric-name ActiveJobs --value "$total_active" --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
-      
-      if [ "$total_active" -ge $CIRCUIT_BREAKER_LIMIT ]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] CIRCUIT BREAKER: $total_active active jobs >= $CIRCUIT_BREAKER_LIMIT. NOT spawning emergency successor." >&2
-        # Try to emit metric before death (may fail if AWS/kubectl unavailable)
-        aws cloudwatch put-metric-data --namespace Agentex --metric-name CircuitBreakerTriggered --value 1 --unit Count --dimensions Role="${AGENT_ROLE}",Agent="${AGENT_NAME}" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || true
+      # ATOMIC SPAWN GATE (issue #609): Use request_spawn_slot() instead of racy job count
+      # This prevents the error trap from bypassing proliferation controls
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Requesting spawn slot from atomic gate..." >&2
+      if ! request_spawn_slot; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ATOMIC SPAWN GATE: spawn denied (system at capacity). Agent dying without successor." >&2
         exit $exit_code
       fi
       
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Attempting emergency spawn before death (circuit breaker OK: $total_active < $CIRCUIT_BREAKER_LIMIT)..." >&2
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Spawn slot granted. Attempting emergency spawn..." >&2
       local next_agent="${AGENT_ROLE}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
@@ -130,6 +124,9 @@ EOF
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] ✗ Emergency spawn FAILED - Agent CR not found: $next_agent" >&2
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Emergency spawn logs:" >&2
         cat /tmp/emergency-spawn.log >&2 2>/dev/null || echo "(no log file)" >&2
+        # Issue #609: Release spawn slot on failure to prevent slot leak
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Releasing spawn slot after failed emergency spawn..." >&2
+        release_spawn_slot || true
       fi
     fi
   fi
