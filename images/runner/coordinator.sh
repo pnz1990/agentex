@@ -447,9 +447,56 @@ tally_and_enact_votes() {
             continue
         fi
 
+        # ISSUE #747 FIX: Validate that votes exist before enacting
+        # Safety check: ensure we have at least SOME votes (approve + reject + abstain > 0)
+        # This prevents enactment when vote counting silently fails
+        local total_votes=$((approve_votes + reject_votes + abstain_votes))
+        if [ "$total_votes" -eq 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] SAFETY: $topic has ZERO votes (approve=$approve_votes reject=$reject_votes abstain=$abstain_votes). Cannot enact without votes."
+            push_metric "GovernanceBlocked" 1 "Count" "Topic=${topic},Reason=NoVotes"
+            continue
+        fi
+
+        # ISSUE #747 FIX: god-delegate proposals require explicit agent votes
+        # God-delegate proposals are often tests or provocations for debate.
+        # They should NOT be auto-enacted even if they reach threshold.
+        local proposer_agent
+        proposer_agent=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .agent" \
+            "$thoughts_file" | tail -1 || echo "unknown")
+        
+        if [[ "$proposer_agent" == god-delegate-* ]]; then
+            echo "[$(date -u +%H:%M:%S)] SAFETY: $topic proposed by $proposer_agent (god-delegate). Requires 4+ approve votes (raised threshold for god proposals)."
+            # God proposals require higher threshold (4 instead of 3) to ensure strong consensus
+            local god_threshold=4
+            if [ "$approve_votes" -lt "$god_threshold" ]; then
+                echo "[$(date -u +%H:%M:%S)] SAFETY: $topic has $approve_votes approvals, needs $god_threshold for god-delegate proposal. Not enacting."
+                push_metric "GovernanceBlocked" 1 "Count" "Topic=${topic},Reason=GodProposalInsufficientVotes"
+                continue
+            fi
+        fi
+
         # Enact if threshold reached
         if [ "$approve_votes" -ge "$VOTE_THRESHOLD" ]; then
             echo "[$(date -u +%H:%M:%S)] *** CONSENSUS REACHED: $topic (${approve_votes} approvals) ***"
+            
+            # ISSUE #747 FIX: Enhanced audit logging before enactment
+            echo "[$(date -u +%H:%M:%S)] AUDIT: Enacting governance decision"
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Topic: $topic"
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Proposer: $proposer_agent"
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Vote tally: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain"
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Threshold: $VOTE_THRESHOLD (met: YES)"
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Changes: $kv_pairs"
+            
+            # Get list of agents who voted
+            local approvers
+            approvers=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .agent" \
+                "$thoughts_file" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || echo "unknown")
+            local rejectors
+            rejectors=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"reject\")))) | .agent" \
+                "$thoughts_file" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || echo "none")
+            
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Approvers: $approvers"
+            echo "[$(date -u +%H:%M:%S)] AUDIT:   Rejectors: $rejectors"
             
             push_metric "ConsensusEnacted" 1 "Count" "Topic=${topic}"
 
@@ -486,15 +533,17 @@ tally_and_enact_votes() {
                 fi
             fi
 
-            # Record the enacted decision
+            # Record the enacted decision with full audit trail
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            local enacted_entry="${ts} ${decision_key} approvals=${approve_votes}"
+            local enacted_entry="${ts} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${proposer_agent} voters=${approvers}"
             if [ -z "$enacted" ]; then
                 update_state "enactedDecisions" "$enacted_entry"
             else
                 update_state "enactedDecisions" "${enacted} | ${enacted_entry}"
             fi
+            
+            echo "[$(date -u +%H:%M:%S)] AUDIT: Decision recorded in enactedDecisions log"
 
             # Post verdict Thought CR
             local verdict_text
