@@ -185,9 +185,10 @@ tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs..."
 
     # Read all thought ConfigMaps
+    # NOTE: thought-graph.yaml doesn't create agentex/thought label, so we filter by name pattern instead
     local all_thoughts
-    all_thoughts=$(kubectl get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq -r '.items[] | {
+    all_thoughts=$(kubectl get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq -r '.items[] | select(.metadata.name | endswith("-thought")) | {
             agent: (.data.agentRef // "unknown"),
             content: (.data.content // ""),
             type: (.data.thoughtType // ""),
