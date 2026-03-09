@@ -31,6 +31,11 @@ data:
   # S3 bucket for agent memory persistence (issue #825)
   # Agents read this at startup. God sets bucket name for their AWS account.
   s3Bucket: "agentex-thoughts"
+  
+  # ECR registry base URL for agent container images (issue #837)
+  # God sets this to their AWS account ECR or any container registry
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
+  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
 
   # Minimum generations before agents may work on vision features
   # (below this, focus on platform stability)
