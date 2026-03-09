@@ -1,0 +1,138 @@
+{{- if .Values.seed.enabled }}
+# Bootstrap seed job — runs once to start the civilization.
+# Spawns planner-001 and initial workers.
+# Set seed.enabled=false if civilization is already running.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-seed
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+    agentex/role: seed
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.seed.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        agentex/role: seed
+    spec:
+      serviceAccountName: agentex-agent-sa
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: init-prompt
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /prompt-src/seed-prompt.sh /prompt/seed-prompt.sh && chmod +x /prompt/seed-prompt.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: prompt-src
+              mountPath: /prompt-src
+            - name: prompt
+              mountPath: /prompt
+      containers:
+        - name: agent
+          image: {{ include "agentex.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AGENT_NAME
+              value: "seed-001"
+            - name: AGENT_ROLE
+              value: "seed"
+            - name: TASK_CR_NAME
+              value: "task-seed-001"
+            - name: BEDROCK_MODEL
+              value: {{ .Values.agent.model | quote }}
+            - name: BEDROCK_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: REPO
+              value: {{ .Values.god.repo | quote }}
+            - name: CLUSTER
+              value: {{ .Values.cluster.name | quote }}
+            - name: NAMESPACE
+              value: {{ .Values.cluster.namespace | quote }}
+            - name: GITHUB_TOKEN_FILE
+              value: "/var/secrets/github/token"
+          resources:
+            requests:
+              memory: {{ .Values.resources.requests.memory | quote }}
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+            limits:
+              memory: {{ .Values.resources.limits.memory | quote }}
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: github-token
+              mountPath: /var/secrets/github
+              readOnly: true
+            - name: prompt
+              mountPath: /prompt
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: github-token
+          secret:
+            secretName: {{ .Values.github.secretName }}
+            defaultMode: 0400
+        - name: prompt-src
+          configMap:
+            name: agentex-seed-prompt
+        - name: prompt
+          emptyDir: {}
+---
+# Seed prompt ConfigMap — instructions for the seed agent
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-seed-prompt
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+data:
+  seed-prompt.sh: |
+    #!/bin/bash
+    cat <<'PROMPT'
+    You are the seed agent for a new agentex civilization.
+
+    Your civilization's vision:
+    {{ .Values.god.vision | nindent 4 }}
+
+    Repository: {{ .Values.god.repo }}
+    Cluster: {{ .Values.cluster.name }}
+    Namespace: {{ .Values.cluster.namespace }}
+    Tools: kubectl, gh CLI (authenticated to {{ .Values.god.repo }}), aws CLI, git, opencode.
+
+    YOUR TASKS:
+    1. Check cluster health: kubectl get nodes && kubectl get pods -n {{ .Values.cluster.namespace }}
+    2. Verify kro is healthy: kubectl get resourcegraphdefinitions -n {{ .Values.cluster.namespace }}
+    3. Read open GitHub issues: gh issue list --repo {{ .Values.god.repo }} --state open --limit 30
+    4. Spawn planner-001: create Task CR + Agent CR for role=planner
+    5. Spawn 2-3 workers for the highest priority open issues
+    6. Create a GitHub issue for any problems you discover
+
+    IMPORTANT: After spawning agents, exit. The planner loop will take over.
+    PROMPT
+{{- end }}

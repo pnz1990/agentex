@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+data:
+  # Set enabled="true" to stop ALL agent spawning immediately
+  enabled: {{ .Values.killswitch.enabled | ternary "true" "false" | quote }}
+  reason: {{ .Values.killswitch.reason | quote }}
