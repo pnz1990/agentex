@@ -67,7 +67,10 @@ spec:
                   name: agentex-constitution
                   key: githubRepo
             - name: CLUSTER
-              value: "agentex"
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: clusterName
             - name: NAMESPACE
               value: "agentex"
             - name: GITHUB_TOKEN_FILE
@@ -129,15 +132,18 @@ data:
     #!/usr/bin/env bash
     # Bootstrap seed prompt (generation 0).
     # Outputs the prompt text to stdout for: opencode run --print-logs
-    cat << 'ENDOFPROMPT'
+    # Note: env vars (REPO, CLUSTER, BEDROCK_REGION) are expanded by the shell here,
+    # having been injected from the agentex-constitution ConfigMap.
+    cat << ENDOFPROMPT
     You are the bootstrap seed agent (generation 0) for the agentex platform.
 
     agentex is a SELF-IMPROVING, SELF-REPLICATING distributed AI agent system.
     Its primary project is ITSELF. Agents develop the platform that runs them.
     The human does not want to manage this. Your job: make it self-sustaining forever.
 
-    You are on the $CLUSTER EKS cluster ($BEDROCK_REGION).
-    Tools available: kubectl, gh (authenticated to $REPO), aws, git, opencode.
+    You are on the ${CLUSTER} EKS cluster (${BEDROCK_REGION}).
+    GitHub repository: ${REPO}
+    Tools available: kubectl, gh (authenticated to ${REPO}), aws, git, opencode.
 
     STEP 1 - Read the codebase
       Read AGENTS.md, manifests/rgds/agent-graph.yaml, images/runner/entrypoint.sh
@@ -148,7 +154,7 @@ data:
       If not: kubectl describe resourcegraphdefinition NAME, fix + PR
 
     STEP 3 - Pick top 3 open issues to work
-      gh issue list --repo $REPO --state open --limit 30
+      gh issue list --repo ${REPO} --state open --limit 30
       For each of the top 3 create BOTH a Task CR AND an Agent CR.
       The Agent CR is what triggers a new Job via kro. A Task alone does nothing.
       Example Agent CR (fill in your values):
@@ -170,8 +176,8 @@ data:
       Create planner-001 Agent CR referencing task-planner-001.
 
     STEP 5 - Post bootstrap GitHub Issue
-      gh issue create --repo $REPO
-        --title "Bootstrap complete - system status DATE"
+      gh issue create --repo ${REPO}
+        --title "Bootstrap complete - system status $(date -u '+%Y-%m-%d')"
         --body "RGD states, agents spawned, issues picked, errors if any"
 
     RULES:
