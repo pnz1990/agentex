@@ -1863,21 +1863,26 @@ register_with_coordinator
 log "Checking coordinator health..."
 restart_coordinator_if_unhealthy
 
-# ── 3.8. Claim task from coordinator (planners only) ─────────────────────────
-# Planners query the coordinator for an assigned issue instead of picking
+# ── 3.8. Claim task from coordinator (planners and workers) ──────────────────
+# Agents query the coordinator for an assigned issue instead of picking
 # one independently from GitHub. This prevents duplicate work and enables
 # the coordinator to be the single source of task assignment truth.
+# Issue #938: workers were bypassing coordinator queue entirely, causing duplicates
 COORDINATOR_ISSUE=0
 COORDINATOR_CONTEXT=""
-if [ "$AGENT_ROLE" = "planner" ]; then
-  log "Planner: requesting task from coordinator..."
+if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
+  log "${AGENT_ROLE}: requesting task from coordinator..."
   request_coordinator_task
   if [ "$COORDINATOR_ISSUE" != "0" ] && [ -n "$COORDINATOR_ISSUE" ]; then
-    log "Coordinator assigned issue #$COORDINATOR_ISSUE to this planner"
-    COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement a fix or spawn a worker for it. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
+    log "Coordinator assigned issue #$COORDINATOR_ISSUE to this ${AGENT_ROLE}"
+    if [ "$AGENT_ROLE" = "planner" ]; then
+      COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement a fix or spawn a worker for it. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
+    else
+      COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement it and open a PR. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
+    fi
     push_metric "CoordinatorAssignment" 1
   else
-    log "Coordinator queue empty or unavailable — planner will self-select from GitHub"
+    log "Coordinator queue empty or unavailable — ${AGENT_ROLE} will self-select from GitHub"
     COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue.
 
 IMPORTANT: Before starting work, atomically claim the issue with: claim_task <issue_number>
@@ -1885,11 +1890,14 @@ If claim fails (returns 1), pick a different issue — another agent already cla
   fi
   
   # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
-  log "Planner: cleaning up old thoughts..."
-  cleanup_old_thoughts
-  
-  # Security alert check (issue #652) - constitution-mandated self-awareness
-  check_security_alerts
+  # Only planners do this to avoid redundant cleanup from multiple workers
+  if [ "$AGENT_ROLE" = "planner" ]; then
+    log "Planner: cleaning up old thoughts..."
+    cleanup_old_thoughts
+    
+    # Security alert check (issue #652) - constitution-mandated self-awareness
+    check_security_alerts
+  fi
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
@@ -2121,6 +2129,9 @@ ROLE-SPECIFIC GUIDANCE: WORKER
 Your PRIMARY job: implement your assigned issue and open a PR. That is it.
 
 WORKER RULES:
+- COORDINATOR INTEGRATION (issue #938): Check COORDINATOR_CONTEXT above for your assigned issue.
+  If coordinator assigned you an issue, work on that. If queue is empty, pick from GitHub but
+  ALWAYS call claim_task <issue_number> BEFORE starting work to prevent duplicate PRs.
 - Do NOT read entrypoint.sh, RGDs, or AGENTS.md for step ② improvements
   (that is the planner's job — workers doing architecture pollutes the thought stream)
 - Do NOT post insight or planning thoughts (blockers ONLY)
