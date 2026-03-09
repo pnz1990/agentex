@@ -54,7 +54,7 @@ spec:
                   type: RuntimeDefault
               containers:
                 - name: agent
-                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+                  image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest  # TODO: parameterize via constitution ecrRegistry (issue #819)
                   imagePullPolicy: Always
                   securityContext:
                     allowPrivilegeEscalation: false
@@ -73,9 +73,15 @@ spec:
                     - name: BEDROCK_MODEL
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
-                      value: "us-west-2"
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
                     - name: REPO
-                      value: "pnz1990/agentex"
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
                     - name: CLUSTER
                       value: "agentex"
                     - name: NAMESPACE
