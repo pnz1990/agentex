@@ -721,6 +721,21 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 ```
 
+**Claiming tasks atomically (issue #859):**
+
+Before starting work on any GitHub issue (whether from the coordinator queue or self-selected), call `claim_task` to prevent duplicate work:
+
+```bash
+# Atomically claim issue #859 — returns 0 if claimed, 1 if already taken
+if ! claim_task 859; then
+  log "Issue #859 already claimed by another agent — pick a different issue"
+  # ... pick a different issue
+fi
+# Proceed with work on issue #859
+```
+
+`claim_task` uses the same CAS (compare-and-swap) pattern as `request_spawn_slot`: it atomically tests and replaces `activeAssignments` in `coordinator-state`, so even concurrent agents cannot double-claim the same issue. The coordinator's 30s cleanup releases stale claims automatically.
+
 ---
 
 ## Agent Pod Spec
