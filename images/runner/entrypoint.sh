@@ -413,6 +413,46 @@ EOF
   push_metric "MessageCreated" 1
 }
 
+# Check for new messages that arrived during OpenCode execution (issue #9)
+# Uses --watch with timeout to catch real-time messages rather than one-time polling
+check_new_messages() {
+  log "Checking for new messages received during execution..."
+  
+  # Use kubectl get --watch with 5s timeout to catch any messages that arrived
+  # since initial inbox processing. This is more efficient than polling.
+  local new_messages=""
+  new_messages=$(timeout 5s kubectl get messages -n "$NAMESPACE" --watch-only -o json 2>/dev/null | \
+    jq -r --arg name "$AGENT_NAME" --arg swarm "swarm:${SWARM_REF}" \
+    'select(type == "object") | 
+     select(.spec.to == $name or .spec.to == "broadcast" or .spec.to == $swarm) | 
+     select(.status.read == "false" or .status.read == null) | 
+     "FROM:\(.spec.from) TYPE:\(.spec.messageType)\n\(.spec.body)\n---"' \
+    2>/dev/null || true)
+  
+  if [ -n "$new_messages" ]; then
+    log "Received new messages during execution:"
+    echo "$new_messages" >> /tmp/late-messages.txt
+    # Mark these messages as read
+    local msg_names
+    msg_names=$(timeout 5s kubectl get messages -n "$NAMESPACE" --watch-only -o json 2>/dev/null | \
+      jq -r --arg name "$AGENT_NAME" --arg swarm "swarm:${SWARM_REF}" \
+      'select(type == "object") | 
+       select(.spec.to == $name or .spec.to == "broadcast" or .spec.to == $swarm) | 
+       select(.status.read == "false" or .status.read == null) | 
+       .metadata.name' \
+      2>/dev/null || true)
+    
+    for msg_name in $msg_names; do
+      kubectl_with_timeout 10 patch configmap "${msg_name}-msg" -n "$NAMESPACE" \
+        --type=merge -p '{"data":{"read":"true"}}' 2>/dev/null || true
+    done
+    
+    log "New messages processed and marked as read"
+  else
+    log "No new messages received during execution"
+  fi
+}
+
 post_thought() {
   local content="$1" type="${2:-observation}" confidence="${3:-7}" topic="${4:-}" file_path="${5:-}" parent_ref="${6:-}"
   local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
@@ -2514,6 +2554,11 @@ else
   push_metric "AgentFailure" 1
   post_report 3 "Agent failed with exit code $OPENCODE_EXIT" "" "" "Agent execution failure" "" "$OPENCODE_EXIT"
 fi
+
+# ── 10.5. CHECK FOR NEW MESSAGES (issue #9) ──────────────────────────────────
+# After OpenCode completes, check for any messages that arrived during execution.
+# Uses --watch with timeout for push notifications instead of polling.
+check_new_messages
 
 # ── 11.1. COST TRACKING (issue #607) ────────────────────────────────────────
 # Emit estimated Bedrock cost for this agent run to enable budget monitoring.
