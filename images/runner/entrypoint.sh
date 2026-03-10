@@ -1229,7 +1229,15 @@ post_report() {
   else
     specializations="[]"
   fi
-  
+
+  # Issue #1830: Update tasksCompleted BEFORE the kubectl apply so it runs even if
+  # the Report CR creation fails (kubectl timeout, RBAC issue, kro unavailable, etc.).
+  # Previously this was after the `|| { return 0 }` early-return block, causing
+  # tasksCompleted=0 for all 1,162+ agents when kubectl apply failed intermittently.
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+    update_identity_stats "tasksCompleted" 1
+  fi
+
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -1260,11 +1268,6 @@ EOF
   }
   push_metric "ReportCreated" 1
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
-  
-  # Update identity stats (if identity system is active)
-  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
-    update_identity_stats "tasksCompleted" 1
-  fi
 
   # Issue #1602: Update reputation history with this session's visionScore
   # Called after filing Report CR so visionScore is final.
@@ -4958,7 +4961,7 @@ Closes #${PR939_ISSUE}"
     push_metric "CIFailureOnExit" 1
     # Skip to cleanup — emergency perpetuation handles chain recovery
     # but the failing PR is left for god-review rather than a context-free successor
-    update_identity_stats "tasksCompleted" 1 2>/dev/null || true
+    # Note: tasksCompleted already incremented by post_report() above (issue #1830 fix).
     cleanup_agent_cr
     exit 1
   fi
