@@ -1131,7 +1131,7 @@ cleanup_old_cluster_resources() {
             local thought_count
             thought_count=$(echo "$old_thoughts" | wc -w)
             echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $thought_count old thoughts..."
-            echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
             total_deleted=$((total_deleted + thought_count))
         fi
     fi
@@ -1155,7 +1155,7 @@ cleanup_old_cluster_resources() {
             local msg_count
             msg_count=$(echo "$old_messages" | wc -w)
             echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $msg_count old messages..."
-            echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
             total_deleted=$((total_deleted + msg_count))
         fi
     fi
@@ -1172,7 +1172,7 @@ cleanup_old_cluster_resources() {
             local report_count
             report_count=$(echo "$old_reports" | wc -w)
             echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $report_count old reports (48h TTL)..."
-            echo "$old_reports" | xargs -n 50 kubectl delete reports -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            echo "$old_reports" | xargs -n 50 kubectl delete reports -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
             total_deleted=$((total_deleted + report_count))
         fi
     fi

@@ -899,7 +899,7 @@ cleanup_old_thoughts() {
   local count
   count=$(echo "$old_thoughts" | wc -w)
   log "Deleting $count old thoughts in batches of 50..."
-  echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+  echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
   
   log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decisions/plan: 2h, others: 24h)"
   post_thought "Cleaned up ~$count thoughts (batch TTL: low-signal 2h, high-signal 24h)" "observation" 7 "maintenance"
@@ -949,7 +949,7 @@ cleanup_old_messages() {
   local count
   count=$(echo "$old_messages" | wc -w)
   log "Deleting $count old messages in batches of 50..."
-  echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+  echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
   log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
 }
@@ -992,7 +992,7 @@ cleanup_old_reports() {
   local count
   count=$(echo "$old_reports" | wc -w)
   log "Deleting $count old reports in batches of 50..."
-  echo "$old_reports" | xargs -n 50 kubectl delete reports.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+  echo "$old_reports" | xargs -n 50 kubectl delete reports.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
   log "Cleaned up ~$count reports older than 48h TTL"
 }
