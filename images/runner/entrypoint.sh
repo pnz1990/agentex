@@ -631,9 +631,9 @@ cleanup_old_thoughts() {
     return 0
   fi
 
-  # Fetch all thoughts once to avoid multiple API calls
+  # Fetch all thoughts once to avoid multiple API calls (60s timeout for 6000+ CRs)
   local all_thoughts_json
-  all_thoughts_json=$(kubectl_with_timeout 30 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+  all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
 
   # Low-signal thoughts (blocker, observation): delete after 2 hours
   local old_low_signal
