@@ -537,6 +537,58 @@ get_identity_signature() {
 # Initialize identity system
 # Call this from entrypoint.sh at startup
 #######################################
+#######################################
+# Release the claimed display name back to the registry pool.
+# Called from entrypoint.sh exit cleanup AFTER save_identity() has persisted
+# the final stats to S3. This allows the next agent to claim the same name
+# and inherit the accumulated specializationLabelCounts and codeAreas.
+#
+# Without this function, all 12 worker name slots become permanently claimed
+# after the first 12 workers, and every subsequent worker gets a generated
+# name (worker-<adj>-<noun>) with an empty S3 identity file. This permanently
+# blocks specialization accumulation across generations (issue #1483).
+#
+# Safety: only releases names that are in the registry (i.e., were claimed via
+# claim_identity(), not generated via generate_identity()). Generated names
+# like "worker-bold-tensor" are not in the registry and are silently skipped.
+#
+# Globals:
+#   AGENT_DISPLAY_NAME - the name to release
+#   AGENT_ROLE - used to set the "available" value correctly
+#######################################
+release_identity() {
+  local name="${AGENT_DISPLAY_NAME:-}"
+  if [[ -z "$name" ]]; then
+    echo "[identity] release_identity: no display name set, skipping"
+    return 0
+  fi
+
+  # Check if this name exists in the registry and is claimed by us
+  local registry_value
+  registry_value=$(timeout 10s kubectl get configmap agentex-name-registry -n agentex \
+    -o jsonpath="{.data.${name}}" 2>/dev/null || echo "")
+
+  if [[ -z "$registry_value" ]]; then
+    echo "[identity] release_identity: name $name not in registry (generated name), skipping"
+    return 0
+  fi
+
+  if ! echo "$registry_value" | grep -q ":claimed:"; then
+    echo "[identity] release_identity: name $name is not claimed (value: $registry_value), skipping"
+    return 0
+  fi
+
+  # Atomically release: replace "role:claimed:agent" with "role:available"
+  if timeout 10s kubectl patch configmap agentex-name-registry -n agentex \
+    --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/data/${name}\",\"value\":\"${AGENT_ROLE}:available\"}]" \
+    2>/dev/null; then
+    echo "[identity] Released name $name back to registry (role: $AGENT_ROLE)"
+  else
+    echo "[identity] WARNING: Failed to release name $name — will remain claimed"
+  fi
+}
+
 init_identity() {
   echo "[identity] Initializing agent identity system..."
   

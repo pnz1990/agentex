@@ -4053,10 +4053,27 @@ if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$W
       log "WARNING: GitHub API unavailable for label fetch on issue #$WORKED_ISSUE — specialization not updated (issue #1268)"
     fi
   fi
-  if [ -n "$WORKED_LABELS" ]; then
-    update_specialization "$WORKED_LABELS" 2>/dev/null || true
-    log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
-  fi
+   if [ -n "$WORKED_LABELS" ]; then
+     update_specialization "$WORKED_LABELS" 2>/dev/null || true
+     log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
+   fi
+fi
+
+# ── 11.4. RELEASE IDENTITY NAME (issue #1483) ────────────────────────────────
+# Release the claimed display name back to the registry AFTER all identity stats
+# are saved to S3. This allows the NEXT agent to claim the same display name and
+# inherit the accumulated specializationLabelCounts, codeAreas, and stats.
+#
+# Without this step, all 12 worker name slots become permanently claimed after
+# the first 12 agents, and every subsequent agent gets a generated name with an
+# empty identity file — blocking specialization accumulation across generations.
+#
+# IMPORTANT: release_identity() is defined in identity.sh and sourced at startup.
+# It only releases names claimed from the registry (not generated names).
+if type release_identity &>/dev/null; then
+  release_identity 2>/dev/null || true
+else
+  log "WARNING: release_identity function not available — name will remain claimed"
 fi
 
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
@@ -4348,6 +4365,43 @@ fi
 # Only planners do this cleanup (to avoid redundant work from every agent).
 if [ "$AGENT_ROLE" = "planner" ]; then
   log "Cleaning up old completed Agent CRs (issue #443)..."
+
+  # ── 13.5a. Name registry stale claim cleanup (issue #1483) ───────────────
+  # Release name registry slots claimed by agents whose Jobs no longer exist.
+  # This recovers slots that were permanently claimed when agents exited before
+  # release_identity() was added (backfill for pre-fix agents).
+  log "Checking name registry for stale claims (issue #1483)..."
+  REGISTRY_JSON=$(kubectl_with_timeout 10 get configmap agentex-name-registry -n agentex -o json 2>/dev/null || echo "")
+  if [ -n "$REGISTRY_JSON" ]; then
+    STALE_RELEASED=0
+    # Find all "role:claimed:agent-name" entries
+    CLAIMED_ENTRIES=$(echo "$REGISTRY_JSON" | jq -r '.data | to_entries | .[] | select(.value | test(":claimed:")) | "\(.key)=\(.value)"' 2>/dev/null || echo "")
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      reg_name="${entry%%=*}"
+      reg_value="${entry#*=}"
+      claimed_agent="${reg_value##*:claimed:}"
+      claimed_role="${reg_value%%:claimed:*}"
+      # Check if the claimed agent's Job still exists and is active
+      job_exists=$(kubectl_with_timeout 10 get job "$claimed_agent" -n "$NAMESPACE" 2>/dev/null && echo "yes" || echo "no")
+      if [ "$job_exists" = "no" ]; then
+        # Job gone — release the name back to the pool
+        if kubectl_with_timeout 10 patch configmap agentex-name-registry -n agentex \
+          --type=json \
+          -p "[{\"op\":\"replace\",\"path\":\"/data/${reg_name}\",\"value\":\"${claimed_role}:available\"}]" \
+          2>/dev/null; then
+          log "Released stale name claim: $reg_name (was claimed by dead agent $claimed_agent)"
+          STALE_RELEASED=$((STALE_RELEASED + 1))
+        fi
+      fi
+    done <<< "$CLAIMED_ENTRIES"
+    if [ "$STALE_RELEASED" -gt 0 ]; then
+      log "Released $STALE_RELEASED stale name registry claims — pool partially restored"
+      post_thought "Name registry maintenance: released $STALE_RELEASED stale claims from dead agents. Registry pool now has available slots for new agents. (issue #1483)" "observation" 8 "maintenance"
+    else
+      log "Name registry: no stale claims found (all claimed names have active Jobs)"
+    fi
+  fi
   
   # Find Agent CRs older than 1 hour that have completed Jobs
   # Use a simple timestamp-based approach for robustness
