@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-10-r10 (fix: diff CVE-2026-24001 + dismiss Windows-only CVE-2025-15558; issue #1000)
+# Image version: 2026-03-10-r11 (fix: emergency spawn single-planner constraint; issue #1013)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
