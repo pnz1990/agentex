@@ -568,14 +568,51 @@ refresh_task_queue() {
         # Issue #1149: Prepend visionQueue items BEFORE taskQueue so agent-voted issues get priority
         # visionQueue contains issues that 3+ agents voted to prioritize via governance
         # Issue #1444: visionQueue uses semicolon separator; extract only numeric issue numbers
+        # Issue #1525: Prune closed issues from visionQueue during each refresh cycle.
         local vision_queue
         vision_queue=$(get_state "visionQueue")
         if [ -n "$vision_queue" ]; then
+            # Issue #1525: Remove closed issues from visionQueue so stale entries don't accumulate.
+            # visionQueue is write-protected at add time (issue #1436) but issues can be closed
+            # AFTER they are added. Without periodic pruning, closed issues stay forever and
+            # get prepended to taskQueue on every refresh, wasting agent work cycles.
+            local pruned_vision_queue=""
+            local pruned_count=0
+            while IFS=';' read -ra VQ_ENTRIES; do
+                for entry in "${VQ_ENTRIES[@]}"; do
+                    [ -z "$entry" ] && continue
+                    # Extract issue number (entries can be numeric or "feature:desc:ts:proposer")
+                    local vq_issue_num
+                    vq_issue_num=$(echo "$entry" | grep -oE '^[0-9]+$' || echo "")
+                    if [ -n "$vq_issue_num" ]; then
+                        local vq_state
+                        vq_state=$(gh issue view "$vq_issue_num" --repo "${GITHUB_REPO}" --json state \
+                            --jq '.state' 2>/dev/null || echo "UNKNOWN")
+                        if [ "$vq_state" = "CLOSED" ]; then
+                            echo "[$(date -u +%H:%M:%S)] visionQueue: pruning closed issue #$vq_issue_num"
+                            pruned_count=$((pruned_count + 1))
+                            continue  # skip adding to pruned queue
+                        fi
+                    fi
+                    # Keep open issues and non-numeric entries (named features)
+                    if [ -z "$pruned_vision_queue" ]; then
+                        pruned_vision_queue="$entry"
+                    else
+                        pruned_vision_queue="${pruned_vision_queue};${entry}"
+                    fi
+                done
+            done <<< "$vision_queue"
+            if [ "$pruned_count" -gt 0 ]; then
+                echo "[$(date -u +%H:%M:%S)] visionQueue: pruned $pruned_count closed issue(s), updating..."
+                update_state "visionQueue" "$pruned_vision_queue"
+                vision_queue="$pruned_vision_queue"
+            fi
+
             # Extract numeric issue numbers from semicolon-separated entries
             local vision_issues
             vision_issues=$(echo "$vision_queue" | tr ';' '\n' | grep -E '^[0-9]+$' | tr '\n' ',' | sed 's/,$//')
             if [ -n "$vision_issues" ]; then
-                # Prepend vision issues, then deduplicate (vision issues appear first)
+                # Prepend vision issues, then deduplicate (vision items stay at front)
                 sorted_issues="${vision_issues},${sorted_issues}"
                 # Deduplicate while preserving first occurrence (vision items stay at front)
                 sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
