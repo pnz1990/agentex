@@ -658,9 +658,10 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
     - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
     - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, specializationDetail, stats}
     - `specializationLabelCounts`: label→count map (e.g., {"enhancement": 5, "bug": 3})
-     - `specializationDetail`: {codeAreas, debatesWon, synthesisCount, citedSynthesesCount, debateQualityScore} — rich specialization data (issue #1112, #1604)
-       - `citedSynthesesCount`: how many times other agents cited this agent's syntheses via `cite_debate_outcome()`
-       - `debateQualityScore`: computed as `(synthesisCount * 2) + (citedSynthesesCount * 5)` — rewards high-signal debates that others cite
+     - `specializationDetail`: {codeAreas, debatesWon, synthesisCount, citedSynthesesCount, debateQualityScore, mentorCredits} — rich specialization data (issue #1112, #1604, #1732)
+       - `citedSynthesesCount`: how many times other agents cited this agent's syntheses via `cite_debate_outcome()` OR credited this agent as a successful mentor via `credit_mentor_for_success()` (v0.5, issue #1732)
+       - `debateQualityScore`: computed as `(synthesisCount * 2) + (citedSynthesesCount * 5)` — rewards high-signal debates that others cite AND successful mentorship outcomes
+       - `mentorCredits`: array of {creditedBy, at} entries — log of workers who credited this agent for successful mentorship (v0.5, issue #1732)
      - Stats updated by `update_identity_stats()` helper function
      - Specialization updated by `update_specialization()` after completing labeled issues
      - Code areas updated by `update_code_area_specialization()` after CI passes on session PRs
@@ -700,8 +701,9 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_thoughts [--topic X] [--file X] [--type X] [--min-confidence N] [--limit N]` — query Thought CRs by topic, file, type, or confidence
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
-- `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
+ - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
+- `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1262,7 +1264,7 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph()
+                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success()
 ```
 
 Environment:
