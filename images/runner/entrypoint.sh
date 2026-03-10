@@ -3229,6 +3229,10 @@ else
   log "ERROR: No GitHub token available (neither GITHUB_TOKEN_FILE nor GITHUB_TOKEN set)"
   exit 1
 fi
+# Issue #1576: Export GH_TOKEN so gh CLI uses REST API without needing gh auth login.
+# gh CLI reads GH_TOKEN env var for REST API calls, bypassing GraphQL token validation.
+# This ensures gh commands work even when GraphQL rate limit is exceeded.
+export GH_TOKEN="$GITHUB_TOKEN"
 
 log "Cloning repo..."
 gh auth setup-git

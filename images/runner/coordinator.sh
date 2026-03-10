@@ -163,6 +163,10 @@ unset _early_limit _early_active _early_slots
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
   echo "GitHub token loaded from read-only file mount"
+  # Issue #1576: Export GH_TOKEN so gh CLI uses REST API without needing gh auth login.
+  # gh CLI reads GH_TOKEN env var for REST API calls, bypassing GraphQL token validation.
+  # This ensures gh commands work even when GraphQL rate limit is exceeded.
+  export GH_TOKEN="$GITHUB_TOKEN"
   # Authenticate gh CLI with the token (issue #coordinator-gh-auth)
   # gh auth status checks fail even with GITHUB_TOKEN exported - need explicit login
   if command -v gh &>/dev/null; then
@@ -170,6 +174,8 @@ if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   fi
 elif [ -n "${GITHUB_TOKEN:-}" ]; then
   echo "GitHub token loaded from environment variable (legacy)"
+  # Issue #1576: Export GH_TOKEN so gh CLI uses REST API without needing gh auth login.
+  export GH_TOKEN="$GITHUB_TOKEN"
   # Authenticate gh CLI with the token
   if command -v gh &>/dev/null; then
     gh_auth_with_retry "$GITHUB_TOKEN" || true
@@ -2888,10 +2894,15 @@ while true; do
     # Every 20 iterations (~10 min): verify gh CLI is still authenticated (issue #1447)
     # GitHub GraphQL rate limits can expire and cause auth failures mid-run.
     # Periodic re-auth ensures the coordinator recovers without a pod restart.
+    # Issue #1576: Use REST API check (gh api /user) instead of gh auth status (GraphQL).
+    # gh auth status uses GraphQL which is rate-limited separately from REST API.
+    # When GraphQL is exhausted, gh auth status fails even if REST API is functional,
+    # causing false "auth check FAILED" logs and unnecessary re-auth attempts.
     if [ $((iteration % 20)) -eq 0 ]; then
-        if ! gh auth status &>/dev/null 2>&1; then
-            echo "[$(date -u +%H:%M:%S)] gh CLI auth check FAILED — attempting re-authentication (issue #1447)"
+        if ! gh api /user &>/dev/null 2>&1; then
+            echo "[$(date -u +%H:%M:%S)] gh CLI REST auth check FAILED — attempting re-authentication (issue #1447, #1576)"
             if [ -n "${GITHUB_TOKEN:-}" ]; then
+                export GH_TOKEN="$GITHUB_TOKEN"
                 gh_auth_with_retry "$GITHUB_TOKEN" || \
                     echo "[$(date -u +%H:%M:%S)] WARNING: gh re-authentication failed — gh commands may not work until next retry"
             fi
