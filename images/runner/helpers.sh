@@ -1702,5 +1702,343 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── spawn environment variable initialization ─────────────────────────────────
+# Read ECR registry, Bedrock model, and cluster info from constitution/env
+# These are needed by spawn_agent() to create Agent CRs and fallback Jobs.
+if [ -z "${ECR_REGISTRY:-}" ]; then
+  ECR_REGISTRY=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+    -n "$NAMESPACE" -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "")
+fi
+ECR_REGISTRY="${ECR_REGISTRY:-569190534191.dkr.ecr.us-west-2.amazonaws.com}"
+
+if [ -z "${BEDROCK_MODEL:-}" ]; then
+  BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
+fi
+
+if [ -z "${CLUSTER:-}" ]; then
+  CLUSTER=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+    -n "$NAMESPACE" -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "agentex")
+fi
+CLUSTER="${CLUSTER:-agentex}"
+
+if [ -z "${BEDROCK_REGION:-}" ]; then
+  BEDROCK_REGION=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+    -n "$NAMESPACE" -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "us-west-2")
+fi
+BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"
+
+if [ -z "${CIRCUIT_BREAKER_LIMIT:-}" ]; then
+  CIRCUIT_BREAKER_LIMIT=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+    -n "$NAMESPACE" -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "10")
+fi
+CIRCUIT_BREAKER_LIMIT="${CIRCUIT_BREAKER_LIMIT:-10}"
+
+SWARM_REF="${SWARM_REF:-}"
+
+# ── get_my_generation ─────────────────────────────────────────────────────────
+# Read agent's generation number from the Agent CR label agentex/generation.
+# Returns 0 if the Agent CR doesn't exist or the label is not set/numeric.
+#
+# Usage: gen=$(get_my_generation)
+get_my_generation() {
+  local gen
+  gen=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+  if ! [[ "$gen" =~ ^[0-9]+$ ]]; then
+    gen=0
+  fi
+  echo "$gen"
+}
+
+# ── request_spawn_slot ────────────────────────────────────────────────────────
+# Atomically acquire a spawn slot from coordinator-state.spawnSlots using CAS.
+# Checks kill switch (unless bypass_killswitch=true) and enforces circuit breaker.
+# Returns 0 if slot granted, 1 if denied (circuit breaker, kill switch, or unavailable).
+#
+# This is a simplified version of the same function in entrypoint.sh, adapted for
+# the helpers.sh / OpenCode bash tool context. The kro health check and direct Job
+# fallback are omitted — emergency perpetuation in entrypoint.sh handles recovery.
+#
+# Usage: request_spawn_slot [bypass_killswitch]
+request_spawn_slot() {
+  local bypass_killswitch="${1:-false}"
+  local max_attempts=5
+  local attempt=0
+
+  # Check kill switch first (unless bypassed for emergency perpetuation)
+  if [ "$bypass_killswitch" != "true" ]; then
+    local killswitch_enabled
+    killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch \
+      -n "$NAMESPACE" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+    if [ "$killswitch_enabled" = "true" ]; then
+      local ks_reason
+      ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch \
+        -n "$NAMESPACE" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+      log "KILL SWITCH: spawn slot denied. Reason: $ks_reason"
+      push_metric "KillSwitchTriggered" 1
+      return 1
+    fi
+  else
+    log "Kill switch bypass active (emergency perpetuation)"
+  fi
+
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+
+    local slots
+    slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+
+    # Fail closed if coordinator-state missing or spawnSlots invalid
+    if [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]]; then
+      log "CRITICAL: coordinator spawnSlots unavailable. FAILING CLOSED to prevent proliferation race."
+      post_thought "Spawn denied: coordinator-state.spawnSlots unavailable (helpers.sh fail-closed). Emergency perpetuation will recover." "blocker" 9
+      push_metric "CoordinatorUnavailable" 1
+      return 1
+    fi
+
+    # Detect stale data — coordinator never sets slots > limit
+    if [ "$slots" -gt "$CIRCUIT_BREAKER_LIMIT" ]; then
+      log "WARNING: Stale coordinator data (slots=$slots > limit=$CIRCUIT_BREAKER_LIMIT). Waiting for refresh..."
+      if [ $attempt -lt $max_attempts ]; then
+        sleep 2
+        continue
+      else
+        log "CRITICAL: Coordinator data still stale after $max_attempts attempts. Failing closed."
+        push_metric "CircuitBreakerTriggered" 1
+        return 1
+      fi
+    fi
+
+    if [ "$slots" -le 0 ]; then
+      log "ATOMIC SPAWN GATE: 0 slots available (limit=$CIRCUIT_BREAKER_LIMIT). Spawn denied."
+      post_thought "Atomic spawn gate: 0 slots remaining. Spawn blocked. System at capacity." "blocker" 10
+      push_metric "CircuitBreakerTriggered" 1
+      return 1
+    fi
+
+    # Cross-check against actual active job count on first attempt
+    if [ $attempt -eq 1 ]; then
+      local active_jobs
+      active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "0")
+      if [ "$active_jobs" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
+        log "WARNING: Cross-check failed — active jobs ($active_jobs) >= limit ($CIRCUIT_BREAKER_LIMIT) but coordinator shows $slots slots. Denying spawn."
+        push_metric "CircuitBreakerTriggered" 1
+        push_metric "CoordinatorReconciliationLag" 1
+        return 1
+      fi
+      log "Spawn validation passed: $active_jobs active jobs, coordinator shows $slots slots available"
+    fi
+
+    # Atomic CAS: test current value, replace with (value - 1)
+    local new_slots=$((slots - 1))
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=json \
+      -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+      2>/dev/null; then
+      log "Spawn slot granted: ${slots} → ${new_slots} slots remaining"
+      push_metric "SpawnSlotGranted" 1
+      return 0
+    fi
+
+    # CAS failed = concurrent modification, retry with jitter
+    log "Spawn slot CAS retry $attempt/$max_attempts (concurrent modification detected)"
+    sleep 0.$((RANDOM % 5 + 1))
+  done
+
+  log "ATOMIC SPAWN GATE: failed to acquire slot after $max_attempts attempts. Spawn denied."
+  push_metric "CircuitBreakerTriggered" 1
+  return 1
+}
+
+# ── release_spawn_slot ────────────────────────────────────────────────────────
+# Release a spawn slot back to coordinator-state.spawnSlots after a failed spawn.
+# Uses CAS retry loop for correctness. Caps at CIRCUIT_BREAKER_LIMIT.
+#
+# Usage: release_spawn_slot
+release_spawn_slot() {
+  local max_attempts=5
+  local attempt=0
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+    local slots
+    slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "")
+    if [ -z "$slots" ] || ! [[ "$slots" =~ ^[0-9]+$ ]]; then
+      log "WARNING: coordinator spawnSlots unavailable during release, skipping"
+      return 0
+    fi
+    local new_slots=$((slots + 1))
+    if [ "$new_slots" -gt "$CIRCUIT_BREAKER_LIMIT" ]; then
+      new_slots=$CIRCUIT_BREAKER_LIMIT
+    fi
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=json \
+      -p "[{\"op\":\"test\",\"path\":\"/data/spawnSlots\",\"value\":\"${slots}\"},{\"op\":\"replace\",\"path\":\"/data/spawnSlots\",\"value\":\"${new_slots}\"}]" \
+      2>/dev/null; then
+      log "Spawn slot released: ${slots} → ${new_slots} slots available"
+      return 0
+    fi
+    log "Spawn slot release CAS retry $attempt/$max_attempts"
+    sleep 0.$((RANDOM % 3 + 1))
+  done
+  log "WARNING: Failed to release spawn slot after $max_attempts attempts (slot may be leaked, coordinator will reconcile)"
+}
+
+# ── spawn_agent ───────────────────────────────────────────────────────────────
+# Spawn a new Agent CR to continue the agent chain.
+# kro's agent-graph RGD turns the Agent CR into a Job automatically.
+#
+# This is a simplified version of the spawn_agent() in entrypoint.sh adapted for
+# the OpenCode bash tool / helpers.sh context. The kro health check and direct Job
+# fallback (issue #714) are omitted — entrypoint.sh emergency perpetuation handles recovery.
+#
+# Usage: spawn_agent <name> <role> <task_ref> <reason> [bypass_killswitch] [capacity_type]
+#   name            - Agent CR name (e.g. "worker-1773000000")
+#   role            - Agent role: worker | reviewer | architect | planner
+#   task_ref        - Task CR name the agent will work on
+#   reason          - Human-readable reason for spawning (for logs)
+#   bypass_killswitch - "true" to bypass kill switch (emergency only). Default: "false"
+#   capacity_type   - Node capacity type: "on-demand" | "spot". Default: "on-demand"
+#
+# Returns: 0 if Agent CR created successfully, 1 if blocked or failed
+#
+# Example:
+#   source /agent/helpers.sh
+#   NEXT_NAME="worker-$(date +%s)"
+#   spawn_agent "$NEXT_NAME" "worker" "task-$NEXT_NAME" "Continue platform improvement"
+spawn_agent() {
+  local name="$1" role="$2" task_ref="$3" reason="$4"
+  local bypass_killswitch="${5:-false}" capacity_type="${6:-on-demand}"
+
+  if ! request_spawn_slot "$bypass_killswitch"; then
+    log "spawn_agent: spawn slot denied by atomic gate. Not spawning $name."
+    return 1
+  fi
+
+  # Calculate next generation number
+  local my_generation
+  my_generation=$(get_my_generation)
+  local next_generation=$((my_generation + 1))
+
+  log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
+
+  local err_output
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Agent
+metadata:
+  name: ${name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/spawned-by: ${AGENT_NAME}
+    agentex/generation: "${next_generation}"
+spec:
+  role: "${role}"
+  taskRef: "${task_ref}"
+  model: "${BEDROCK_MODEL}"
+  swarmRef: "${SWARM_REF}"
+  priority: 5
+EOF
+) || {
+    log "ERROR: CRITICAL - Failed to create Agent CR $name: $err_output"
+    log "ERROR: Releasing spawn slot due to Agent CR creation failure."
+    release_spawn_slot
+    return 1
+  }
+
+  # Spawn succeeded. The slot is consumed by the new agent.
+  # The coordinator reconciles spawnSlots against actual job count periodically.
+  log "Agent CR $name created successfully (gen=$next_generation, slot consumed by new agent)."
+  return 0
+}
+
+# ── spawn_task_and_agent ──────────────────────────────────────────────────────
+# Create a Task CR and immediately spawn an Agent to work it.
+# This is the standard way to perpetuate the agent chain per the Prime Directive (step ①).
+#
+# This is a simplified version of spawn_task_and_agent() from entrypoint.sh adapted
+# for the OpenCode bash tool / helpers.sh context. The following entrypoint.sh features
+# are intentionally omitted (emergency perpetuation handles recovery for these):
+#   - kro health check + fallback direct Job creation (issue #714)
+#   - Duplicate PR detection before spawn
+#   - GitHub issue open/closed validation
+# These are omitted to keep helpers.sh focused on the critical path and because
+# entrypoint.sh emergency perpetuation recovers from chain breaks within seconds.
+#
+# Usage:
+#   spawn_task_and_agent <task_name> <agent_name> <role> <title> <desc> \
+#                        [effort] [issue] [swarm_ref] [bypass_killswitch] [capacity_type]
+#
+# Parameters:
+#   task_name        - Task CR name (e.g. "task-worker-1773000000")
+#   agent_name       - Agent CR name (e.g. "worker-1773000000")
+#   role             - Agent role: worker | reviewer | architect
+#   title            - Short task title
+#   desc             - Task description (multi-line ok)
+#   effort           - S | M | L (default: M)
+#   issue            - GitHub issue number, 0 for no issue (default: 0)
+#   swarm_ref        - Swarm CR name to join, empty for no swarm (default: "")
+#   bypass_killswitch - "true" to bypass kill switch. Default: "false"
+#   capacity_type    - "on-demand" | "spot". Default: "on-demand"
+#
+# Returns: 0 if Task CR and Agent CR created, 1 if blocked or failed
+#
+# Example (standard worker perpetuation per Prime Directive):
+#   source /agent/helpers.sh
+#   NEXT_ROLE="worker"
+#   NEXT_NAME="${NEXT_ROLE}-$(date +%s)"
+#   TASK_NAME="task-${NEXT_NAME}"
+#   spawn_task_and_agent \
+#     "$TASK_NAME" "$NEXT_NAME" "$NEXT_ROLE" \
+#     "Continue platform improvement — worker loop" \
+#     "Check coordinator for assigned task, implement and open PR. Spawn successor when done." \
+#     "M" 0 ""
+#   if [ $? -ne 0 ]; then
+#     log "Spawn blocked by spawn control mechanisms. Exiting gracefully."
+#   fi
+spawn_task_and_agent() {
+  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5"
+  local effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}"
+  local bypass_killswitch="${9:-false}" capacity_type="${10:-on-demand}"
+
+  log "Creating Task $task_name and Agent $agent_name (role=$role)"
+
+  # Create the Task CR first
+  local err_output
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${NAMESPACE}
+spec:
+  title: "${title}"
+  description: "${desc}"
+  role: "${role}"
+  effort: "${effort}"
+  githubIssue: ${issue}
+  swarmRef: "${swarm_ref}"
+  priority: 5
+EOF
+) || {
+    log "CRITICAL: Failed to create Task CR $task_name: $err_output"
+    log "CRITICAL: Cannot spawn Agent without Task. Perpetuation chain broken."
+    push_metric "AgentFailure" 1
+    return 1
+  }
+  push_metric "TaskCreated" 1
+
+  # Spawn the Agent CR (circuit breaker enforced inside spawn_agent)
+  if ! spawn_agent "$agent_name" "$role" "$task_name" "$title" "$bypass_killswitch" "$capacity_type"; then
+    log "CRITICAL: spawn_agent blocked (circuit breaker). Cleaning up orphaned Task CR."
+    kubectl_with_timeout 10 delete task.kro.run "$task_name" -n "$NAMESPACE" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, get_my_generation, request_spawn_slot, release_spawn_slot, spawn_agent, spawn_task_and_agent available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
