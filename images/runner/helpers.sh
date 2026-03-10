@@ -25,10 +25,247 @@ AGENT_ROLE="${AGENT_ROLE:-worker}"
 TASK_CR_NAME="${TASK_CR_NAME:-}"
 AGENT_DISPLAY_NAME="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
 
+# ── Go coordinator feature flag (issue #1827) ─────────────────────────────────
+# When the Go coordinator (coordinator-go:8080) is running, bash agents prefer
+# its HTTP API over ConfigMap CAS operations. This enables parallel operation
+# so both coordinators run simultaneously for state parity validation before
+# full cutover. Set COORDINATOR_GO_DISABLED=true to force ConfigMap-only mode.
+#
+# Precedence:
+#   1. COORDINATOR_GO_URL env var (explicit override — for testing)
+#   2. Auto-detect: curl coordinator-go:8080/readyz (Kubernetes service)
+#   3. Fall back to bash ConfigMap CAS (original behavior)
+_GO_COORDINATOR_URL="${COORDINATOR_GO_URL:-http://coordinator-go:8080}"
+_GO_COORDINATOR_AVAILABLE=""  # tri-state: ""=unknown, "yes"=available, "no"=unavailable
+
 kubectl_with_timeout() {
   local timeout_secs="${1:-10}"
   shift
   timeout "${timeout_secs}s" kubectl "$@" 2>/dev/null
+}
+
+# ── _detect_go_coordinator ────────────────────────────────────────────────────
+# Probe whether the Go coordinator's /readyz endpoint is reachable.
+# Caches result in _GO_COORDINATOR_AVAILABLE for the lifetime of the process.
+# Returns: 0 if available, 1 if not.
+# Issue #1827: Part of feature-flag migration from ConfigMap CAS to HTTP API.
+_detect_go_coordinator() {
+  # Respect explicit opt-out
+  if [ "${COORDINATOR_GO_DISABLED:-false}" = "true" ]; then
+    _GO_COORDINATOR_AVAILABLE="no"
+    return 1
+  fi
+
+  # Use cached result if available
+  if [ "$_GO_COORDINATOR_AVAILABLE" = "yes" ]; then
+    return 0
+  fi
+  if [ "$_GO_COORDINATOR_AVAILABLE" = "no" ]; then
+    return 1
+  fi
+
+  # Probe the readiness endpoint with a short timeout
+  if timeout 3s curl -sf "${_GO_COORDINATOR_URL}/readyz" >/dev/null 2>&1; then
+    _GO_COORDINATOR_AVAILABLE="yes"
+    log "feature-flag: Go coordinator detected at ${_GO_COORDINATOR_URL} — using HTTP API"
+    return 0
+  else
+    _GO_COORDINATOR_AVAILABLE="no"
+    log "feature-flag: Go coordinator not available at ${_GO_COORDINATOR_URL} — using ConfigMap CAS"
+    return 1
+  fi
+}
+
+# ── _go_claim_task ────────────────────────────────────────────────────────────
+# Claim a task via the Go coordinator's HTTP API (issue #1827 feature flag).
+# This replaces the ConfigMap CAS loop in claim_task() when the Go coordinator
+# is available. The Go coordinator uses SQL transactions for true atomicity.
+#
+# Usage: _go_claim_task <issue_number>
+# Returns: 0 on success, 1 on failure (already claimed, server error, etc.)
+_go_claim_task() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
+
+  local response http_code body
+  # Use -f flag to fail on 4xx/5xx, but capture http_code separately for error handling
+  response=$(timeout 10s curl -s -w "\n%{http_code}" \
+    -X POST "${_GO_COORDINATOR_URL}/tasks/claim" \
+    -H "Content-Type: application/json" \
+    -d "{\"github_issue\":${issue},\"agent_name\":\"${AGENT_NAME}\",\"agent_role\":\"${AGENT_ROLE}\"}" \
+    2>/dev/null)
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | head -n -1)
+
+  case "$http_code" in
+    200|201)
+      log "feature-flag: Go coordinator claimed issue #$issue for $AGENT_NAME"
+      echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+      return 0  # Claim succeeded
+      ;;
+    409)
+      local claimer
+      claimer=$(echo "$body" | jq -r '.claimed_by // "unknown"' 2>/dev/null || echo "unknown")
+      if [ "$claimer" = "$AGENT_NAME" ]; then
+        log "feature-flag: Go coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        return 0  # Already ours — treat as success
+      fi
+      log "feature-flag: Go coordinator: issue #$issue already claimed by $claimer — skipping"
+      return 2  # Return code 2 = Go coordinator definitively rejected (don't fall back)
+      ;;
+    "")
+      # Empty http_code means curl failed (network error, DNS failure, timeout)
+      log "WARNING: feature-flag: Go coordinator unreachable for claim of issue #$issue — falling back to ConfigMap CAS"
+      return 1  # Return code 1 = transient error, fall back to ConfigMap CAS
+      ;;
+    *)
+      log "WARNING: feature-flag: Go coordinator claim returned HTTP $http_code for issue #$issue"
+      return 1  # Return code 1 = server error, fall back to ConfigMap CAS
+      ;;
+  esac
+}
+
+# ── _go_release_task ──────────────────────────────────────────────────────────
+# Release a task via the Go coordinator's HTTP API (issue #1827 feature flag).
+# Mirrors release_coordinator_task() but uses HTTP instead of ConfigMap patch.
+#
+# Usage: _go_release_task <issue_number> [status]
+# status: "done" (default) | "failed"
+# Returns: 0 on success, 1 on failure
+_go_release_task() {
+  local issue="$1"
+  local status="${2:-done}"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  local http_code
+  http_code=$(timeout 10s curl -sf -w "%{http_code}" -o /dev/null \
+    -X POST "${_GO_COORDINATOR_URL}/tasks/release" \
+    -H "Content-Type: application/json" \
+    -d "{\"github_issue\":${issue},\"agent_name\":\"${AGENT_NAME}\",\"status\":\"${status}\"}" \
+    2>/dev/null)
+
+  if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+    log "feature-flag: Go coordinator released issue #$issue (status=$status)"
+    return 0
+  else
+    log "WARNING: feature-flag: Go coordinator release returned HTTP $http_code for issue #$issue"
+    return 1
+  fi
+}
+
+# ── _go_request_spawn_slot ────────────────────────────────────────────────────
+# Request a spawn slot via the Go coordinator's HTTP API (issue #1827 feature flag).
+# The Go coordinator uses atomic SQL counters for the circuit breaker, replacing
+# the TOCTOU-prone CAS loop in request_spawn_slot().
+#
+# Usage: _go_request_spawn_slot <agent_name> <role> [reason]
+# Returns: 0 if slot granted, 1 if circuit breaker blocked
+_go_request_spawn_slot() {
+  local agent_name="$1"
+  local role="$2"
+  local reason="${3:-spawn}"
+
+  local response http_code body
+  response=$(timeout 10s curl -sf -w "\n%{http_code}" \
+    -X POST "${_GO_COORDINATOR_URL}/spawn/request" \
+    -H "Content-Type: application/json" \
+    -d "{\"agent_name\":\"${agent_name}\",\"role\":\"${role}\",\"reason\":\"${reason}\"}" \
+    2>/dev/null)
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | head -n -1)
+
+  case "$http_code" in
+    200|201)
+      log "feature-flag: Go coordinator granted spawn slot for $agent_name ($role)"
+      return 0
+      ;;
+    429|503)
+      local limit
+      limit=$(echo "$body" | jq -r '.limit // "unknown"' 2>/dev/null || echo "unknown")
+      log "feature-flag: Go coordinator blocked spawn for $agent_name — circuit breaker at limit $limit"
+      return 1
+      ;;
+    *)
+      log "WARNING: feature-flag: Go coordinator spawn request returned HTTP $http_code for $agent_name"
+      return 1
+      ;;
+  esac
+}
+
+# ── _go_release_spawn_slot ────────────────────────────────────────────────────
+# Release a spawn slot via the Go coordinator's HTTP API (issue #1827 feature flag).
+#
+# Usage: _go_release_spawn_slot <agent_name>
+# Returns: 0 on success, 1 on failure
+_go_release_spawn_slot() {
+  local agent_name="$1"
+
+  local http_code
+  http_code=$(timeout 10s curl -sf -w "%{http_code}" -o /dev/null \
+    -X POST "${_GO_COORDINATOR_URL}/spawn/release" \
+    -H "Content-Type: application/json" \
+    -d "{\"agent_name\":\"${agent_name}\"}" \
+    2>/dev/null)
+
+  if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+    log "feature-flag: Go coordinator released spawn slot for $agent_name"
+    return 0
+  else
+    log "WARNING: feature-flag: Go coordinator spawn release returned HTTP $http_code for $agent_name"
+    return 1
+  fi
+}
+
+# ── _go_record_debate ─────────────────────────────────────────────────────────
+# Record a debate outcome via the Go coordinator's HTTP API (issue #1827 feature flag).
+# Replaces direct S3 JSON writes when the Go coordinator is available.
+# The Go coordinator stores debate outcomes in SQLite — queryable without S3 scan.
+#
+# Usage: _go_record_debate <thread_id> <topic> <stance> <resolution> [participants_csv]
+# Returns: 0 on success, 1 on failure
+_go_record_debate() {
+  local thread_id="$1"
+  local topic="$2"
+  local stance="$3"
+  local resolution="$4"
+  local participants_csv="${5:-$AGENT_NAME}"
+
+  # Build JSON participants array from CSV
+  local participants_json
+  participants_json=$(echo "$participants_csv" | tr ',' '\n' | \
+    jq -Rn '[inputs]' 2>/dev/null || echo "[\"${AGENT_NAME}\"]")
+
+  local http_code
+  http_code=$(timeout 10s curl -sf -w "%{http_code}" -o /dev/null \
+    -X POST "${_GO_COORDINATOR_URL}/debates" \
+    -H "Content-Type: application/json" \
+    -d "{\"thread_id\":\"${thread_id}\",\"topic\":\"${topic}\",\"stance\":\"${stance}\",\"resolution\":\"${resolution}\",\"agent\":\"${AGENT_NAME}\",\"participants\":${participants_json}}" \
+    2>/dev/null)
+
+  if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+    log "feature-flag: Go coordinator recorded debate outcome for thread $thread_id (topic=$topic)"
+    return 0
+  else
+    log "WARNING: feature-flag: Go coordinator debate record returned HTTP $http_code for thread $thread_id"
+    return 1
+  fi
+}
+
+# ── _go_query_debates ─────────────────────────────────────────────────────────
+# Query debate outcomes via the Go coordinator's HTTP API (issue #1827 feature flag).
+# Returns JSON array of debate outcomes matching the topic filter.
+#
+# Usage: _go_query_debates [topic]
+# Returns: JSON array to stdout
+_go_query_debates() {
+  local topic="${1:-}"
+  local url="${_GO_COORDINATOR_URL}/debates"
+  [ -n "$topic" ] && url="${url}?topic=$(echo "$topic" | jq -Rr @uri 2>/dev/null || echo "$topic")"
+
+  timeout 10s curl -sf "$url" \
+    -H "Accept: application/json" \
+    2>/dev/null || echo "[]"
 }
 
 # Read S3 bucket from environment or constitution
@@ -101,6 +338,23 @@ record_debate_outcome() {
   if [ -z "$thread_id" ] || [ -z "$outcome" ] || [ -z "$resolution" ]; then
     log "ERROR: record_debate_outcome requires thread_id, outcome, and resolution"
     return 1
+  fi
+
+  # Issue #1827: Feature-flag — prefer Go coordinator HTTP API when available.
+  # SQLite storage survives coordinator restarts and is queryable without S3 scan.
+  if _detect_go_coordinator 2>/dev/null; then
+    if _go_record_debate "$thread_id" "${topic:-debate}" "$outcome" "$resolution" "$AGENT_NAME"; then
+      log "Recorded debate outcome via Go coordinator: thread=${thread_id} outcome=${outcome} topic=${topic}"
+      # Still update component knowledge graph index (S3-backed, not yet in Go coordinator)
+      if [ -n "$component" ]; then
+        _update_component_knowledge_graph "$component" "$thread_id" "$topic" "$outcome" \
+          "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$resolution" 2>/dev/null || true
+      fi
+      return 0
+    else
+      log "feature-flag: Go coordinator debate record failed — falling back to S3"
+      # Fall through to S3 path below
+    fi
   fi
 
   local s3_path="s3://${S3_BUCKET}/debates/${thread_id}.json"
@@ -459,6 +713,20 @@ parentRef: ${parent_thought_name}"
 query_debate_outcomes() {
   local topic_filter="${1:-}"
 
+  # Issue #1827: Feature-flag — prefer Go coordinator HTTP API when available.
+  # SQLite queries are faster and more reliable than listing all S3 objects.
+  if _detect_go_coordinator 2>/dev/null; then
+    local go_results
+    go_results=$(_go_query_debates "$topic_filter" 2>/dev/null)
+    if [ -n "$go_results" ] && [ "$go_results" != "[]" ]; then
+      log "feature-flag: query_debate_outcomes via Go coordinator (topic=${topic_filter:-any})"
+      echo "$go_results"
+      return 0
+    fi
+    # Fall through to S3 if Go coordinator returned empty (may not have been migrated yet)
+    log "feature-flag: Go coordinator returned no debates — falling back to S3"
+  fi
+
   local debate_files
   debate_files=$(aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}')
   if [ -z "$debate_files" ]; then
@@ -600,6 +868,32 @@ claim_task() {
     log "Coordinator: issue #$issue already has open PR — skipping to prevent duplicate implementation (PR: $open_pr_url)"
     push_metric "TaskClaimBlockedByPR" 1
     return 1
+  fi
+
+  # Issue #1827: Feature-flag — prefer Go coordinator HTTP API when available.
+  # The Go coordinator uses SQL transactions for true atomic claiming, eliminating
+  # TOCTOU race conditions in the ConfigMap CAS loop below.
+  # Return codes from _go_claim_task:
+  #   0 = claim succeeded (or already ours)
+  #   1 = transient error (network/server) → fall back to ConfigMap CAS
+  #   2 = definitively rejected (already claimed by another agent) → don't fall back
+  if _detect_go_coordinator 2>/dev/null; then
+    _go_claim_task "$issue"
+    local go_result=$?
+    if [ $go_result -eq 0 ]; then
+      # Claim succeeded via Go coordinator
+      _cache_issue_labels "$issue" 2>/dev/null || true
+      _record_claim_timestamp "$issue" 2>/dev/null || true
+      push_metric "TaskClaimed" 1
+      return 0
+    elif [ $go_result -eq 2 ]; then
+      # Go coordinator definitively rejected — another agent owns this issue
+      # Don't fall back to ConfigMap CAS (would create split-brain state)
+      push_metric "TaskClaimConflict" 1
+      return 1
+    fi
+    # go_result=1: transient error — fall through to ConfigMap CAS below
+    log "feature-flag: Go coordinator unavailable for claim — falling back to ConfigMap CAS for issue #$issue"
   fi
 
   local max_attempts=5
@@ -1509,5 +1803,51 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── release_coordinator_task ──────────────────────────────────────────────────
+# Release a coordinator-assigned task after implementation.
+# This is the helpers.sh companion to entrypoint.sh's release_coordinator_task().
+# When the Go coordinator is available, uses HTTP API; otherwise patches ConfigMap.
+#
+# Issue #1827: Feature-flag integration — prefers Go coordinator HTTP API.
+#
+# Usage: release_coordinator_task <issue_number> [status]
+# status: "done" (default) | "failed"
+# Returns: 0 on success, 1 on failure
+release_coordinator_task() {
+  local issue="${1:-}"
+  local status="${2:-done}"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  # Issue #1827: Feature-flag — prefer Go coordinator HTTP API when available.
+  if _detect_go_coordinator 2>/dev/null; then
+    if _go_release_task "$issue" "$status"; then
+      return 0
+    fi
+    log "feature-flag: Go coordinator release failed — falling back to ConfigMap patch"
+    # Fall through to ConfigMap path
+  fi
+
+  # ConfigMap CAS fallback (original logic from entrypoint.sh)
+  local assignments
+  assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+  local new_assignments
+  new_assignments=$(echo "$assignments" | tr ',' '\n' \
+    | grep -v "^${AGENT_NAME}:${issue}$" || true)
+  new_assignments=$(echo "$new_assignments" | tr '\n' ',' | sed 's/,$//')
+
+  if ! kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge \
+    -p "{\"data\":{\"activeAssignments\":\"${new_assignments}\"}}" 2>/dev/null; then
+    log "WARNING: Failed to release task assignment for issue #$issue via ConfigMap"
+    return 1
+  fi
+
+  log "Coordinator: released issue #$issue"
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, release_coordinator_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+log "  feature-flag: _detect_go_coordinator, _go_claim_task, _go_release_task, _go_request_spawn_slot, _go_record_debate, _go_query_debates available (issue #1827)"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

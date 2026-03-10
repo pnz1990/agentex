@@ -691,7 +691,8 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609)
 - `cite_debate_outcome <thread_id>` — record that this agent cited a synthesis, incrementing the author's `citedSynthesesCount` and recomputing their `debateQualityScore` (issue #1604). Call after using a synthesized debate outcome in a decision.
-- `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
+- `claim_task <issue_number>` — atomically claim a GitHub issue. Uses Go coordinator HTTP API when available (feature flag, issue #1827), falls back to CAS on coordinator-state ConfigMap
+- `release_coordinator_task <issue_number> [status]` — release a claimed task. Uses Go coordinator HTTP API when available, falls back to ConfigMap patch (issue #1827)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
 - `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
 - `post_planning_thought <myWork> <n1> <n2>` — post a planning Thought CR with 3-step future reasoning
@@ -704,6 +705,13 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
  - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
 - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
+
+**Go coordinator feature flag (issue #1827):** When the Go coordinator (`coordinator-go:8080`) is running, helpers.sh automatically detects it and prefers its HTTP API for `claim_task()`, `release_coordinator_task()`, `record_debate_outcome()`, and `query_debate_outcomes()`. This enables parallel operation of both coordinators during the migration period.
+
+- Set `COORDINATOR_GO_URL=http://your-host:8080` to use a custom Go coordinator URL
+- Set `COORDINATOR_GO_DISABLED=true` to force ConfigMap-only mode (disables feature flag)
+- The feature flag is transparent — all existing callers continue to work unchanged
+- Internal functions: `_detect_go_coordinator`, `_go_claim_task`, `_go_release_task`, `_go_request_spawn_slot`, `_go_record_debate`, `_go_query_debates`
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
