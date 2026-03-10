@@ -1415,6 +1415,9 @@ claim_task() {
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         # (GitHub API may be rate-limited at exit time during high agent activity)
         cache_issue_labels_on_claim "$issue"
+        # Issue #1593: Record claim timestamp so cleanup_stale_assignments() preserves this
+        # assignment during the 120s grace window (worker pod may not have started yet).
+        record_claim_timestamp_on_claim "$issue"
         return 0
       fi
     else
@@ -1432,6 +1435,9 @@ claim_task() {
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         # (GitHub API may be rate-limited at exit time during high agent activity)
         cache_issue_labels_on_claim "$issue"
+        # Issue #1593: Record claim timestamp so cleanup_stale_assignments() preserves this
+        # assignment during the 120s grace window (worker pod may not have started yet).
+        record_claim_timestamp_on_claim "$issue"
         return 0
       fi
     fi
@@ -1496,6 +1502,45 @@ cache_issue_labels_on_claim() {
     --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" \
     2>/dev/null && log "Issue #$issue labels cached in coordinator-state.issueLabels" || \
     log "WARNING: Failed to cache labels for issue #$issue in coordinator-state (non-fatal)"
+}
+
+# record_claim_timestamp_on_claim() - Record claim timestamp to extend grace window to
+# ALL worker self-claims (issue #1593). Writes agent:issue:epoch entry to
+# coordinator-state.preClaimTimestamps so cleanup_stale_assignments() treats worker
+# self-claims the same as coordinator pre-claims — preserving assignments for 120s
+# after claim even if the worker Job hasn't started yet (kro + EKS latency).
+#
+# Without this, claim_task() claims succeed but the 30s cleanup loop removes the
+# assignment before the worker pod starts, allowing a second worker to claim the same
+# issue and open a duplicate PR.
+#
+# Usage: record_claim_timestamp_on_claim <issue_number>
+# Returns: 0 always (best-effort — write failure is non-fatal)
+record_claim_timestamp_on_claim() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  local ts_epoch
+  ts_epoch=$(date +%s)
+  local ts_entry="${AGENT_NAME}:${issue}:${ts_epoch}"
+
+  # Read current timestamps
+  local cur_ts
+  cur_ts=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.preClaimTimestamps}' 2>/dev/null || echo "")
+
+  local new_ts
+  if [ -z "$cur_ts" ]; then
+    new_ts="$ts_entry"
+  else
+    new_ts="${cur_ts};${ts_entry}"
+  fi
+
+  # Best-effort write — non-fatal if it fails (worst case: duplicate PR race remains)
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"preClaimTimestamps\":\"${new_ts}\"}}" \
+    2>/dev/null && log "Issue #$issue claim timestamp recorded in preClaimTimestamps (ts=${ts_epoch}, issue #1593)" || \
+    log "WARNING: Failed to record claim timestamp for issue #$issue in preClaimTimestamps (non-fatal)"
 }
 
 # propose_vision_feature() - Propose a civilization goal for governance vote (issue #1219)
