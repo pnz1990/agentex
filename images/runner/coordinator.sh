@@ -554,8 +554,16 @@ sync_constitution_to_git() {
     
     cd "$workspace" || return 1
     
-    # Clone repo
-    if ! git clone "https://github.com/${GITHUB_REPO}" repo 2>/dev/null; then
+    # Clone repo with GITHUB_TOKEN for authenticated push (issue #1282)
+    # Without token, git push fails even for public repos
+    local clone_url
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        clone_url="https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}"
+    else
+        clone_url="https://github.com/${GITHUB_REPO}"
+        echo "[$(date -u +%H:%M:%S)] WARNING: GITHUB_TOKEN not set, git push may fail"
+    fi
+    if ! git clone "$clone_url" repo 2>/dev/null; then
         echo "[$(date -u +%H:%M:%S)] ERROR: Failed to clone ${GITHUB_REPO}"
         return 1
     fi
