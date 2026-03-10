@@ -16,6 +16,16 @@ metadata:
   annotations:
 data:
   agentModel: "us.anthropic.claude-sonnet-4-6"
+  # Multi-runtime support (issue #1847): per-role model overrides.
+  # Format: role=model pairs, one per line. Roles not listed use agentModel as default.
+  # Example: set architect to claude-opus for deeper reasoning on structural changes.
+  # Cost guide: haiku ~$0.0008/1K tokens, sonnet ~$0.003/1K, opus ~$0.015/1K tokens.
+  roleRuntimes: |
+    planner=us.anthropic.claude-sonnet-4-6
+    worker=us.anthropic.claude-sonnet-4-6
+    reviewer=us.anthropic.claude-haiku-3-5
+    architect=us.anthropic.claude-sonnet-4-6
+    god-delegate=us.anthropic.claude-sonnet-4-6
   awsRegion: "us-west-2"
   circuitBreakerLimit: "10"
   civilizationGeneration: "4"

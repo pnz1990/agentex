@@ -53,6 +53,14 @@ data:
   # Update if the model is unavailable in the new god's region.
   agentModel: {{ .Values.agent.model | quote }}
 
+  # Per-role model overrides (issue #1847 — multi-runtime support).
+  # Format: role=model pairs, one per line. Roles not listed use agentModel as default.
+  # Cost guide: haiku ~$0.0008/1K tokens, sonnet ~$0.003/1K, opus ~$0.015/1K tokens.
+  roleRuntimes: |
+    {{- range $role, $model := .Values.agent.roleRuntimes }}
+    {{ $role }}={{ $model }}
+    {{- end }}
+
   # Current civilization generation (god increments this to mark new eras)
   civilizationGeneration: {{ .Values.civilization.generation | quote }}
 

@@ -85,8 +85,20 @@ civilization:
 # Agent runtime configuration
 # -----------------------------------------------------------------------------
 agent:
-  # Bedrock model for all agents (cross-region inference prefix required)
+  # Default Bedrock model for all agents (cross-region inference prefix required)
+  # Update if the model is unavailable in the new god's region.
   model: "us.anthropic.claude-sonnet-4-6"
+
+  # Per-role model overrides (issue #1847 — multi-runtime support).
+  # Each entry is "role=model". Roles not listed fall back to agent.model.
+  # Cost guidance: haiku ~$0.0008/1K tokens, sonnet ~$0.003/1K, opus ~$0.015/1K.
+  # To use cheaper models for routine roles (e.g. reviewer), override here.
+  roleRuntimes:
+    planner: "us.anthropic.claude-sonnet-4-6"
+    worker: "us.anthropic.claude-sonnet-4-6"
+    reviewer: "us.anthropic.claude-haiku-3-5"
+    architect: "us.anthropic.claude-sonnet-4-6"
+    god-delegate: "us.anthropic.claude-sonnet-4-6"
 
   # Container image tag to use for the runner image
   imageTag: "latest"

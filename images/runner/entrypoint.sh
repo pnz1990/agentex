@@ -23,6 +23,9 @@ REPO="${REPO:-}"  # Will be overridden by constitution.githubRepo
 CLUSTER="${CLUSTER:-}"  # Will be overridden by constitution.clusterName
 BEDROCK_REGION="${BEDROCK_REGION:-}"  # Will be overridden by constitution.awsRegion
 BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
+# ROLE_RUNTIMES: populated from constitution.roleRuntimes at startup (issue #1847).
+# Agents spawn successors using the role-appropriate model, not always their own model.
+ROLE_RUNTIMES=""
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
 
@@ -76,6 +79,12 @@ S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAME
 ECR_REGISTRY=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
 
+# Read per-role model overrides from constitution (issue #1847 — multi-runtime support).
+# roleRuntimes is a newline-separated list of "role=model" pairs.
+# Agents use get_role_model() to select the right model when spawning successors.
+ROLE_RUNTIMES=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.roleRuntimes}' 2>/dev/null || echo "")
+
 # Read GitHub repo from constitution for portability (issue #819)
 # New gods' agents will file issues/PRs on their own repo, not the original creator's
 GITHUB_REPO_FROM_CONSTITUTION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
@@ -123,9 +132,35 @@ fi
 
 # Issue #1218: Re-export constitution-derived variables for helpers.sh accessibility.
 # These must be exported AFTER constitution reads so helpers.sh gets the final values.
-export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT
+export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT ROLE_RUNTIMES
 
 ts() { date +%s; }
+
+# ── Multi-runtime: get model for a given role (issue #1847) ─────────────────
+# Reads constitution.roleRuntimes (newline-separated "role=model" pairs).
+# Falls back to BEDROCK_MODEL (current agent's model) if role not found or
+# roleRuntimes is empty. This allows per-role model selection without
+# requiring every caller to know the role→model mapping.
+#
+# Usage: model=$(get_role_model "reviewer")
+# Returns: model string, e.g. "us.anthropic.claude-haiku-3-5"
+get_role_model() {
+  local target_role="${1:-}"
+  if [ -z "$target_role" ]; then
+    echo "${BEDROCK_MODEL}"
+    return 0
+  fi
+  # ROLE_RUNTIMES is exported from the constitution read at startup.
+  # Each line is "role=model". grep for exact role match, extract model.
+  local role_model
+  role_model=$(echo "${ROLE_RUNTIMES:-}" | grep -E "^[[:space:]]*${target_role}=" | head -1 | sed 's/^[[:space:]]*//' | cut -d'=' -f2-)
+  if [ -n "$role_model" ]; then
+    echo "$role_model"
+  else
+    # Fallback: use current agent's model (backward-compatible)
+    echo "${BEDROCK_MODEL}"
+  fi
+}
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
 # handle_fatal_error (the ERR trap below) and the main script at line ~168 call
@@ -260,6 +295,9 @@ spec:
   priority: 10
 EOF
        # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
+       # Multi-runtime (issue #1847): use role-appropriate model for emergency successor
+       local emergency_model
+       emergency_model=$(get_role_model "${emergency_role}" 2>/dev/null || echo "${BEDROCK_MODEL}")
        kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
@@ -273,7 +311,7 @@ metadata:
 spec:
   role: ${emergency_role}
   taskRef: $next_task
-  model: ${BEDROCK_MODEL}
+  model: ${emergency_model}
 EOF
       
       # Issue #449: Verify spawn succeeded with clear diagnostics
@@ -2822,6 +2860,11 @@ spawn_agent() {
   
   log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
   log "Identity: $identity_sig → $name (gen $my_generation → $next_generation)"
+  # Multi-runtime (issue #1847): select model appropriate for successor's role.
+  # This allows, e.g., reviewers to spawn with haiku while architects get sonnet.
+  local successor_model
+  successor_model=$(get_role_model "$role")
+  log "Multi-runtime: spawning $name (role=$role) with model=$successor_model"
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -2835,7 +2878,7 @@ metadata:
 spec:
   role: "${role}"
   taskRef: "${task_ref}"
-  model: "${BEDROCK_MODEL}"
+  model: "${successor_model}"
   swarmRef: "${SWARM_REF}"
   priority: 5
 EOF
@@ -2939,7 +2982,7 @@ spec:
         - name: BEDROCK_REGION
           value: "${BEDROCK_REGION}"
         - name: BEDROCK_MODEL
-          value: "${BEDROCK_MODEL}"
+          value: "${successor_model}"
         - name: SWARM_REF
           value: "${SWARM_REF}"
         - name: GITHUB_TOKEN  # secretKeyRef matches agent-graph.yaml live cluster config (issue #1657)
@@ -3339,6 +3382,12 @@ civilization_status() {
 
 # ── 3. Announce startup ───────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
+# Multi-runtime (issue #1847): log role→model mapping so operators can verify config
+if [ -n "${ROLE_RUNTIMES:-}" ]; then
+  log "Multi-runtime config loaded. Role overrides: $(echo "$ROLE_RUNTIMES" | tr '\n' ' ' | sed 's/  */ /g')"
+else
+  log "Multi-runtime: no roleRuntimes in constitution — all roles will use default model ($BEDROCK_MODEL)"
+fi
 push_metric "AgentRun" 1
 
 # ── 3.5. Rolling restart check (issue #266) ───────────────────────────────────
@@ -4660,12 +4709,25 @@ check_new_messages
 
 # ── 11.1. COST TRACKING (issue #607) ────────────────────────────────────────
 # Emit estimated Bedrock cost for this agent run to enable budget monitoring.
-# Sonnet 4.5 pricing: ~$3/M input tokens, ~$15/M output tokens.
-# Average agent run: ~50K input + 10K output = $0.30/run.
-# This is an estimate - actual costs visible in AWS Cost Explorer.
+# Multi-runtime cost estimates (issue #1847): per-model pricing.
+# Sonnet pricing: ~$3/M input tokens, ~$15/M output tokens → ~$0.30/run.
+# Haiku pricing: ~$0.8/M input, ~$4/M output → ~$0.05/run.
+# Opus pricing: ~$15/M input, ~$75/M output → ~$1.50/run.
+# These are estimates - actual costs visible in AWS Cost Explorer.
 log "Emitting cost estimate metric..."
 
-ESTIMATED_COST_USD=0.30  # Conservative estimate per agent run
+# Select cost estimate based on current agent's model
+case "${BEDROCK_MODEL}" in
+  *haiku*)
+    ESTIMATED_COST_USD=0.05  # Claude Haiku — much cheaper for routine tasks
+    ;;
+  *opus*)
+    ESTIMATED_COST_USD=1.50  # Claude Opus — expensive, use for architecture/god-delegate
+    ;;
+  *)
+    ESTIMATED_COST_USD=0.30  # Default: Claude Sonnet — standard model
+    ;;
+esac
 push_metric "BedrockCostEstimate" "$ESTIMATED_COST_USD" "None"  # Unit=None for currency
 log "Cost estimate: \$$ESTIMATED_COST_USD USD (model: $BEDROCK_MODEL)"
 
