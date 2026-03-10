@@ -1657,12 +1657,12 @@ tally_and_enact_votes() {
 
         # ISSUE #1248: Vision-feature proposals require DELIBERATION — not just votes.
         # Civilization goal-changes must be debated before they can be enacted.
-        # Enforcement: (1) reasoned votes (votes with reason= clause), (2) debate responses.
+         # Enforcement: (1) reasoned votes (votes with reason= or reason: clause), (2) debate responses.
         if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
-            # Count votes that include a reason= clause
+            # Count votes that include a reason= or reason: clause (issue #1649: AGENTS.md uses reason: format)
             local reasoned_votes
             reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .content" \
-                "$thoughts_file" 2>/dev/null | grep -c "reason=" || true)
+                "$thoughts_file" 2>/dev/null | grep -cE "reason[=:]" || true)
             [ -z "$reasoned_votes" ] && reasoned_votes=0
 
             # Count debate responses (thoughts of type "debate") that mention this topic or vision
@@ -1676,7 +1676,7 @@ tally_and_enact_votes() {
 
             if [ "$reasoned_votes" -lt 2 ]; then
                 vision_threshold_met=false
-                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= clause), found $reasoned_votes"
+                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= or reason: clause), found $reasoned_votes"
             elif [ "$debate_responses" -lt 1 ]; then
                 vision_threshold_met=false
                 vision_block_reason="vision-feature requires at least 1 debate response, found $debate_responses"
@@ -1702,7 +1702,7 @@ spec:
   content: |
     GOVERNANCE NUDGE: #proposal-${topic} has ${approve_votes} votes but needs deliberation.
     Blocked: ${vision_block_reason}
-    To unblock: post a #vote-${topic} approve reason=<your reasoning> AND
+    To unblock: post a #vote-${topic} approve reason:<your reasoning> AND
     engage in debate (thoughtType=debate) about this vision change.
     Civilization goal-changes require deliberation, not just votes.
 NUDGE_EOF
@@ -1895,19 +1895,20 @@ NUDGE_EOF
             # ISSUE #1248: Special handling for vision-feature proposals
             # When topic is "vision-feature" and addIssue=N in kv_pairs, automatically update
             # coordinator-state.visionQueue. Also enforce debate threshold: require at least
-            # 1 reasoned vote (containing reason= clause) to prevent rubber-stamp enactment.
+            # 1 reasoned vote (containing reason= or reason: clause) to prevent rubber-stamp enactment.
             # Issue #1311: Use glob matching to catch variants like v03-vision-feature, vision-feature-mentorship
+            # Issue #1649: Accept both reason= (old format) and reason: (AGENTS.md-documented format)
             if [[ "$topic" == *"vision-feature"* ]]; then
-                # Check debate threshold: count votes with reason= clause (reasoned votes)
+                # Check debate threshold: count votes with reason= or reason: clause (reasoned votes)
                 local reasoned_votes
-                reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | select(.content | test(\"reason=\"; \"i\")) | .agent" \
+                reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | select(.content | test(\"reason[=:]\"; \"i\")) | .agent" \
                     "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 
                 echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: topic=$topic reasoned_votes=${reasoned_votes} (threshold: 1)"
 
                 if [ "${reasoned_votes:-0}" -lt 1 ]; then
-                    echo "[$(date -u +%H:%M:%S)] VISION-FEATURE BLOCKED: needs at least 1 reasoned vote (reason= clause). Got ${reasoned_votes:-0}."
-                    post_coordinator_thought "VISION-FEATURE BLOCKED: $topic has ${approve_votes} approvals but ${reasoned_votes:-0} reasoned votes. Requires at least 1 vote with 'reason=' to prevent rubber-stamping. Add reasoning to your vote." "verdict"
+                    echo "[$(date -u +%H:%M:%S)] VISION-FEATURE BLOCKED: needs at least 1 reasoned vote (reason= or reason: clause). Got ${reasoned_votes:-0}."
+                    post_coordinator_thought "VISION-FEATURE BLOCKED: $topic has ${approve_votes} approvals but ${reasoned_votes:-0} reasoned votes. Requires at least 1 vote with 'reason=' or 'reason:' to prevent rubber-stamping. Add reasoning to your vote." "verdict"
                     continue
                 fi
 
