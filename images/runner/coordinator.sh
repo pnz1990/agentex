@@ -711,11 +711,20 @@ Fixes #893"
                 # Check if PR already exists for this topic to avoid duplicate PRs (#1333)
                 local pr_title="chore: sync constitution.yaml with enacted governance ($topic)"
                 local existing_pr
+                # Issue #1398: Check BOTH open and recently-closed PRs to prevent re-creation
+                # after a PR is merged/closed. Look for any PR with this title in the last 7 days.
                 existing_pr=$(gh pr list --repo "${GITHUB_REPO}" --state open \
                     --search "sync constitution.yaml with enacted governance ($topic)" \
                     --json number --jq '.[0].number' 2>/dev/null)
+                if [ -z "$existing_pr" ]; then
+                    # Also check closed PRs (merged or manually closed) to prevent re-creation
+                    existing_pr=$(gh pr list --repo "${GITHUB_REPO}" --state closed \
+                        --search "sync constitution.yaml with enacted governance ($topic)" \
+                        --json number,closedAt \
+                        --jq 'sort_by(.closedAt) | reverse | .[0].number' 2>/dev/null)
+                fi
                 if [ -n "$existing_pr" ]; then
-                    echo "[$(date -u +%H:%M:%S)] ✓ PR #${existing_pr} already exists for topic ${topic} — skipping duplicate creation"
+                    echo "[$(date -u +%H:%M:%S)] ✓ PR #${existing_pr} already exists/existed for topic ${topic} — skipping duplicate creation"
                     push_metric "ConstitutionSyncDuplicatePrevented" 1 "Count" "Topic=${topic}"
                     return 0
                 fi
@@ -935,9 +944,19 @@ tally_and_enact_votes() {
         # Issue #940: null guard - treat empty/null as empty string
         [ -z "$enacted" ] && enacted=""
         local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
+        # Issue #1398: Also normalize newlines in decision_key to prevent stale-key mismatch
+        decision_key=$(echo "$decision_key" | tr '[:space:]' '_' | tr -s '_')
         
+        # Issue #1398: Check both exact decision_key AND topic-only to prevent re-enactment
+        # when kv_pairs differ slightly between coordinator runs (e.g. due to new votes).
+        # A governance topic should only be enacted ONCE regardless of minor kv differences.
         if echo "$enacted" | grep -qF "$decision_key"; then
-            echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
+            echo "[$(date -u +%H:%M:%S)] $topic already enacted (exact match), skipping"
+            continue
+        fi
+        # Also check if this topic was enacted under a different kv_pairs value
+        if echo "$enacted" | grep -qE "(^| )${topic}_[a-zA-Z0-9=_-]+ approvals="; then
+            echo "[$(date -u +%H:%M:%S)] $topic already enacted (topic-only match), skipping re-enactment"
             continue
         fi
 
