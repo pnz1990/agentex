@@ -859,6 +859,8 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `genericAssignments`: Cumulative count of tasks assigned generically (issue #1113)
 - `lastSpecializedRouting`: ISO 8601 timestamp of most recent specialized routing decision (issue #1113)
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
+- `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
+- `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -870,6 +872,8 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
 ```
 
 **Claiming tasks atomically (issue #859):**
