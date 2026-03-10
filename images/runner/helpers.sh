@@ -1509,5 +1509,159 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── Workspace persistence functions (issue #1833) ────────────────────────────
+# These mirror the functions in entrypoint.sh and are available here so OpenCode
+# agents can call them from the Bash tool context without relying on entrypoint.sh.
+
+WORKSPACE="${WORKSPACE:-/workspace}"
+
+save_workspace_snapshot() {
+  local issue_number="${1:-0}"
+  local workspace_dir="${WORKSPACE}/repo"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    log "save_workspace_snapshot: no issue number — skipping"
+    return 0
+  fi
+
+  if [ ! -d "$workspace_dir" ]; then
+    log "save_workspace_snapshot: workspace dir $workspace_dir not found — skipping"
+    return 0
+  fi
+
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local snapshot_tmp="/tmp/workspace-issue-${issue_number}.tar.gz"
+
+  log "Saving workspace snapshot for issue #${issue_number}..."
+  (cd "$workspace_dir" && git stash --include-untracked --quiet 2>/dev/null || true)
+
+  if ! tar czf "$snapshot_tmp" \
+       --exclude=".git/objects/pack" \
+       --exclude=".git/objects/info" \
+       -C "$(dirname "$workspace_dir")" \
+       "$(basename "$workspace_dir")" 2>/dev/null; then
+    log "save_workspace_snapshot: tar failed — snapshot not saved"
+    return 1
+  fi
+
+  local snapshot_size
+  snapshot_size=$(du -sh "$snapshot_tmp" 2>/dev/null | cut -f1 || echo "?")
+
+  if aws s3 cp "$snapshot_tmp" \
+       "s3://${S3_BUCKET}/${snapshot_key}" \
+       --content-type application/gzip \
+       --metadata "agent=${AGENT_NAME},issue=${issue_number}" \
+       2>/dev/null; then
+    log "Workspace snapshot saved: s3://${S3_BUCKET}/${snapshot_key} (${snapshot_size})"
+  else
+    log "WARNING: save_workspace_snapshot S3 upload failed for issue #${issue_number}"
+  fi
+
+  rm -f "$snapshot_tmp"
+}
+
+cleanup_workspace_snapshot() {
+  local issue_number="${1:-0}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+
+  if aws s3 ls "s3://${S3_BUCKET}/${snapshot_key}" 2>/dev/null | grep -q "${snapshot_key##*/}"; then
+    if aws s3 rm "s3://${S3_BUCKET}/${snapshot_key}" 2>/dev/null; then
+      log "Workspace snapshot cleaned up: s3://${S3_BUCKET}/${snapshot_key}"
+    else
+      log "WARNING: cleanup_workspace_snapshot: failed to delete s3://${S3_BUCKET}/${snapshot_key}"
+    fi
+  fi
+}
+
+write_handoff_json() {
+  local issue_number="${1:-0}"
+  local status="${2:-in_progress}"
+  local last_action="${3:-unknown}"
+  local next_step="${4:-Continue implementation}"
+  local workspace_dir="${WORKSPACE}/repo"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local branch="unknown"
+  local uncommitted_files=""
+
+  if [ -d "$workspace_dir/.git" ]; then
+    branch=$(cd "$workspace_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    uncommitted_files=$(cd "$workspace_dir" && git status --short 2>/dev/null | awk '{print $2}' | tr '\n' ',' | sed 's/,$//' || echo "")
+  fi
+
+  local handoff_key="workspaces/issue-${issue_number}-handoff.json"
+  local handoff_tmp="/tmp/handoff-issue-${issue_number}.json"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local handoff_json
+  handoff_json=$(jq -n \
+    --argjson issue "$issue_number" \
+    --arg branch "$branch" \
+    --arg status "$status" \
+    --arg agent "$AGENT_NAME" \
+    --arg last_action "$last_action" \
+    --arg uncommitted_files "$uncommitted_files" \
+    --arg next_step "$next_step" \
+    --arg timestamp "$timestamp" \
+    '{issue: $issue, branch: $branch, status: $status, agent: $agent,
+      lastAction: $last_action, uncommittedFiles: $uncommitted_files,
+      nextStep: $next_step, timestamp: $timestamp}' 2>/dev/null || echo "")
+
+  if [ -z "$handoff_json" ]; then
+    log "WARNING: write_handoff_json: jq failed for issue #${issue_number}"
+    return 1
+  fi
+
+  echo "$handoff_json" > "$handoff_tmp"
+
+  if aws s3 cp "$handoff_tmp" \
+       "s3://${S3_BUCKET}/${handoff_key}" \
+       --content-type application/json \
+       2>/dev/null; then
+    log "Handoff JSON written: s3://${S3_BUCKET}/${handoff_key}"
+  else
+    log "WARNING: write_handoff_json: S3 upload failed for issue #${issue_number}"
+  fi
+
+  rm -f "$handoff_tmp"
+}
+
+read_handoff_json() {
+  local issue_number="${1:-0}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local handoff_key="workspaces/issue-${issue_number}-handoff.json"
+  local handoff_tmp="/tmp/handoff-issue-${issue_number}-read.json"
+
+  if ! aws s3 ls "s3://${S3_BUCKET}/${handoff_key}" 2>/dev/null | grep -q "handoff.json"; then
+    return 0
+  fi
+
+  if aws s3 cp "s3://${S3_BUCKET}/${handoff_key}" "$handoff_tmp" 2>/dev/null; then
+    HANDOFF_BRANCH=$(jq -r '.branch // "unknown"' "$handoff_tmp" 2>/dev/null || echo "unknown")
+    HANDOFF_LAST_ACTION=$(jq -r '.lastAction // ""' "$handoff_tmp" 2>/dev/null || echo "")
+    HANDOFF_NEXT_STEP=$(jq -r '.nextStep // ""' "$handoff_tmp" 2>/dev/null || echo "")
+    HANDOFF_AGENT=$(jq -r '.agent // "unknown"' "$handoff_tmp" 2>/dev/null || echo "unknown")
+    export HANDOFF_BRANCH HANDOFF_LAST_ACTION HANDOFF_NEXT_STEP HANDOFF_AGENT
+    log "Handoff JSON found for issue #${issue_number}: branch=${HANDOFF_BRANCH} prev_agent=${HANDOFF_AGENT}"
+    rm -f "$handoff_tmp"
+    return 0
+  fi
+
+  return 1
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, save_workspace_snapshot, cleanup_workspace_snapshot, write_handoff_json, read_handoff_json available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

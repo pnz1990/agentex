@@ -3337,6 +3337,250 @@ civilization_status() {
   printf "%b" "$output"
 }
 
+# ── 2.9. Workspace persistence functions (issue #1833) ───────────────────────
+# Option B: S3-backed workspace snapshots for agent session/state separation.
+# Allows agents to survive context refreshes without losing uncommitted work.
+#
+# Functions:
+#   save_workspace_snapshot <issue_number>     — snapshot workspace to S3
+#   restore_workspace_snapshot <issue_number>  — restore snapshot if available
+#   cleanup_workspace_snapshot <issue_number>  — delete snapshot (task Done)
+#   write_handoff_json <issue_number> [status] [last_action] [next_step]
+#                                              — write structured handoff state
+
+# Snapshot the current workspace to S3 so a successor can resume where we left off.
+# Called on agent exit when task is still in_progress (not yet Done).
+# Path: s3://<bucket>/workspaces/issue-<N>.tar.gz
+save_workspace_snapshot() {
+  local issue_number="${1:-0}"
+  local workspace_dir="${WORKSPACE}/repo"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    log "save_workspace_snapshot: no issue number — skipping"
+    return 0
+  fi
+
+  if [ ! -d "$workspace_dir" ]; then
+    log "save_workspace_snapshot: workspace dir $workspace_dir not found — skipping"
+    return 0
+  fi
+
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local snapshot_tmp="/tmp/workspace-issue-${issue_number}.tar.gz"
+
+  log "Saving workspace snapshot for issue #${issue_number}..."
+
+  # Stash any uncommitted changes so they are captured in the snapshot
+  (cd "$workspace_dir" && git stash --include-untracked --quiet 2>/dev/null || true)
+
+  # Capture current branch name for handoff
+  local branch
+  branch=$(cd "$workspace_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+  # Create tarball of the workspace (exclude heavy objects: .git/objects)
+  if ! tar czf "$snapshot_tmp" \
+       --exclude=".git/objects/pack" \
+       --exclude=".git/objects/info" \
+       -C "$(dirname "$workspace_dir")" \
+       "$(basename "$workspace_dir")" 2>/dev/null; then
+    log "save_workspace_snapshot: tar failed — snapshot not saved"
+    return 1
+  fi
+
+  local snapshot_size
+  snapshot_size=$(du -sh "$snapshot_tmp" 2>/dev/null | cut -f1 || echo "?")
+
+  # Upload to S3
+  if aws s3 cp "$snapshot_tmp" \
+       "s3://${S3_BUCKET}/${snapshot_key}" \
+       --content-type application/gzip \
+       --metadata "agent=${AGENT_NAME},issue=${issue_number},branch=${branch}" \
+       2>/dev/null; then
+    log "Workspace snapshot saved: s3://${S3_BUCKET}/${snapshot_key} (${snapshot_size})"
+    push_metric "WorkspaceSnapshotSaved" 1 2>/dev/null || true
+  else
+    log "WARNING: save_workspace_snapshot S3 upload failed for issue #${issue_number}"
+  fi
+
+  rm -f "$snapshot_tmp"
+}
+
+# Restore a workspace snapshot from S3 if one exists for this issue.
+# Called after git clone (section 7) when agent picks up a task with an issue number.
+# On success, the workspace directory is replaced with the snapshot contents.
+restore_workspace_snapshot() {
+  local issue_number="${1:-0}"
+  local workspace_dir="${WORKSPACE}/repo"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    log "restore_workspace_snapshot: no issue number — skipping"
+    return 0
+  fi
+
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local snapshot_tmp="/tmp/workspace-issue-${issue_number}-restore.tar.gz"
+
+  # Check if snapshot exists
+  if ! aws s3 ls "s3://${S3_BUCKET}/${snapshot_key}" 2>/dev/null | grep -q "${snapshot_key##*/}"; then
+    log "restore_workspace_snapshot: no snapshot found for issue #${issue_number} — using fresh clone"
+    return 0
+  fi
+
+  log "Restoring workspace snapshot for issue #${issue_number} from S3..."
+
+  # Download snapshot
+  if ! aws s3 cp "s3://${S3_BUCKET}/${snapshot_key}" "$snapshot_tmp" 2>/dev/null; then
+    log "WARNING: restore_workspace_snapshot download failed — using fresh clone"
+    return 1
+  fi
+
+  local snapshot_size
+  snapshot_size=$(du -sh "$snapshot_tmp" 2>/dev/null | cut -f1 || echo "?")
+
+  # Replace the freshly-cloned workspace with the snapshot contents
+  # Back up the fresh clone's .git remote config so push/fetch still works
+  local remote_url
+  remote_url=$(cd "$workspace_dir" && git remote get-url origin 2>/dev/null || echo "")
+
+  rm -rf "${workspace_dir:?}"
+  mkdir -p "$(dirname "$workspace_dir")"
+
+  if ! tar xzf "$snapshot_tmp" -C "$(dirname "$workspace_dir")" 2>/dev/null; then
+    log "WARNING: restore_workspace_snapshot tar extraction failed — re-cloning"
+    rm -f "$snapshot_tmp"
+    mkdir -p "$workspace_dir"
+    git clone "https://github.com/$REPO.git" "$workspace_dir" --depth=1 2>/dev/null || true
+    return 1
+  fi
+
+  # Re-apply git remote if it was lost in the snapshot
+  if [ -n "$remote_url" ]; then
+    (cd "$workspace_dir" && git remote set-url origin "$remote_url" 2>/dev/null || true)
+  fi
+
+  # Pop stash if one was saved
+  (cd "$workspace_dir" && git stash pop 2>/dev/null || true)
+
+  log "Workspace snapshot restored (${snapshot_size}): issue #${issue_number} — resuming from previous session"
+  push_metric "WorkspaceSnapshotRestored" 1 2>/dev/null || true
+  rm -f "$snapshot_tmp"
+  return 0
+}
+
+# Delete the workspace snapshot for an issue once the task is Done.
+# Called when PR is merged or task reaches phase=Done to free S3 storage.
+cleanup_workspace_snapshot() {
+  local issue_number="${1:-0}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+
+  if aws s3 ls "s3://${S3_BUCKET}/${snapshot_key}" 2>/dev/null | grep -q "${snapshot_key##*/}"; then
+    if aws s3 rm "s3://${S3_BUCKET}/${snapshot_key}" 2>/dev/null; then
+      log "Workspace snapshot cleaned up: s3://${S3_BUCKET}/${snapshot_key}"
+      push_metric "WorkspaceSnapshotCleaned" 1 2>/dev/null || true
+    else
+      log "WARNING: cleanup_workspace_snapshot: failed to delete s3://${S3_BUCKET}/${snapshot_key}"
+    fi
+  fi
+}
+
+# Write a structured JSON handoff file to S3 so successors know where to resume.
+# Path: s3://<bucket>/workspaces/issue-<N>-handoff.json
+# Called on agent exit so the successor gets structured, actionable context.
+write_handoff_json() {
+  local issue_number="${1:-0}"
+  local status="${2:-in_progress}"         # in_progress | done | blocked
+  local last_action="${3:-unknown}"
+  local next_step="${4:-Continue implementation}"
+  local workspace_dir="${WORKSPACE}/repo"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local branch="unknown"
+  local uncommitted_files=""
+
+  if [ -d "$workspace_dir/.git" ]; then
+    branch=$(cd "$workspace_dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    uncommitted_files=$(cd "$workspace_dir" && git status --short 2>/dev/null | awk '{print $2}' | tr '\n' ',' | sed 's/,$//' || echo "")
+  fi
+
+  local handoff_key="workspaces/issue-${issue_number}-handoff.json"
+  local handoff_tmp="/tmp/handoff-issue-${issue_number}.json"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Escape strings for JSON using jq
+  local handoff_json
+  handoff_json=$(jq -n \
+    --argjson issue "$issue_number" \
+    --arg branch "$branch" \
+    --arg status "$status" \
+    --arg agent "$AGENT_NAME" \
+    --arg last_action "$last_action" \
+    --arg uncommitted_files "$uncommitted_files" \
+    --arg next_step "$next_step" \
+    --arg timestamp "$timestamp" \
+    '{issue: $issue, branch: $branch, status: $status, agent: $agent,
+      lastAction: $last_action, uncommittedFiles: $uncommitted_files,
+      nextStep: $next_step, timestamp: $timestamp}' 2>/dev/null || echo "")
+
+  if [ -z "$handoff_json" ]; then
+    log "WARNING: write_handoff_json: jq failed to build JSON for issue #${issue_number}"
+    return 1
+  fi
+
+  echo "$handoff_json" > "$handoff_tmp"
+
+  if aws s3 cp "$handoff_tmp" \
+       "s3://${S3_BUCKET}/${handoff_key}" \
+       --content-type application/json \
+       2>/dev/null; then
+    log "Handoff JSON written: s3://${S3_BUCKET}/${handoff_key}"
+  else
+    log "WARNING: write_handoff_json: S3 upload failed for issue #${issue_number}"
+  fi
+
+  rm -f "$handoff_tmp"
+}
+
+# Read handoff JSON for an issue and export relevant context.
+# Sets HANDOFF_BRANCH, HANDOFF_LAST_ACTION, HANDOFF_NEXT_STEP if a handoff exists.
+read_handoff_json() {
+  local issue_number="${1:-0}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local handoff_key="workspaces/issue-${issue_number}-handoff.json"
+  local handoff_tmp="/tmp/handoff-issue-${issue_number}-read.json"
+
+  if ! aws s3 ls "s3://${S3_BUCKET}/${handoff_key}" 2>/dev/null | grep -q "handoff.json"; then
+    return 0
+  fi
+
+  if aws s3 cp "s3://${S3_BUCKET}/${handoff_key}" "$handoff_tmp" 2>/dev/null; then
+    HANDOFF_BRANCH=$(jq -r '.branch // "unknown"' "$handoff_tmp" 2>/dev/null || echo "unknown")
+    HANDOFF_LAST_ACTION=$(jq -r '.lastAction // ""' "$handoff_tmp" 2>/dev/null || echo "")
+    HANDOFF_NEXT_STEP=$(jq -r '.nextStep // ""' "$handoff_tmp" 2>/dev/null || echo "")
+    HANDOFF_AGENT=$(jq -r '.agent // "unknown"' "$handoff_tmp" 2>/dev/null || echo "unknown")
+    export HANDOFF_BRANCH HANDOFF_LAST_ACTION HANDOFF_NEXT_STEP HANDOFF_AGENT
+    log "Handoff JSON found for issue #${issue_number}: branch=${HANDOFF_BRANCH} prev_agent=${HANDOFF_AGENT}"
+    log "  Last action: ${HANDOFF_LAST_ACTION}"
+    log "  Next step:   ${HANDOFF_NEXT_STEP}"
+    rm -f "$handoff_tmp"
+    return 0
+  fi
+
+  return 1
+}
+
 # ── 3. Announce startup ───────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
 push_metric "AgentRun" 1
@@ -3781,6 +4025,19 @@ gh auth setup-git
 mkdir -p "$WORKSPACE/repo"
 git clone "https://github.com/$REPO.git" "$WORKSPACE/repo" --depth=1
 cd "$WORKSPACE/repo"
+
+# ── 7.2. Workspace snapshot restore (issue #1833) ────────────────────────────
+# If a workspace snapshot exists in S3 for this task's issue, restore it so the
+# agent resumes from the previous session's uncommitted work instead of a blank slate.
+# This is Option B (S3-backed snapshots) — no RGD changes needed.
+if [ "${TASK_ISSUE:-0}" != "0" ]; then
+  # Read handoff JSON first (provides branch/lastAction/nextStep context)
+  read_handoff_json "${TASK_ISSUE}" || true
+  # Restore workspace snapshot if available (replaces fresh clone with prior state)
+  restore_workspace_snapshot "${TASK_ISSUE}" || true
+  # Ensure we are in the right directory after potential restore
+  cd "$WORKSPACE/repo" 2>/dev/null || true
+fi
 
 # ── 7.5. Coordinator script drift check (issues #1682, #1695) ────────────────
 # CI step that updates coordinator-script ConfigMap fails due to IAM issue (#1682).
@@ -4499,6 +4756,27 @@ THE ENTIRE PLATFORM STOPS. TREAT THIS AS A CRITICAL FAILURE.
 MANIFEST
 )
 
+# Issue #1833: Build handoff context block if a previous session left a handoff JSON
+HANDOFF_BLOCK=""
+if [ -n "${HANDOFF_LAST_ACTION:-}" ] || [ -n "${HANDOFF_NEXT_STEP:-}" ]; then
+  HANDOFF_BLOCK="
+═══════════════════════════════════════════════════════
+PREVIOUS SESSION HANDOFF (issue #1833 — workspace persistence)
+═══════════════════════════════════════════════════════
+A previous agent session left a handoff for issue #${TASK_ISSUE}:
+
+  Previous agent:  ${HANDOFF_AGENT:-unknown}
+  Branch:          ${HANDOFF_BRANCH:-unknown}
+  Last action:     ${HANDOFF_LAST_ACTION:-none recorded}
+  Next step:       ${HANDOFF_NEXT_STEP:-continue implementation}
+
+The workspace snapshot has been restored. Check out branch '${HANDOFF_BRANCH:-unknown}'
+and continue from where the previous session left off.
+  git checkout ${HANDOFF_BRANCH:-main}
+  git stash list  # any stashed changes?
+═══════════════════════════════════════════════════════"
+fi
+
 PROMPT=$(cat <<PROMPT
 ${PERPETUATION_MANIFEST}
 
@@ -4553,6 +4831,8 @@ ${PEER_BLOCK}
 ${PREDECESSOR_BLOCK}
 
 ${MENTORSHIP_BLOCK}
+
+${HANDOFF_BLOCK}
 
 ${COMPONENT_CONTEXT_BLOCK}
 
@@ -5079,6 +5359,46 @@ if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$W
   if [ -n "$WORKED_LABELS" ]; then
     update_specialization "$WORKED_LABELS" 2>/dev/null || true
     log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
+  fi
+fi
+
+# ── 11.4. WORKSPACE SNAPSHOT (issue #1833) ────────────────────────────────────
+# Save workspace state to S3 so a successor can resume from where we left off.
+# This is Option B (S3-backed snapshots) — no RGD changes needed.
+#
+# Two cases:
+#   - Task is Done (PR opened + CI passed):  write handoff with status=done, then
+#     cleanup snapshot from a prior run (if any), since the work is complete.
+#   - Task is still in_progress (context limit / crash):  save a snapshot so the
+#     next agent gets the uncommitted work and knows where to resume.
+#
+# TASK_STATUS and PR_OPENED are set earlier in section 11.
+if [ "${TASK_ISSUE:-0}" != "0" ]; then
+  # Determine last_action for handoff from OpenCode output
+  LAST_ACTION="OpenCode session completed (exit=${OPENCODE_EXIT})"
+  if [ -f /tmp/opencode-output.txt ]; then
+    # Extract the last meaningful line from OpenCode output as last_action hint
+    LAST_ACTION_HINT=$(tail -5 /tmp/opencode-output.txt 2>/dev/null | \
+      grep -v '^$' | grep -v '^\[' | tail -1 | cut -c1-200 || echo "")
+    [ -n "$LAST_ACTION_HINT" ] && LAST_ACTION="$LAST_ACTION_HINT"
+  fi
+
+  if [ "$OPENCODE_EXIT" -eq 0 ] && [ "${PRS_OPENED:-0}" -gt 0 ]; then
+    # Task appears done — PR was opened this session
+    # Write handoff as done, cleanup any existing snapshot
+    log "Workspace: task appears done (PR opened). Writing handoff + cleaning snapshot for issue #${TASK_ISSUE}..."
+    write_handoff_json "${TASK_ISSUE}" "done" \
+      "PR opened this session. CI may still be running." \
+      "Monitor CI — merge when green. Run: gh pr list --repo ${REPO}" || true
+    cleanup_workspace_snapshot "${TASK_ISSUE}" || true
+  else
+    # Task still in progress — save snapshot for successor
+    log "Workspace: task in progress. Saving snapshot + writing handoff for issue #${TASK_ISSUE}..."
+    NEXT_STEP="Continue implementation of issue #${TASK_ISSUE}. Check branch and stash."
+    write_handoff_json "${TASK_ISSUE}" "in_progress" \
+      "$LAST_ACTION" \
+      "$NEXT_STEP" || true
+    save_workspace_snapshot "${TASK_ISSUE}" || true
   fi
 fi
 
