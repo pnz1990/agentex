@@ -1179,7 +1179,7 @@ check_swarm_dissolution() {
     local checked=0
 
     # Process each swarm state CM
-    while IFS=$'\t' read -r swarm_name phase last_ts member_agents total_tasks swarm_goal; do
+    while IFS=$'\t' read -r swarm_name phase last_ts member_agents total_tasks swarm_goal swarm_goal_origin; do
         [ -z "$swarm_name" ] && continue
         [ "$phase" = "Disbanded" ] && continue
 
@@ -1240,14 +1240,18 @@ check_swarm_dissolution() {
         # Escape strings for JSON
         local safe_goal
         safe_goal=$(echo "$swarm_goal" | sed 's/"/\\"/g' | tr '\n' ' ')
-        
+        # Use goalOrigin from swarm state — needed for check_v06_milestone Criterion 3 (issue #1799)
+        local safe_goal_origin
+        safe_goal_origin=$(echo "${swarm_goal_origin:-coordinator}" | sed 's/"/\\"/g' | tr '\n' ' ')
+
         # Key decisions: extract from coordinator thought history or swarm state if available
         local key_decisions="Coordinator-driven dissolution: all tasks completed, idle threshold met"
-        
+
         local memory_json
-        memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"coordinator"}\n' \
+        memory_json=$(printf '{"swarmName":"%s","goal":"%s","goalOrigin":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"coordinator"}\n' \
           "$swarm_ref" \
           "$safe_goal" \
+          "$safe_goal_origin" \
           "$members_json" \
           "$total" \
           "$key_decisions" \
@@ -1278,7 +1282,8 @@ check_swarm_dissolution() {
             (.data.lastActivityTimestamp // ""),
             (.data.memberAgents // ""),
             (.data.tasksCompleted // "0"),
-            (.data.goal // "completed platform improvement")
+            (.data.goal // "completed platform improvement"),
+            (.data.goalOrigin // "coordinator")
         ] | @tsv' 2>/dev/null)
 
     if [ "$checked" -gt 0 ]; then
@@ -3316,10 +3321,11 @@ check_v06_milestone() {
     local criteria_report=""
 
     # ── Read S3 swarm dissolution records ────────────────────────────────────
-    # Swarm summaries are written to s3://agentex-thoughts/swarms/*.json
+    # Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
     # by the swarm memory persistence feature (issue #1773).
+    # NOTE: Path must be swarm-memories/ to match write_swarm_memory() in helpers.sh (issue #1799).
     local swarm_files
-    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarms/" \
+    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
         awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
 
@@ -3330,7 +3336,7 @@ check_v06_milestone() {
 
     for sfile in $swarm_files; do
         local sjson
-        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarms/${sfile}" - \
+        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$sjson" ] && continue
 
