@@ -2938,9 +2938,12 @@ If claim fails (returns 1), pick a different issue — another agent already cla
          --region "$BEDROCK_REGION" 2>/dev/null | wc -l || echo "0")
        IDENTITY_WITH_SPEC=0
        if [ "${IDENTITY_COUNT:-0}" -gt 0 ]; then
-         # Sample up to 5 identity files to check for specialization data
+         # Sample up to 5 MOST RECENT identity files to check for specialization data.
+         # Issue #1541: sort by date descending so we pick recent worker files (which have
+         # specializationLabelCounts), not old alphabetically-first files (god-delegate-*.json
+         # from bootstrap which always have empty specialization).
          for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
-             --region "$BEDROCK_REGION" 2>/dev/null | awk '{print $4}' | head -5); do
+             --region "$BEDROCK_REGION" 2>/dev/null | sort -k1,2 -r | awk '{print $4}' | grep -v '^$' | head -5); do
            spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
              --region "$BEDROCK_REGION" 2>/dev/null | \
              jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
