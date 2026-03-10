@@ -1702,5 +1702,155 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── escalate ─────────────────────────────────────────────────────────────────
+# Structured escalation protocol — signal that an agent needs help
+# Part of v1.0 Roadmap (#1821) — issue #1839
+#
+# Usage: escalate <severity> <type> <description> [issue_number] [options_csv]
+#
+# severity: low|medium|high|critical
+# type:     retry|blocked|conflict|decision|failed|security|proliferation
+# description: human-readable description of the problem
+# issue_number: (optional) GitHub issue being worked on
+# options_csv: (optional) comma-separated choices for decision type
+#
+# Examples:
+#   escalate medium blocked "Merge conflict in coordinator.go" 789
+#   escalate high decision "Which DB?" 789 "SQLite,PostgreSQL,DynamoDB"
+#   escalate critical security "Found exposed credentials in PR #1830"
+#
+# Tiers:
+#   LOW      (P3) → Tier 0: self-recovery, log only
+#   MEDIUM   (P2) → Tier 1: coordinator escalation
+#   HIGH     (P1) → Tier 2: god-delegate escalation
+#   CRITICAL (P0) → Tier 3: immediate human attention
+#   security/proliferation types → always Tier 3
+escalate() {
+  local severity="${1:-medium}"
+  local type="${2:-blocked}"
+  local description="${3:-}"
+  local issue="${4:-}"
+  local options="${5:-}"
+
+  if [ -z "$description" ]; then
+    log "ERROR: escalate() requires a description. Usage: escalate <severity> <type> <description> [issue] [options]"
+    return 1
+  fi
+
+  local timestamp
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local escalation_id="esc-$(date +%s)-${severity:0:3}"
+
+  # Determine tier
+  local tier
+  if [ "$type" = "security" ] || [ "$type" = "proliferation" ]; then
+    tier=3
+  else
+    case "$severity" in
+      low)      tier=0 ;;
+      medium)   tier=1 ;;
+      high)     tier=2 ;;
+      critical) tier=3 ;;
+      *)        tier=1 ;;
+    esac
+  fi
+
+  log "ESCALATION [${severity}/${type}] Tier ${tier}: $description"
+
+  # Tier 0 — log only, no cluster actions
+  if [ "$tier" -eq 0 ]; then
+    log "Tier 0: self-recovery — no coordinator action needed"
+    return 0
+  fi
+
+  # Post blocker Thought CR
+  local thought_content="ESCALATION [${severity^^}/${type}] Tier ${tier}
+description: $description
+${issue:+issue: #$issue}
+${options:+options: $options}
+escalation-id: $escalation_id
+timestamp: $timestamp"
+
+  post_thought "$thought_content" "blocker" 9 "escalation-${type}" "" ""
+
+  # Record in coordinator-state.escalations
+  local desc_encoded
+  desc_encoded=$(echo "$description" | sed 's/:/\%3A/g; s/|/\%7C/g' | cut -c1-120)
+  local new_entry="${severity}:${type}:${AGENT_NAME}:${issue:-none}:${timestamp}:${desc_encoded}"
+  local current_esc
+  current_esc=$(kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "$NAMESPACE" -o jsonpath='{.data.escalations}' 2>/dev/null || echo "")
+  local new_esc
+  if [ -n "$current_esc" ]; then
+    local entry_count
+    entry_count=$(echo "$current_esc" | tr -cd '|' | wc -c)
+    if [ "$entry_count" -ge 19 ]; then
+      current_esc=$(echo "$current_esc" | cut -d'|' -f2-)
+    fi
+    new_esc="${current_esc}|${new_entry}"
+  else
+    new_esc="$new_entry"
+  fi
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"escalations\":\"${new_esc}\"}}" 2>/dev/null || true
+
+  # Tier 2+: post decision thought for god-delegate
+  if [ "$tier" -ge 2 ]; then
+    local decision_thought_name="thought-${AGENT_NAME}-decision-$(date +%s)"
+    kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: ${decision_thought_name}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  taskRef: "${TASK_CR_NAME:-}"
+  thoughtType: "blocker"
+  confidence: 9
+  topic: "decision-needed"
+  content: |
+    DECISION NEEDED [${severity^^}]: $description
+    issue: ${issue:-none}
+    agent: $AGENT_NAME
+    ${options:+options: $options}
+    escalation-id: $escalation_id
+    timestamp: $timestamp
+    God-delegate: please review and post directive or create governance vote.
+EOF
+    log "Tier 2: Posted decision request for god-delegate"
+  fi
+
+  # Tier 3: proliferation — activate kill switch immediately
+  if [ "$tier" -eq 3 ] && [ "$type" = "proliferation" ]; then
+    log "CRITICAL: Activating kill switch due to proliferation"
+    kubectl_with_timeout 10 create configmap agentex-killswitch -n "$NAMESPACE" \
+      --from-literal=enabled=true \
+      --from-literal=reason="Proliferation detected by $AGENT_NAME: $description" \
+      --dry-run=client -o yaml | kubectl_with_timeout 10 apply -f - 2>/dev/null || true
+    log "Kill switch activated"
+  fi
+
+  # Write escalation state file for structured exit integration
+  cat > /tmp/agentex-escalation-state <<EOF
+{
+  "escalationId": "${escalation_id}",
+  "status": "escalated",
+  "severity": "${severity}",
+  "type": "${type}",
+  "tier": ${tier},
+  "issue": "${issue:-}",
+  "description": "$(echo "$description" | sed 's/"/\\"/g')",
+  "options": "${options:-}",
+  "agent": "${AGENT_NAME}",
+  "timestamp": "${timestamp}",
+  "workPreserved": true
+}
+EOF
+
+  log "Escalation recorded: $escalation_id (tier=$tier)"
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, escalate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
