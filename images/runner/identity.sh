@@ -198,12 +198,14 @@ save_identity() {
   local spec_debate_quality_score=0
   local reputation_history="[]"
   local reputation_average=0
+  local proactive_issues_found=0
   
   if [[ -n "$existing_json" ]]; then
     tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
     issues_filed=$(echo "$existing_json" | jq -r '.stats.issuesFiled // 0')
     prs_merged=$(echo "$existing_json" | jq -r '.stats.prsMerged // 0')
     thoughts_posted=$(echo "$existing_json" | jq -r '.stats.thoughtsPosted // 0')
+    proactive_issues_found=$(echo "$existing_json" | jq -r '.stats.proactiveIssuesFound // 0')
     spec_label_counts=$(echo "$existing_json" | jq -c '.specializationLabelCounts // {}')
     spec_code_areas=$(echo "$existing_json" | jq -c '.specializationDetail.codeAreas // {}')
     spec_debates_won=$(echo "$existing_json" | jq -r '.specializationDetail.debatesWon // 0')
@@ -239,7 +241,8 @@ save_identity() {
     "tasksCompleted": $tasks_completed,
     "issuesFiled": $issues_filed,
     "prsMerged": $prs_merged,
-    "thoughtsPosted": $thoughts_posted
+    "thoughtsPosted": $thoughts_posted,
+    "proactiveIssuesFound": $proactive_issues_found
   },
   "reputationHistory": $reputation_history,
   "reputationAverage": $reputation_average
@@ -303,6 +306,7 @@ save_identity_with_inheritance() {
     issues_filed=$(echo "$prior_json" | jq -r '.stats.issuesFiled // 0')
     prs_merged=$(echo "$prior_json" | jq -r '.stats.prsMerged // 0')
     thoughts_posted=$(echo "$prior_json" | jq -r '.stats.thoughtsPosted // 0')
+    proactive_issues_found=$(echo "$prior_json" | jq -r '.stats.proactiveIssuesFound // 0')
     # Issue #1602: Inherit reputationHistory from prior agent when claiming their display name
     reputation_history=$(echo "$prior_json" | jq -c '.reputationHistory // []')
     reputation_average=$(echo "$prior_json" | jq -r '.reputationAverage // 0')
@@ -317,6 +321,7 @@ save_identity_with_inheritance() {
     issues_filed=0
     prs_merged=0
     thoughts_posted=0
+    proactive_issues_found=0
     reputation_history="[]"
     reputation_average=0
   fi
@@ -345,7 +350,8 @@ save_identity_with_inheritance() {
     "tasksCompleted": $tasks_completed,
     "issuesFiled": $issues_filed,
     "prsMerged": $prs_merged,
-    "thoughtsPosted": $thoughts_posted
+    "thoughtsPosted": $thoughts_posted,
+    "proactiveIssuesFound": $proactive_issues_found
   },
   "reputationHistory": $reputation_history,
   "reputationAverage": $reputation_average
@@ -371,7 +377,7 @@ EOF
 #######################################
 # Update identity stats in S3
 # Arguments:
-#   $1 - stat name (tasksCompleted, issuesFiled, prsMerged, thoughtsPosted)
+#   $1 - stat name (tasksCompleted, issuesFiled, prsMerged, thoughtsPosted, proactiveIssuesFound)
 #   $2 - increment amount (default: 1)
 #######################################
 update_identity_stats() {

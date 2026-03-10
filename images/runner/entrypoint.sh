@@ -1789,6 +1789,326 @@ EOF
   log "Vision feature proposed: issue #$issue_number ('$safe_name') — awaiting 3+ votes"
 }
 
+# proactive_domain_scan() - Specialized agents hunt for bugs/issues in their domain (v0.5 feature #3, issue #1742)
+# Called BEFORE request_coordinator_task() so specialists can discover work proactively.
+# Only runs if agent has earned specialization (not spawn-time role).
+# Files at most ONE issue per run to prevent spam.
+# Updates S3 identity with proactiveIssuesFound counter.
+#
+# Specialization-specific scans:
+# - debugger: scan recent merged PRs for potential regressions
+# - architecture: review merged PRs for design anti-patterns
+# - consensus: scan for unresolved debate threads
+# - coordinator: check coordinator-state for anomalies
+#
+# Returns: 0 if scan completed (regardless of whether issue was filed)
+proactive_domain_scan() {
+  local spec="${AGENT_SPECIALIZATION:-}"
+  
+  # Only run for agents with earned specialization
+  if [ -z "$spec" ] || [ "$spec" = "generalist" ]; then
+    log "Proactive scan: no specialization set, skipping domain scan"
+    return 0
+  fi
+  
+  log "Proactive domain scan: specialization=$spec — hunting for issues in domain..."
+  
+  # Load code areas from S3 identity (if available)
+  local code_areas="{}"
+  if [ -n "$AGENT_IDENTITY_FILE" ]; then
+    local identity_json
+    identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+    if [ -n "$identity_json" ]; then
+      code_areas=$(echo "$identity_json" | jq -c '.specializationDetail.codeAreas // {}')
+    fi
+  fi
+  
+  # Domain-specific scan logic
+  case "$spec" in
+    debugger)
+      proactive_debugger_scan "$code_areas"
+      ;;
+    architecture|architect)
+      proactive_architecture_scan
+      ;;
+    consensus|consensus-specialist)
+      proactive_consensus_scan
+      ;;
+    coordinator|coordinator-specialist)
+      proactive_coordinator_scan
+      ;;
+    *)
+      log "Proactive scan: no scan logic for specialization '$spec' yet"
+      ;;
+  esac
+  
+  return 0
+}
+
+# proactive_debugger_scan() - Scan recent merged PRs for potential regressions
+# Args: $1 = code_areas JSON object (e.g., {"images/runner/entrypoint.sh": 3})
+proactive_debugger_scan() {
+  local code_areas="${1:-{}}"
+  
+  log "Debugger scan: checking recent merged PRs for potential regressions..."
+  
+  # Get recent merged PRs (last 24 hours)
+  local recent_prs
+  recent_prs=$(gh pr list --repo "$REPO" --state merged --limit 10 \
+    --search "merged:>$(date -d '1 day ago' +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d)" \
+    --json number,title,files 2>/dev/null || echo "[]")
+  
+  if [ "$recent_prs" = "[]" ] || [ -z "$recent_prs" ]; then
+    log "Debugger scan: no recent merged PRs to scan"
+    return 0
+  fi
+  
+  # If we have code areas, prioritize PRs that touch those files
+  local top_code_areas
+  top_code_areas=$(echo "$code_areas" | jq -r 'to_entries | sort_by(.value) | reverse | .[0:3] | .[].key' 2>/dev/null || echo "")
+  
+  # Check each PR for common bug patterns
+  local pr_count
+  pr_count=$(echo "$recent_prs" | jq 'length' 2>/dev/null || echo "0")
+  if [ "$pr_count" -gt 0 ]; then
+    log "Debugger scan: found $pr_count recent merged PRs — checking for missing error handling..."
+    
+    # Look for PRs that added bash functions without error handling
+    local suspicious_pr
+    suspicious_pr=$(echo "$recent_prs" | jq -r '.[0] | .number' 2>/dev/null || echo "")
+    
+    if [ -n "$suspicious_pr" ] && [ "$suspicious_pr" != "null" ]; then
+      local pr_files
+      pr_files=$(gh pr view "$suspicious_pr" --repo "$REPO" --json files --jq '.files[].path' 2>/dev/null || echo "")
+      
+      # Check if PR touched shell scripts
+      if echo "$pr_files" | grep -qE '\.(sh|bash)$'; then
+        log "Debugger scan: PR #$suspicious_pr touched shell scripts — checking for error handling..."
+        
+        # Get PR diff to check for new functions without error handling
+        local pr_diff
+        pr_diff=$(gh pr diff "$suspicious_pr" --repo "$REPO" 2>/dev/null || echo "")
+        
+        # Look for added functions (lines starting with +) that don't have set -e or error traps
+        if echo "$pr_diff" | grep -E '^\+[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*\(\)' >/dev/null 2>&1; then
+          # Check if the diff also includes set -e or error handling
+          if ! echo "$pr_diff" | grep -qE '^\+.*(set -[euo]|trap.*ERR)'; then
+            log "Debugger scan: PR #$suspicious_pr adds bash functions without explicit error handling — filing issue..."
+            file_proactive_issue "bug" \
+              "potential bug: PR #$suspicious_pr adds bash functions without error handling" \
+              "PR #$suspicious_pr merged $(date +%Y-%m-%d) and added bash functions without \`set -e\` or error traps.
+
+Discovered by: $AGENT_DISPLAY_NAME (specialization: $spec)
+
+This issue was proactively filed by a domain specialist during systematic scan, not reactively during assigned work.
+
+Affected PR: #$suspicious_pr
+Files: $(echo "$pr_files" | tr '\n' ', ')
+
+## Recommendation
+Review the added functions and add appropriate error handling:
+- \`set -euo pipefail\` at function start
+- \`|| return 1\` on critical commands
+- error traps if needed
+
+This is a potential regression — the code may work now but could fail silently under error conditions."
+            return 0
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  log "Debugger scan: no obvious regressions found in recent PRs"
+  return 0
+}
+
+# proactive_architecture_scan() - Review merged PRs for design anti-patterns
+proactive_architecture_scan() {
+  log "Architecture scan: checking for design regressions in recent PRs..."
+  
+  # Check for merged PRs touching protected files without god-approved label
+  local protected_prs
+  protected_prs=$(gh pr list --repo "$REPO" --state merged --limit 10 \
+    --search "merged:>$(date -d '2 days ago' +%Y-%m-%d 2>/dev/null || date -v-2d +%Y-%m-%d)" \
+    --json number,title,labels,files 2>/dev/null || echo "[]")
+  
+  if [ "$protected_prs" = "[]" ] || [ -z "$protected_prs" ]; then
+    log "Architecture scan: no recent merged PRs to review"
+    return 0
+  fi
+  
+  # Check if any PR touched protected files (entrypoint.sh, AGENTS.md, RGDs) without god-approved
+  local suspicious_pr
+  suspicious_pr=$(echo "$protected_prs" | jq -r '.[] | select(.files[].path | test("entrypoint.sh|AGENTS.md|manifests/rgds/")) | select(.labels | map(.name) | contains(["god-approved"]) | not) | .number' 2>/dev/null | head -1)
+  
+  if [ -n "$suspicious_pr" ] && [ "$suspicious_pr" != "null" ]; then
+    log "Architecture scan: PR #$suspicious_pr touched protected files without god-approved label — filing issue..."
+    file_proactive_issue "constitution-violation" \
+      "governance: PR #$suspicious_pr merged with protected file changes but no god-approved label" \
+      "PR #$suspicious_pr touched protected files (entrypoint.sh, AGENTS.md, or RGDs) but merged without the \`god-approved\` label.
+
+Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
+
+This issue was proactively filed by a domain specialist during systematic scan.
+
+## Constitution Requirement
+AGENTS.md Protected Files section states:
+> Protected files (require god-approved label on any PR that touches them):
+> - images/runner/entrypoint.sh
+> - AGENTS.md
+> - manifests/rgds/*.yaml
+
+## Action Required
+God should review PR #$suspicious_pr to verify changes were intentional and safe."
+    return 0
+  fi
+  
+  log "Architecture scan: no design regressions found"
+  return 0
+}
+
+# proactive_consensus_scan() - Scan for unresolved debate threads
+proactive_consensus_scan() {
+  log "Consensus scan: checking for unresolved debates..."
+  
+  # Read unresolved debates from coordinator-state
+  local unresolved
+  unresolved=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+  
+  if [ -n "$unresolved" ]; then
+    local count
+    count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
+    if [ "$count" -gt 10 ]; then
+      log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
+      file_proactive_issue "consensus" \
+        "debate backlog: $count unresolved debate threads need synthesis" \
+        "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
+
+Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
+
+This issue was proactively filed by a domain specialist during systematic scan.
+
+## Context
+Debates require synthesis when multiple agents disagree. When debate count exceeds 10, the civilization is accumulating unresolved disagreements.
+
+## Action Required
+1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
+2. Post synthesis thoughts for debates where you can bridge positions
+3. Update coordinator to prune debates older than 48h"
+      return 0
+    fi
+  fi
+  
+  log "Consensus scan: debate backlog is acceptable (count=$count)"
+  return 0
+}
+
+# proactive_coordinator_scan() - Check coordinator-state for anomalies
+proactive_coordinator_scan() {
+  log "Coordinator scan: checking for state anomalies..."
+  
+  # Check for stale assignments (activeAssignments with agents that completed >1 hour ago)
+  local assignments
+  assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+  
+  if [ -n "$assignments" ]; then
+    local stale_count=0
+    # Check each assignment for stale agents
+    for assignment in $(echo "$assignments" | tr ',' '\n'); do
+      local agent_name
+      agent_name=$(echo "$assignment" | cut -d: -f1)
+      
+      # Check if agent's Job completed more than 1 hour ago
+      local completion_time
+      completion_time=$(kubectl_with_timeout 10 get job -n "$NAMESPACE" "$agent_name" \
+        -o jsonpath='{.status.completionTime}' 2>/dev/null || echo "")
+      
+      if [ -n "$completion_time" ]; then
+        # Job completed — check if it's been > 1 hour
+        local completion_epoch
+        completion_epoch=$(date -d "$completion_time" +%s 2>/dev/null || echo "0")
+        local now_epoch
+        now_epoch=$(date +%s)
+        local age_seconds=$((now_epoch - completion_epoch))
+        
+        if [ "$age_seconds" -gt 3600 ]; then
+          stale_count=$((stale_count + 1))
+        fi
+      fi
+    done
+    
+    if [ "$stale_count" -gt 3 ]; then
+      log "Coordinator scan: found $stale_count stale assignments — filing issue..."
+      file_proactive_issue "coordinator" \
+        "coordinator state: $stale_count stale assignments detected" \
+        "The coordinator has $stale_count assignments for agents whose Jobs completed >1 hour ago.
+
+Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
+
+This issue was proactively filed by a domain specialist during systematic scan.
+
+## Context
+The coordinator's cleanup_stale_assignments() runs every 30s and should remove assignments for completed agents. If stale assignments persist for >1 hour, the cleanup logic may be failing.
+
+## Action Required
+1. Review cleanup_stale_assignments() in manifests/coordinator/coordinator.sh
+2. Check coordinator logs for cleanup failures
+3. Verify coordinator heartbeat is updating (lastHeartbeat in coordinator-state)"
+      return 0
+    fi
+  fi
+  
+  log "Coordinator scan: no state anomalies detected"
+  return 0
+}
+
+# file_proactive_issue() - File a GitHub issue discovered during proactive scan
+# Args:
+#   $1 = label (bug, architecture, consensus, coordinator, etc.)
+#   $2 = title
+#   $3 = body (should include "Discovered by: <agent> (specialization: <spec>)")
+# Updates S3 identity with proactiveIssuesFound counter
+file_proactive_issue() {
+  local label="${1:-bug}"
+  local title="${2:-}"
+  local body="${3:-}"
+  
+  if [ -z "$title" ]; then
+    log "file_proactive_issue: title is required"
+    return 1
+  fi
+  
+  # File the issue
+  local issue_url
+  issue_url=$(gh issue create --repo "$REPO" \
+    --title "$title" \
+    --label "$label,proactive-discovery" \
+    --body "$body" 2>/dev/null || echo "")
+  
+  if [ -n "$issue_url" ]; then
+    local issue_number
+    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$' || echo "0")
+    log "Proactive issue filed: #$issue_number — $title"
+    
+    # Update identity stats
+    if [ -n "$AGENT_IDENTITY_FILE" ]; then
+      update_identity_stats "proactiveIssuesFound" 1
+      log "Identity stats updated: proactiveIssuesFound +1"
+    fi
+    
+    # Push metric
+    push_metric "ProactiveIssueDiscovered" 1
+    
+    return 0
+  else
+    log "WARNING: Failed to file proactive issue"
+    return 1
+  fi
+}
+
 # request_coordinator_task() - Claim an unassigned issue from the coordinator queue
 # Returns: sets COORDINATOR_ISSUE to the claimed issue number, or 0 if none available
 # This is the mechanism that makes planners coordinate instead of acting independently.
@@ -3349,6 +3669,20 @@ if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "architect" ] || [ "$AGENT
   restart_coordinator_if_unhealthy
 else
   log "Skipping coordinator health check (role=${AGENT_ROLE} — only planners/architects restart coordinator, issue #1721)"
+fi
+
+# ── 3.7.9. Proactive domain scan for specialized agents (v0.5 feature #3, issue #1742) ─
+# Specialized agents actively hunt for bugs/issues in their domain BEFORE checking
+# the coordinator queue. This transforms specialists from reactive contractors to
+# domain experts who discover work proactively.
+# Only runs for agents with earned specialization (not spawn-time role assignment).
+if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ] || [ "$AGENT_ROLE" = "architect" ]; then
+  if [ -n "${AGENT_SPECIALIZATION:-}" ] && [ "$AGENT_SPECIALIZATION" != "generalist" ]; then
+    log "Specialization detected: $AGENT_SPECIALIZATION — running proactive domain scan (v0.5 feature #3)..."
+    proactive_domain_scan
+  else
+    log "No specialization set — skipping proactive domain scan"
+  fi
 fi
 
 # ── 3.8. Claim task from coordinator (planners and workers) ──────────────────
