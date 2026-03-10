@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: triage-agent
+  namespace: agentex
+  labels:
+    app: agentex
+    component: triage
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  concurrencyPolicy: Forbid  # Don't run concurrent triage checks
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: agentex
+        component: triage
+    spec:
+      ttlSecondsAfterFinished: 600  # Clean up after 10 minutes
+      template:
+        metadata:
+          labels:
+            app: agentex
+            component: triage
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: triage
+            image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+            imagePullPolicy: Always
+            command: ["/bin/bash", "/agent/triage-agent.sh"]
+            env:
+            - name: NAMESPACE
+              value: "agentex"
+            - name: REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: githubRepo
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: false
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
