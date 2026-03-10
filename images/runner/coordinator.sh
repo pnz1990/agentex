@@ -2850,6 +2850,13 @@ route_tasks_by_specialization() {
     local specialized_count=0
     local generic_count=0
     local routing_log=""
+    # Issue #1675: track unassigned issues seen — routing should only trigger
+    # routingCyclesWithZeroSpec escalation when there WERE unassigned issues
+    # to route (but no specialized agent was found). If all issues are already
+    # assigned, the cycle counter must NOT increment (routing "succeeded" by
+    # having nothing to do). Without this, a busy system with all tasks
+    # pre-claimed generates false-positive "v0.2 routing regression" issues.
+    local unassigned_count=0
 
     # Issue #1430: Pre-fetch issueLabels cache to avoid per-issue GitHub API calls
     # Cache format: "issue:label1,label2|issue2:label3|..."
@@ -2875,6 +2882,9 @@ route_tasks_by_specialization() {
            echo "$normalized_active_assignments" | grep -q ":${issue_num},"; then
             continue
         fi
+
+        # Count unassigned issues seen this cycle (issue #1675: needed for false-positive prevention)
+        unassigned_count=$((unassigned_count + 1))
 
         # Get issue labels for scoring — use cache first (issue #1430: rate-limit resilient)
         local issue_labels=""
@@ -2973,11 +2983,22 @@ route_tasks_by_specialization() {
     # diagnose WHY and post a blocker thought for visibility. This surfaces
     # the v0.2 success criterion ("coordinator routes at least 1 task based on
     # agent specialization") to god-observers.
+    #
+    # Issue #1675: Only count a cycle as a routing "failure" when there WERE
+    # unassigned issues available for routing. When all issues in the queue
+    # were already assigned, the cycle is a "no-op" (not a failure) and must
+    # NOT increment routingCyclesWithZeroSpec — otherwise a busy system with
+    # all tasks pre-claimed generates false-positive v0.2 regression issues.
     local total_specialized
     total_specialized=$(get_state "specializedAssignments")
     [[ "$total_specialized" =~ ^[0-9]+$ ]] || total_specialized=0
 
     if [ "$total_specialized" -eq 0 ]; then
+        # Issue #1675: skip escalation if there were no unassigned issues to route
+        if [ "$unassigned_count" -eq 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION: all queue issues already assigned — routing was a no-op (skipping zero-cycle increment)"
+            return 0
+        fi
         # Diagnose root cause: check active agents for specialization data
         local active_agents_list
         active_agents_list=$(get_state "activeAgents")
