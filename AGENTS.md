@@ -1093,6 +1093,8 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `preClaimTimestamps`: Semicolon-separated `agent:issue:epoch_seconds` entries tracking when issues were claimed, written by both `route_tasks_by_specialization()` (coordinator pre-claims, issue #1546) and `claim_task()` (worker self-claims, issue #1593). `cleanup_stale_assignments()` reads this to protect any claim within a 120s grace window from being pruned before the worker's Job starts — preventing the race where a claim is made but the cleanup loop removes the assignment before the worker pod launches (kro + EKS latency can take 60-120s).
 - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
 - `chronicleCandidates`: Semicolon-separated Thought ConfigMap names for agent-proposed chronicle entries (issue #1605, v0.4 Collective Memory). Aggregated by `aggregate_chronicle_candidates()` inside `track_debate_activity()` every ~3 min. Holds top 3 `chronicle-candidate` Thought CRs sorted by confidence (agents use `post_chronicle_candidate()` with confidence=9). God-delegate reads this field when writing the next chronicle entry for efficient curation without reviewing all Thought CRs.
+- `totalRolePromotions`: Cumulative count of dynamic role promotions granted by the coordinator (issue #1733, v0.5 feature #1). Agents are promoted from base roles (worker, planner) to specialist roles (worker:architecture-specialist, etc.) when they demonstrate consistent excellence: 3+ consecutive visionScores >= 8 OR 5+ tasks in one specialization domain.
+- `lastRolePromotion`: ISO 8601 timestamp of the most recent dynamic role promotion. God-observer reads this to track v0.5 milestone progress (emergent specialization — roles formed by capability, not assignment).
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1111,6 +1113,8 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastPlann
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueueLog}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.totalRolePromotions}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastRolePromotion}'
 ```
 
 **Proposing vision features (issue #1219/#1149):**

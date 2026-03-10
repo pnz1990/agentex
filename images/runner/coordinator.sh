@@ -361,6 +361,24 @@ ensure_state_fields_initialized() {
       -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
   fi
 
+  # totalRolePromotions (issue #1733, v0.5 feature #1): cumulative count of dynamic role
+  # promotions granted by evaluate_role_promotions(). Agents promoted from base roles
+  # (worker, planner) to specialist roles (worker:architecture-specialist, etc.) based
+  # on demonstrated excellence (3+ consecutive visionScores >= 8 OR 5+ tasks in one domain).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("totalRolePromotions")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing totalRolePromotions (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"totalRolePromotions":"0"}}' 2>/dev/null || true
+  fi
+
+  # lastRolePromotion (issue #1733): ISO 8601 timestamp of most recent dynamic role promotion.
+  # Used by god-observer to track v0.5 milestone progress.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("lastRolePromotion")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing lastRolePromotion (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"lastRolePromotion":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -2876,6 +2894,24 @@ score_agent_for_issue() {
          echo "[$(date -u +%H:%M:%S)] Routing: debate quality bonus +3 for $agent_name (debateQualityScore=$debate_quality_score, architectural issue)" >&2
      fi
 
+     # Issue #1733 (v0.5 feature #1): Bonus for dynamically promoted specialist roles.
+     # Agents promoted to specialist roles (worker:architecture-specialist, etc.) have
+     # demonstrated consistent excellence. Give them routing priority for domain-matched issues.
+     # Bonus: +5 if role contains ":{label}-specialist" and issue has that label.
+     local agent_role
+     agent_role=$(echo "$identity_json" | jq -r '.role // ""' 2>/dev/null || echo "")
+     if echo "$agent_role" | grep -q ":"; then
+         # Extract specialist type from role (e.g., "worker:architecture-specialist" → "architecture")
+         local specialist_type
+         specialist_type=$(echo "$agent_role" | cut -d':' -f2 | sed 's/-specialist$//')
+         
+         # Check if any issue label matches the specialist type
+         if [ -n "$issue_labels" ] && echo "$issue_labels" | grep -qi "$specialist_type"; then
+             score=$((score + 5))
+             echo "[$(date -u +%H:%M:%S)] Routing: promoted specialist bonus +5 for $agent_name (role=$agent_role, matched label=$specialist_type)" >&2
+         fi
+     fi
+
      echo "$score"
 }
 
@@ -3302,6 +3338,192 @@ Consecutive zero cycles: $zero_cycles/5 (escalates to blocker at 5 cycles, ~35 m
     fi
 }
 
+#######################################
+# Evaluate agents for dynamic role promotion (v0.5 feature #1, issue #1733)
+# Reads recent Report CRs and agent S3 identities. Promotes agents who demonstrate
+# consistent high-quality contributions in a specialization domain.
+#
+# Promotion criteria:
+#   - 3+ consecutive visionScores >= 8 in reputationHistory, OR
+#   - 5+ tasks in one specializationLabelCounts domain
+#
+# Promoted role format: {base-role}:{specialization}-specialist
+#   Example: worker:architecture-specialist, worker:debugger-specialist
+#
+# Implementation:
+#   1. Read all Report CRs from last 24 hours
+#   2. For each reporting agent, load their S3 identity
+#   3. Check promotion criteria
+#   4. If criteria met, update identity with promoted role
+#   5. Log promotion event for god-observer tracking
+#
+# This function is called every 8 iterations (~4 minutes) in the main loop.
+#######################################
+evaluate_role_promotions() {
+    echo "[$(date -u +%H:%M:%S)] Evaluating agents for dynamic role promotion (issue #1733)..."
+    
+    # Read recent Report CRs (last 24h) to find agents with consistent high scores
+    local reports
+    reports=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/report -o json 2>/dev/null || echo '{"items":[]}')
+    
+    local report_count
+    report_count=$(echo "$reports" | jq '.items | length' 2>/dev/null || echo "0")
+    
+    if [ "$report_count" -eq 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] No Report CRs found — skipping promotion evaluation"
+        return 0
+    fi
+    
+    echo "[$(date -u +%H:%M:%S)] Found $report_count Report CRs — checking for promotion candidates..."
+    
+    # Track agents evaluated and promotions granted
+    local agents_evaluated=0
+    local promotions_granted=0
+    
+    # Get list of unique agent names from reports
+    local agent_names
+    agent_names=$(echo "$reports" | jq -r '.items[].data.agentRef // empty' 2>/dev/null | sort -u)
+    
+    for agent_name in $agent_names; do
+        [ -z "$agent_name" ] && continue
+        agents_evaluated=$((agents_evaluated + 1))
+        
+        # Load agent's S3 identity file
+        local identity_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${agent_name}.json"
+        local identity_json
+        identity_json=$(aws s3 cp "$identity_path" - 2>/dev/null || echo "")
+        
+        if [ -z "$identity_json" ]; then
+            continue  # No identity file, skip
+        fi
+        
+        # Extract current role and specialization data
+        local current_role
+        current_role=$(echo "$identity_json" | jq -r '.role // ""')
+        
+        # Skip if already promoted (role contains colon separator for specialist roles)
+        if echo "$current_role" | grep -q ":"; then
+            continue  # Already a specialist
+        fi
+        
+        local reputation_history
+        reputation_history=$(echo "$identity_json" | jq -c '.reputationHistory // []')
+        
+        local reputation_avg
+        reputation_avg=$(echo "$identity_json" | jq -r '.reputationAverage // 0')
+        
+        local spec_label_counts
+        spec_label_counts=$(echo "$identity_json" | jq -c '.specializationLabelCounts // {}')
+        
+        # CRITERION 1: Check for 3+ consecutive high visionScores (>= 8)
+        local high_score_streak=0
+        local total_entries
+        total_entries=$(echo "$reputation_history" | jq 'length')
+        
+        if [ "$total_entries" -ge 3 ]; then
+            # Check last 3 entries for visionScore >= 8
+            high_score_streak=$(echo "$reputation_history" | jq '[.[-3:][].visionScore] | map(select(. >= 8)) | length')
+        fi
+        
+        # CRITERION 2: Check for 5+ tasks in one specialization domain
+        local max_label_count=0
+        local dominant_label=""
+        
+        if [ "$spec_label_counts" != "{}" ]; then
+            # Find the label with highest count
+            local label_data
+            label_data=$(echo "$spec_label_counts" | jq -r 'to_entries | max_by(.value) | "\(.key)|\(.value)"')
+            
+            if [ -n "$label_data" ]; then
+                dominant_label=$(echo "$label_data" | cut -d'|' -f1)
+                max_label_count=$(echo "$label_data" | cut -d'|' -f2)
+            fi
+        fi
+        
+        # Determine if promotion criteria met
+        local promote=false
+        local promotion_reason=""
+        local specialist_type=""
+        
+        if [ "$high_score_streak" -ge 3 ] && [ "$total_entries" -ge 3 ]; then
+            promote=true
+            promotion_reason="3+ consecutive visionScores >= 8 (streak=$high_score_streak)"
+            
+            # Derive specialist type from dominant label or reputation trend
+            if [ "$max_label_count" -ge 3 ] && [ -n "$dominant_label" ]; then
+                specialist_type="$dominant_label"
+            else
+                # Default to "excellence" specialist if no dominant label
+                specialist_type="excellence"
+            fi
+        elif [ "$max_label_count" -ge 5 ] && [ -n "$dominant_label" ]; then
+            promote=true
+            promotion_reason="5+ tasks in '$dominant_label' domain (count=$max_label_count)"
+            specialist_type="$dominant_label"
+        fi
+        
+        if [ "$promote" = true ]; then
+            # Grant promotion
+            local promoted_role="${current_role}:${specialist_type}-specialist"
+            
+            echo "[$(date -u +%H:%M:%S)] PROMOTION: $agent_name promoted from '$current_role' to '$promoted_role'"
+            echo "[$(date -u +%H:%M:%S)]   Reason: $promotion_reason"
+            echo "[$(date -u +%H:%M:%S)]   Reputation avg: $reputation_avg | Dominant label: $dominant_label ($max_label_count tasks)"
+            
+            # Update agent's S3 identity with promoted role
+            local updated_identity
+            updated_identity=$(echo "$identity_json" | jq --arg role "$promoted_role" '.role = $role')
+            
+            if echo "$updated_identity" | aws s3 cp - "$identity_path" 2>/dev/null; then
+                echo "[$(date -u +%H:%M:%S)]   ✓ Promoted role saved to S3: $identity_path"
+                promotions_granted=$((promotions_granted + 1))
+                
+                # Also update canonical file for cross-generation inheritance
+                local display_name
+                display_name=$(echo "$identity_json" | jq -r '.displayName // ""')
+                
+                if [ -n "$display_name" ]; then
+                    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${display_name}.json"
+                    if echo "$updated_identity" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+                        echo "[$(date -u +%H:%M:%S)]   ✓ Canonical role updated: $canonical_path"
+                    fi
+                fi
+                
+                # Post promotion event as Thought CR for visibility
+                post_coordinator_thought \
+"ROLE PROMOTION (v0.5 feature #1, issue #1733):
+Agent: $agent_name
+Promoted: $current_role → $promoted_role
+Reason: $promotion_reason
+Reputation average: $reputation_avg
+Dominant specialization: $dominant_label ($max_label_count tasks)
+
+This is autonomous role promotion based on demonstrated excellence. The civilization
+recognizes and rewards consistent high-quality contributions." \
+                    "decision"
+                
+                # Push CloudWatch metric for god-observer tracking
+                push_metric "RolePromotion" 1 "Count" "Component=Coordinator" "SpecialistType=$specialist_type"
+            else
+                echo "[$(date -u +%H:%M:%S)]   ✗ Failed to save promoted role to S3"
+            fi
+        fi
+    done
+    
+    echo "[$(date -u +%H:%M:%S)] Role promotion evaluation complete: $agents_evaluated agents evaluated, $promotions_granted promotions granted"
+    
+    # Update coordinator state with promotion stats
+    local total_promotions
+    total_promotions=$(get_state "totalRolePromotions")
+    [[ "$total_promotions" =~ ^[0-9]+$ ]] || total_promotions=0
+    total_promotions=$((total_promotions + promotions_granted))
+    update_state "totalRolePromotions" "$total_promotions"
+    
+    if [ "$promotions_granted" -gt 0 ]; then
+        update_state "lastRolePromotion" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+}
+
 
 echo "Coordinator entering main loop..."
 update_state "phase" "Active"
@@ -3467,6 +3689,14 @@ while true; do
     # routing recommendations for the planner/god-delegate to act on.
     if [ $((iteration % 7)) -eq 0 ]; then
         route_tasks_by_specialization
+    fi
+
+    # Every 8 iterations (~4 min): evaluate agents for dynamic role promotion (issue #1733, v0.5 feature #1)
+    # Reads Report CRs and agent S3 identities to identify agents with consistent high-quality
+    # contributions, promoting them from base roles (worker/planner) to specialist roles
+    # (worker:architecture-specialist, etc.) based on demonstrated excellence.
+    if [ $((iteration % 8)) -eq 0 ]; then
+        evaluate_role_promotions
     fi
 
     # Every 10 iterations (~5 min): re-check and initialize any missing state fields (issue #1178)
