@@ -586,7 +586,23 @@ sync_constitution_to_git() {
     local approve_votes="$3"
     
     echo "[$(date -u +%H:%M:%S)] Syncing constitution.yaml to git after governance enactment..."
-    
+
+    # Issue #1398: Check for existing open PR BEFORE cloning/pushing to avoid duplicate branches.
+    # The previous check was AFTER git push, meaning a new branch was always pushed even when
+    # a PR already existed. This caused 10+ orphaned branches and stale duplicate PRs.
+    local pr_title_check="chore: sync constitution.yaml with enacted governance ($topic)"
+    if command -v gh &>/dev/null && [ -n "${GITHUB_TOKEN:-}" ]; then
+        local existing_pr_early
+        existing_pr_early=$(gh pr list --repo "${GITHUB_REPO}" --state open \
+            --search "sync constitution.yaml with enacted governance ($topic)" \
+            --json number --jq '.[0].number' 2>/dev/null)
+        if [ -n "$existing_pr_early" ]; then
+            echo "[$(date -u +%H:%M:%S)] ✓ PR #${existing_pr_early} already open for topic ${topic} — skipping clone/push/PR (issue #1398)"
+            push_metric "ConstitutionSyncDuplicatePrevented" 1 "Count" "Topic=${topic}"
+            return 0
+        fi
+    fi
+
     # Create temp workspace
     local workspace
     workspace=$(mktemp -d /tmp/constitution-sync-XXXXXX)
@@ -911,8 +927,14 @@ tally_and_enact_votes() {
         enacted=$(get_state "enactedDecisions")
         # Issue #940: null guard - treat empty/null as empty string
         [ -z "$enacted" ] && enacted=""
-        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
-        
+        # Issue #1398: normalize decision_key — replace ALL whitespace (spaces AND newlines)
+        # with underscores. Previously only replaced spaces (// /_), so kv_pairs containing
+        # newlines from multi-key proposals would produce keys with embedded newlines.
+        # Embedded newlines cause: (a) update_state JSON escaping failures (silently drops
+        # the enactedDecisions entry), and (b) grep -qF to fail to match on re-check.
+        local decision_key
+        decision_key="$(echo "${topic}_${kv_pairs}" | tr '[:space:]' '_' | tr -s '_')"
+
         if echo "$enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
             continue
