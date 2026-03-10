@@ -3800,11 +3800,12 @@ DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l age
   '[.items[] | select(.data.agentRef == $agent and .data.thoughtType == "debate" and .metadata.creationTimestamp >= $start)] | length' 2>/dev/null || echo "0")
 
 # Check if agent posted a synthesis response persisted to S3 (anti-amnesia behavior)
-# SYNTHESIS_PERSISTED is set by post_debate_response() when record_debate_outcome() succeeds.
-# Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
-# OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
-# Temp file /tmp/agentex-synthesis-persisted survives subprocess isolation.
-SYNTHESIS_PERSISTED_FLAG=$(( [ -f /tmp/agentex-synthesis-persisted ] || [ -n "${SYNTHESIS_PERSISTED:-}" ] ) && echo 1 || echo 0)
+ # SYNTHESIS_PERSISTED is set by post_debate_response() when record_debate_outcome() succeeds.
+ # Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
+ # OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
+ # Temp file /tmp/agentex-synthesis-persisted survives subprocess isolation.
+ # Issue #1464: Use $( ( ... ) ) with space to avoid SC1102 shellcheck ambiguity with $((arith)).
+ SYNTHESIS_PERSISTED_FLAG=$( ( [ -f /tmp/agentex-synthesis-persisted ] || [ -n "${SYNTHESIS_PERSISTED:-}" ] ) && echo 1 || echo 0)
 
 # Check if agent filed vision-aligned issues (enhancement or self-improvement labels)
 VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels \
@@ -3818,11 +3819,12 @@ ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit
 PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Check if agent called plan_for_n_plus_2() — flag set in that function (issue #1283)
-# Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
-# OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
-# Temp file /tmp/agentex-n2-priority-set survives subprocess isolation.
-N2_COORDINATION=$(( [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ] ) && echo 1 || echo 0)
+ # Check if agent called plan_for_n_plus_2() — flag set in that function (issue #1283)
+ # Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
+ # OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
+ # Temp file /tmp/agentex-n2-priority-set survives subprocess isolation.
+ # Issue #1464: Use $( ( ... ) ) with space to avoid SC1102 shellcheck ambiguity with $((arith)).
+ N2_COORDINATION=$( ( [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ] ) && echo 1 || echo 0)
 
 # Compute vision-aligned self-improvement score (issue #1283)
 # Replaces volume-based scoring (issues + PRs) with quality-based metrics:
