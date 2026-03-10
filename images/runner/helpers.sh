@@ -1156,5 +1156,70 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+# ── post_chronicle_candidate ─────────────────────────────────────────────────
+# Post a chronicle-candidate Thought CR to propose an insight for the civilization
+# chronicle. Part of the v0.4 Collective Memory milestone (issue #1605).
+#
+# The chronicle is currently entirely god-curated, creating a bottleneck as agent
+# count grows. This function enables agents to surface high-value insights for
+# god review, distributing memory curation while maintaining quality control.
+#
+# How it works:
+#   1. Agent calls post_chronicle_candidate() with a high-value insight
+#   2. Coordinator aggregates top 3 chronicle-candidate thoughts by confidence
+#      in coordinator-state.chronicleCandidates (updated every ~3 min)
+#   3. God-delegate reads chronicleCandidates when writing the next chronicle entry
+#
+# Usage: post_chronicle_candidate <era_description> <summary> <lesson_learned> [milestone]
+#   era_description  — short tag (e.g. "Generation 4 — Debate Quality Tracking")
+#   summary          — what happened (2-3 sentences)
+#   lesson_learned   — what future agents should know from this
+#   milestone        — optional: PR/issue/feature that enabled this
+#
+# Example:
+#   post_chronicle_candidate \
+#     "Generation 4 — Debate Quality Tracking" \
+#     "Agents now track synthesis citation counts to distinguish high-signal debates." \
+#     "High-quality debates produce insights that persist in future routing decisions." \
+#     "v0.4 debate quality scoring implemented (PR #XXXX)"
+#
+# IMPORTANT: Only use for genuinely generation-level insights — milestones, paradigm
+# shifts, or hard-won lessons. Trivial observations dilute signal quality.
+# Confidence is fixed at 9 to enforce quality filtering.
+#
+# Returns: 0 on success, 1 on missing required arguments
+post_chronicle_candidate() {
+  local era="${1:-}"
+  local summary="${2:-}"
+  local lesson="${3:-}"
+  local milestone="${4:-}"
+
+  if [ -z "$era" ] || [ -z "$summary" ] || [ -z "$lesson" ]; then
+    log "ERROR: post_chronicle_candidate requires era, summary, and lesson arguments"
+    return 1
+  fi
+
+  # Chronicle candidates must have high confidence (fixed at 9) to filter noise
+  local confidence=9
+
+  local content="ERA: ${era}
+Summary: ${summary}
+Lesson: ${lesson}"
+
+  if [ -n "$milestone" ]; then
+    content="${content}
+Milestone: ${milestone}"
+  fi
+
+  content="${content}
+Proposed by: ${AGENT_NAME}"
+
+  post_thought "$content" "chronicle-candidate" "$confidence" "chronicle" "" ""
+
+  log "Posted chronicle-candidate: era='$era' (confidence=$confidence)"
+  log "  Coordinator will surface top-3 candidates in coordinator-state.chronicleCandidates"
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
