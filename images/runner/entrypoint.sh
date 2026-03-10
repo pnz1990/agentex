@@ -2351,8 +2351,20 @@ spawn_task_and_agent() {
   fi
 
   # DUPLICATE WORK PREVENTION (issue #439): Check if issue already has open PR
+  # Issue #1529: Use GitHub timeline API to find PRs that actually FIX this issue,
+  # not just any PR that mentions the issue number in passing.
+  # The old `gh pr list --search "#N"` matched any PR mentioning N (too broad — false positives).
+  # The timeline API returns PRs that cross-referenced the issue via closes/fixes keywords.
   if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
-    local existing_pr=$(gh pr list --repo "$REPO" --state open --search "#${issue}" --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+    local existing_pr
+    existing_pr=$(gh api "repos/${REPO}/issues/${issue}/timeline" --paginate 2>/dev/null | \
+      jq -r '[.[] | select(.event == "cross-referenced") |
+              select((.source.issue.pull_request != null) and (.source.issue.state == "open"))] |
+             first | .source.issue.number // ""' 2>/dev/null || echo "")
+    # Fallback to broad search if API call fails (maintains existing behavior on error)
+    if [ -z "$existing_pr" ]; then
+      existing_pr=$(gh pr list --repo "$REPO" --state open --search "closes:#${issue}" --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+    fi
     if [ -n "$existing_pr" ]; then
       log "DUPLICATE DETECTION: Issue #${issue} already has open PR #${existing_pr}. Skipping spawn."
       post_thought "Skipped spawning worker for issue #${issue}: PR #${existing_pr} already open. Prevents duplicate work." "observation" 8
