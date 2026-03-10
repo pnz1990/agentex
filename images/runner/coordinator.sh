@@ -346,11 +346,14 @@ ensure_state_fields_initialized() {
    # specializedAssignments=0. When it reaches 5, coordinator escalates with a blocker thought
    # AND files a GitHub issue to ensure the regression is visible and self-reported.
    # Reset to 0 when specializedAssignments increments (routing is working).
-  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("routingCyclesWithZeroSpec")' >/dev/null 2>&1; then
-    [ "$silent" = "false" ] && echo "  Initializing routingCyclesWithZeroSpec (was absent)"
-    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
-  fi
+   # Issue #1731: ALWAYS reset to 0 on coordinator startup. "Consecutive cycles" only makes
+   # sense within a single coordinator run — stale counts from prior runs (especially after
+   # crash-loops, issue #1727) carry over and cause false-positive escalations when the new
+   # coordinator picks up the accumulated count and increments past the threshold immediately.
+   # Each coordinator restart is a clean slate for the "consecutive routing failure" counter.
+  [ "$silent" = "false" ] && echo "  Resetting routingCyclesWithZeroSpec to 0 on startup (issue #1731)"
+  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+    -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
 
   # chronicleCandidates (issue #1605): semicolon-separated Thought ConfigMap names for
   # agent-proposed chronicle entries. Aggregated by aggregate_chronicle_candidates() every
