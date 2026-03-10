@@ -8,9 +8,19 @@ Agents form specializations organically based on what they've worked on — not 
 
 The key metric: `coordinator-state.specializedAssignments > 0` — at least one issue was routed to an agent because of its specialization history.
 
-## Current Status (as of Generation 4)
+## Current Status (as of Generation 4, updated 2026-03-10T11:45Z)
 
-`specializedAssignments = 0` — routing has NOT fired yet. Multiple issues blocking the pipeline have been identified and are being fixed.
+`specializedAssignments = 0` — routing has NOT fired yet. Significant progress made: most trailing-space and S3 path bugs are merged. Critical pre-claim routing fix (PR #1479) and name release (PR #1514) still await god-approved merge.
+
+**Merged fixes**: PR #1489, #1505, #1482 (stale threshold), #1494 (claim_task spaces), #1514 (identity release), #1518 (canonical lookup), #1527 (canonical write on update_specialization), #1528 (visionQueue prune), #1530 (coordinator crash-loop)
+
+**Open PRs remaining** (need god-approved to merge):
+- PR #1479 — pre-claim routing (closes #1474) — THE critical fix
+- PR #1531 — trim agent_role whitespace in routing (closes #1491)
+- PR #1533 — fix duplicate PR detection (closes #1529)
+- PR #1542 — unconditional canonical S3 lookup (closes #1515)
+- PR #1543 — sample newest identity files in diagnostic (closes #1541)
+- PR #1544 — pre-claim routing alternative fix (closes #1474)
 
 ## The Bug Chain
 
@@ -31,8 +41,8 @@ Each step has had bugs. Here is the complete bug chain identified in Generation 
 ### Bug 1: Name Registry Never Releases Names (Issue #1483)
 - **Symptom**: All 12 worker name slots permanently claimed — workers always get generated names like `worker-bold-tensor` with empty specialization history
 - **Impact**: Without persistent names, specialization data never accumulates
-- **Fix**: PR #1486 — releases names back to registry on agent completion
-- **Status**: Open PR, needs god-approved merge
+- **Fix**: PR #1514 — `release_identity()` function added to identity.sh, called in EXIT trap
+- **Status**: **MERGED** ✓
 
 ### Bug 2: Specialization History Not Inherited (Issue #1487)
 - **Symptom**: When a name IS released and reclaimed, the new agent starts fresh — ignoring the prior agent's accumulated specialization data
@@ -40,65 +50,64 @@ Each step has had bugs. Here is the complete bug chain identified in Generation 
 - **Fix**: PR #1489 — writes canonical S3 file at `identities/canonical/<displayName>.json`; loads it on name reclaim
 - **Status**: **MERGED** ✓ (commit `1e34f4a`)
 
-### Bug 3: Coordinator Looks Up S3 by Ephemeral Agent Name (Issue #1475)
-- **Symptom**: `score_agent_for_issue()` reads `identities/<agent_name>.json` but history accumulates under `identities/<agent_name>.json` (per-session) or `identities/canonical/<displayName>.json` (canonical)
-- **Impact**: Score always 0, routing never fires
-- **Fix**: PR #1484 — passes `displayName` as 5th argument to `score_agent_for_issue()`, looks up by displayName first
-- **Status**: Open PR, needs god-approved merge
+### Bug 3: Coordinator Looks Up S3 by Ephemeral Agent Name (Issue #1475, #1515)
+- **Symptom**: `score_agent_for_issue()` reads per-session identity which is empty for new agents (new agents always start fresh pods)
+- **Impact**: Score always 0, routing never fires even for agents with specialization history
+- **Fix**: PR #1518 — tries canonical lookup when per-session file exists; PR #1542 — tries canonical UNCONDITIONALLY (correct fix)
+- **Status**: PR #1518 **MERGED** ✓; PR #1542 open, needs god-approved
 
-### Bug 4: S3 Path Mismatch — PR #1484 vs PR #1489 (Issue #1495)
-- **Symptom**: PR #1484 reads `identities/<displayName>.json` but PR #1489 writes `identities/canonical/<displayName>.json`
-- **Impact**: Even after both PRs merge, coordinator can't find the canonical history
-- **Fix**: Being implemented (issue #1495) — add fallback to check `identities/canonical/<displayName>.json`
-- **Status**: Being worked on by active agents
+### Bug 4: S3 update_specialization Doesn't Write Canonical (Issue #1523)
+- **Symptom**: `update_specialization()` was writing to per-session file only — canonical file never updated
+- **Impact**: Accumulated specialization lost on restart, canonical lookup always returns empty
+- **Fix**: PR #1527 — `update_specialization()` now writes to `identities/canonical/<displayName>.json`
+- **Status**: **MERGED** ✓
 
 ### Bug 5: Routing Never Fires — Workers Claim Before Routing (Issue #1474)
 - **Symptom**: `route_tasks_by_specialization()` is called AFTER workers have already claimed tasks directly
 - **Impact**: Routing logic runs on an empty queue
 - **Fix**: PR #1479 — coordinator pre-claims tasks for specialized agents before generic queue is available
-- **Status**: Open PR, needs god-approved merge
+- **Fix**: PR #1544 — alternative implementation of same fix
+- **Status**: Both open, need god-approved; PR #1479 is the primary fix
 
 ### Bug 6: Trailing Space in `agent_role` Breaks Routing (Issue #1491)
 - **Symptom**: `find_best_agent_for_issue()` filters by role, but `agent_role` has trailing whitespace from activeAgents parsing
-- **Fix**: PR #1493 — trims whitespace before comparison
-- **Status**: Open PR
+- **Fix**: PR #1531 — trims whitespace before comparison
+- **Status**: Open PR, needs god-approved
 
 ### Bug 7: Stale Routing Threshold in Diagnostic (Issue #1480)
-- **Symptom**: Planner diagnostic says `score > 5` but actual threshold is `2` — misleads debugging
-- **Fix**: PR #1482 — updates message text only
-- **Status**: Open PR
+- **Symptom**: Planner diagnostic said `score > 5` but actual threshold is `2` — misleads debugging
+- **Fix**: PR #1482 — updated message text
+- **Status**: **MERGED** ✓
 
 ### Bug 8: Duplicate Claims in claim_task (Issue #1488)
 - **Symptom**: Space-padded activeAssignments entries cause `grep ":issue_num"` to miss existing claims
 - **Fix**: PR #1494 — normalizes spaces in claim checks
-- **Status**: Open PR
+- **Status**: **MERGED** ✓
+
+### Bug 9: Pre-claim Race with cleanup_stale_assignments (Issue #1546)
+- **Symptom**: Coordinator pre-claims issue for agent, but `cleanup_stale_assignments()` removes the entry because the worker Job isn't active yet
+- **Impact**: Even with PR #1479 merged, routing may be erased before worker starts
+- **Fix**: PR #1479 should add a grace period check or use a different state field
+- **Status**: Open issue, needs analysis and fix
 
 ## Recommended Merge Order for God
 
-The following order minimizes conflicts and respects dependencies:
+The following order reflects current state (many bugs already fixed):
 
 ```
-Step 1: PR #1494 (closes #1488) — normalize claim_task spaces
+Step 1: PR #1531 (closes #1491) — trim agent_role whitespace
         ↓ (no deps, merge anytime)
 
-Step 2: PR #1493 (closes #1491) — trim agent_role whitespace
-        ↓ (no deps, merge anytime)
+Step 2: PR #1542 (closes #1515) — unconditional canonical lookup  
+        ↓ (improves step 3's effectiveness)
 
-Step 3: PR #1482 (closes #1480) — fix stale diagnostic message
-        ↓ (no deps, merge anytime)
+Step 3: PR #1479 or #1544 (closes #1474) — pre-claim routing
+        ↓ CRITICAL: without this, routing never fires even with all other fixes
 
-Step 4: PR #1486 (closes #1483) — release names back to registry
-        ↓ MUST merge before #1479 and #1495 fix
-
-Step 5: PR #1484 (closes #1475) — displayName-based identity lookup
-        + PR #1495-fix (closes #1495) — add canonical path fallback
-        ↓ (these two should be coordinated — #1495 fix extends #1484)
-
-Step 6: PR #1479 (closes #1474) — pre-claim routing for specialized agents
-        ↓ MERGE LAST: requires agents with specialization data (steps 4-5)
+Step 4: Address race condition from issue #1546 if routing still doesn't fire
 ```
 
-**Note**: PR #1492 was closed without merge (duplicate of #1484). PR #1489 is already merged.
+**Already merged**: PR #1482 (#1480), #1489 (#1487), #1494 (#1488), #1505 (#1475), #1514 (#1483), #1518 (#1495), #1527 (#1523), #1528 (#1525), #1530 (#1526)
 
 ## Validation Checklist
 
