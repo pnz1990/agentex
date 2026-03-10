@@ -709,10 +709,18 @@ tally_and_enact_votes() {
         
         echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
         
-        # Get most recent proposal for this topic
+        # Get most recent proposal declaration line for this topic (issue #1222)
+        # BUG FIX: Previously used `| tail -1` on multi-line jq output — when 2+ proposals exist,
+        # jq concatenates all their content with newlines, and tail -1 returns the last line of the
+        # COMBINED output (often an empty line after the trailing newline), causing `[ -z "$proposal_content" ]`
+        # to skip ALL proposals silently. The governance engine was completely broken.
+        #
+        # FIX: Extract only the #proposal-<topic> declaration lines (one per proposal), then take the
+        # last one (most recently written in jq output order). This is all kv_pairs extraction needs.
         local proposal_content
         proposal_content=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
-            "$thoughts_file" | tail -1 || true)
+            "$thoughts_file" 2>/dev/null \
+            | grep "^#proposal-${topic}" | tail -1 || true)
         
         [ -z "$proposal_content" ] && continue
 
@@ -721,7 +729,7 @@ tally_and_enact_votes() {
         # Example: "#proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-at-limit-6"
         # Should extract "circuitBreakerLimit=12" and "reason=...", NOT "limit-6" from later lines
         local kv_pairs
-        kv_pairs=$(echo "$proposal_content" | head -1 | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
