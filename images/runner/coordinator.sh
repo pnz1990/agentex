@@ -1160,7 +1160,7 @@ find_best_agent_for_issue() {
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
             "$issue_labels" "$issue_keywords")
 
-        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score"
+        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
 
         if [ "$agent_score" -gt "$best_score" ]; then
             best_score="$agent_score"
@@ -1170,7 +1170,7 @@ find_best_agent_for_issue() {
 
     # Only return if score exceeds threshold
     if [ "$best_score" -gt "$SPECIALIZATION_ROUTING_THRESHOLD" ]; then
-        echo "[$(date -u +%H:%M:%S)] Specialized routing: $best_agent (score=$best_score) → issue #$issue_number"
+        echo "[$(date -u +%H:%M:%S)] Specialized routing: $best_agent (score=$best_score) → issue #$issue_number" >&2
         echo "$best_agent"
     else
         echo ""
