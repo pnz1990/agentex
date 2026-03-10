@@ -1,0 +1,743 @@
+{{- /*
+All 8 kro ResourceGraphDefinitions (RGDs) that form the agent coordination layer.
+These are included verbatim - they use kro's CEL DSL (${...}), not Helm templates.
+RGDs are cluster-scoped resources in kro v0.8.5.
+*/}}
+---
+# agent-graph: Creates a Job (OpenCode runner) for each Agent CR
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: agent-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Agent
+    spec:
+      role: string | default="worker"
+      taskRef: string | required=true
+      model: string | default={{ .Values.agent.model | quote }}
+      swarmRef: string | default=""
+      priority: integer | default=5
+      imageRegistry: string | default={{ .Values.vision.ecrRegistry | quote }}
+      clusterName: string | default={{ .Values.vision.clusterName | quote }}
+      useSpot: boolean | default=false
+      capacityType: string | default="on-demand"
+    status:
+      jobName: ${agentJob.metadata.name}
+      completionTime: ${agentJob.status.completionTime}
+      failed: ${agentJob.status.failed}
+      active: ${agentJob.status.active}
+      succeeded: ${agentJob.status.succeeded}
+  resources:
+    - id: agentJob
+      readyWhen:
+        - ${agentJob.metadata.resourceVersion != ""}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-agent
+            agentex/role: ${schema.spec.role}
+            agentex/task: ${schema.spec.taskRef}
+        spec:
+          ttlSecondsAfterFinished: 180
+          backoffLimit: 2
+          activeDeadlineSeconds: 3600
+          template:
+            metadata:
+              labels:
+                app: agentex-agent
+                agentex/role: ${schema.spec.role}
+                agentex/task: ${schema.spec.taskRef}
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Never
+              affinity:
+                nodeAffinity:
+                  preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 90
+                      preference:
+                        matchExpressions:
+                          - key: karpenter.sh/capacity-type
+                            operator: In
+                            values:
+                              - ${schema.spec.capacityType}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: agent
+                  image: ${schema.spec.imageRegistry}/agentex/runner:latest
+                  imagePullPolicy: Always
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: AGENT_NAME
+                      value: ${schema.metadata.name}
+                    - name: AGENT_ROLE
+                      value: ${schema.spec.role}
+                    - name: TASK_CR_NAME
+                      value: ${schema.spec.taskRef}
+                    - name: SWARM_REF
+                      value: ${schema.spec.swarmRef}
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: REPO
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: "agentex"
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "250m"
+                    limits:
+                      memory: "2Gi"
+                      cpu: "1000m"
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 2Gi
+                - name: github-token
+                  secret:
+                    secretName: agentex-github-token
+                    defaultMode: 0400
+---
+# task-graph: Creates a ConfigMap (task spec, status, assignee, priority)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: task-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Task
+    spec:
+      title: string | required=true
+      description: string | default=""
+      role: string | default="worker"
+      priority: integer | default=5
+      effort: string | default="M"
+      githubIssue: integer | default=0
+      context: string | default=""
+      swarmRef: string | default=""
+    status:
+      configMapName: ${taskConfigMap.metadata.name}
+      phase: ${taskConfigMap.metadata.name}
+      agentRef: ${taskConfigMap.metadata.name}
+      outcome: ${taskConfigMap.metadata.name}
+      completedAt: ${taskConfigMap.metadata.creationTimestamp}
+  resources:
+    - id: taskConfigMap
+      readyWhen:
+        - ${taskConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-spec
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/task: ${schema.metadata.name}
+            agentex/role: ${schema.spec.role}
+            agentex/priority: ${string(schema.spec.priority)}
+            agentex/swarm: ${schema.spec.swarmRef}
+        data:
+          title: ${schema.spec.title}
+          description: ${schema.spec.description}
+          role: ${schema.spec.role}
+          priority: ${string(schema.spec.priority)}
+          effort: ${schema.spec.effort}
+          githubIssue: ${string(schema.spec.githubIssue)}
+          context: ${schema.spec.context}
+          swarmRef: ${schema.spec.swarmRef}
+---
+# message-graph: Creates a ConfigMap (from, to, body, thread, timestamp)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: message-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Message
+    spec:
+      from: string | required=true
+      to: string | required=true
+      body: string | required=true
+      thread: string | default=""
+      messageType: string | default="status"
+      replyTo: string | default=""
+    status:
+      configMapName: ${messageConfigMap.metadata.name}
+      read: ${messageConfigMap.data.read}
+      timestamp: ${messageConfigMap.metadata.creationTimestamp}
+  resources:
+    - id: messageConfigMap
+      readyWhen:
+        - ${messageConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-msg
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/from: ${schema.spec.from}
+            agentex/to: ${schema.spec.to}
+            agentex/thread: ${schema.spec.thread}
+            agentex/type: ${schema.spec.messageType}
+        data:
+          from: ${schema.spec.from}
+          to: ${schema.spec.to}
+          body: ${schema.spec.body}
+          thread: ${schema.spec.thread}
+          messageType: ${schema.spec.messageType}
+          replyTo: ${schema.spec.replyTo}
+          read: "false"
+---
+# thought-graph: Creates a ConfigMap (agent reasoning log, visible to peers)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: thought-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Thought
+    spec:
+      agentRef: string | required=true
+      displayName: string | default=""
+      taskRef: string | default=""
+      content: string | required=true
+      thoughtType: string | default="observation"
+      confidence: integer | default=7
+      topic: string | default=""
+      filePath: string | default=""
+      parentRef: string | default=""
+    status:
+      configMapName: ${thoughtConfigMap.metadata.name}
+      readBy: ${thoughtConfigMap.data.readBy}
+  resources:
+    - id: thoughtConfigMap
+      readyWhen:
+        - ${thoughtConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-thought
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/thought: "true"
+            agentex/agent: ${schema.spec.agentRef}
+            agentex/task: ${schema.spec.taskRef}
+            agentex/type: ${schema.spec.thoughtType}
+            agentex/topic: ${schema.spec.topic}
+            agentex/file: ${schema.spec.filePath}
+            agentex/parent: ${schema.spec.parentRef}
+        data:
+          agentRef: ${schema.spec.agentRef}
+          displayName: ${schema.spec.displayName}
+          taskRef: ${schema.spec.taskRef}
+          content: ${schema.spec.content}
+          thoughtType: ${schema.spec.thoughtType}
+          confidence: ${string(schema.spec.confidence)}
+          topic: ${schema.spec.topic}
+          filePath: ${schema.spec.filePath}
+          parentRef: ${schema.spec.parentRef}
+          readBy: ""
+---
+# report-graph: Creates a ConfigMap (structured exit report — feeds god-observer)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: report-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Report
+    spec:
+      agentRef: string | required=true
+      displayName: string | default=""
+      taskRef: string | default=""
+      role: string | default="worker"
+      status: string | default="completed"
+      visionScore: integer | default=5
+      workDone: string | default=""
+      issuesFound: string | default=""
+      prOpened: string | default=""
+      blockers: string | default=""
+      nextPriority: string | default=""
+      generation: integer | default=0
+      exitCode: integer | default=0
+    status:
+      configMapName: ${reportConfigMap.metadata.name}
+  resources:
+    - id: reportConfigMap
+      readyWhen:
+        - ${reportConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-data
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/agent: ${schema.spec.agentRef}
+            agentex/role: ${schema.spec.role}
+            agentex/status: ${schema.spec.status}
+            agentex/report: ${schema.metadata.name}
+        data:
+          agentRef: ${schema.spec.agentRef}
+          displayName: ${schema.spec.displayName}
+          taskRef: ${schema.spec.taskRef}
+          role: ${schema.spec.role}
+          status: ${schema.spec.status}
+          visionScore: ${string(schema.spec.visionScore)}
+          workDone: ${schema.spec.workDone}
+          issuesFound: ${schema.spec.issuesFound}
+          prOpened: ${schema.spec.prOpened}
+          blockers: ${schema.spec.blockers}
+          nextPriority: ${schema.spec.nextPriority}
+          generation: ${string(schema.spec.generation)}
+          exitCode: ${string(schema.spec.exitCode)}
+---
+# swarm-graph: Creates a State ConfigMap + planner Job (spawned on Swarm CR creation)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: swarm-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Swarm
+    spec:
+      goal: string | required=true
+      plannerTaskRef: string | required=true
+      maxAgents: integer | default=10
+      planners: integer | default=1
+      workers: integer | default=3
+      reviewers: integer | default=1
+      consensusThreshold: integer | default=51
+      githubRepo: string | default={{ .Values.vision.githubRepo | default "pnz1990/agentex" | quote }}
+      model: string | default={{ .Values.agent.model | quote }}
+      imageRegistry: string | default={{ .Values.vision.ecrRegistry | default "569190534191.dkr.ecr.us-west-2.amazonaws.com" | quote }}
+      clusterName: string | default={{ .Values.vision.clusterName | default "agentex" | quote }}
+    status:
+      configMapName: ${swarmState.metadata.name}
+      phase: ${swarmState.data.phase}
+      plannerJob: ${plannerAgent.metadata.name}
+  resources:
+    - id: swarmState
+      readyWhen:
+        - ${swarmState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/swarm: ${schema.metadata.name}
+        data:
+          goal: ${schema.spec.goal}
+          phase: "Forming"
+          maxAgents: ${string(schema.spec.maxAgents)}
+          planners: ${string(schema.spec.planners)}
+          workers: ${string(schema.spec.workers)}
+          reviewers: ${string(schema.spec.reviewers)}
+          consensusThreshold: ${string(schema.spec.consensusThreshold)}
+          githubRepo: ${schema.spec.githubRepo}
+          activeAgents: "0"
+          tasksCompleted: "0"
+          issuesCreated: "0"
+          prsMerged: "0"
+          lastActivityTimestamp: ""
+          memberAgents: ""
+    - id: plannerAgent
+      readyWhen:
+        - ${plannerAgent.status.completionTime != null}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}-planner
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-agent
+            agentex/role: planner
+            agentex/swarm: ${schema.metadata.name}
+        spec:
+          ttlSecondsAfterFinished: 180
+          backoffLimit: 0
+          activeDeadlineSeconds: 3600
+          template:
+            metadata:
+              labels:
+                app: agentex-agent
+                agentex/role: planner
+                agentex/swarm: ${schema.metadata.name}
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: agent
+                  image: ${schema.spec.imageRegistry}/agentex/runner:latest
+                  imagePullPolicy: Always
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: AGENT_NAME
+                      value: ${schema.metadata.name}-planner
+                    - name: AGENT_ROLE
+                      value: planner
+                    - name: TASK_CR_NAME
+                      value: ${schema.spec.plannerTaskRef}
+                    - name: SWARM_REF
+                      value: ${schema.metadata.name}
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: REPO
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "250m"
+                    limits:
+                      memory: "2Gi"
+                      cpu: "1000m"
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 2Gi
+                - name: github-token
+                  secret:
+                    secretName: agentex-github-token
+                    defaultMode: 0400
+---
+# coordinator-graph: Creates a State ConfigMap + Deployment (long-running coordinator)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: coordinator-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Coordinator
+    spec:
+      enabled: boolean | default=true
+      model: string | default={{ .Values.agent.model | quote }}
+      imageTag: string | default={{ .Values.agent.imageTag | quote }}
+      imageRegistry: string | default={{ .Values.vision.ecrRegistry | default "569190534191.dkr.ecr.us-west-2.amazonaws.com" | quote }}
+      clusterName: string | default={{ .Values.vision.clusterName | default "agentex" | quote }}
+    status:
+      configMapName: ${coordinatorState.metadata.name}
+      deploymentName: ${coordinatorDeployment.metadata.name}
+      phase: ${coordinatorDeployment.metadata.name}
+      lastHeartbeat: ${coordinatorDeployment.metadata.creationTimestamp}
+  resources:
+    - id: coordinatorState
+      readyWhen:
+        - ${coordinatorState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: coordinator-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/component: coordinator
+        data:
+          bootstrapped: "true"
+    - id: coordinatorDeployment
+      readyWhen:
+        - ${coordinatorDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: coordinator
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-coordinator
+            agentex/component: coordinator
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate
+          selector:
+            matchLabels:
+              app: agentex-coordinator
+          template:
+            metadata:
+              labels:
+                app: agentex-coordinator
+                agentex/component: coordinator
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: coordinator
+                  image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
+                  imagePullPolicy: Always
+                  command: ["/bin/bash", "/usr/local/bin/coordinator.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: COORDINATOR_NAME
+                      value: coordinator
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: REPO
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  ports:
+                    - name: health
+                      containerPort: 8080
+                      protocol: TCP
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "1Gi"
+                      cpu: "500m"
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: health
+                      scheme: HTTP
+                    initialDelaySeconds: 60
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: health
+                      scheme: HTTP
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 2
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 1Gi
+                - name: github-token
+                  secret:
+                    secretName: agentex-github-token
+                    defaultMode: 0400
+---
+# planner-loop-graph: Creates a Deployment (long-running loop that spawns planner Jobs)
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: planner-loop-graph
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: PlannerLoop
+    spec:
+      enabled: boolean | default=true
+      model: string | default={{ .Values.agent.model | quote }}
+      imageTag: string | default={{ .Values.agent.imageTag | quote }}
+      imageRegistry: string | default={{ .Values.vision.ecrRegistry | default "569190534191.dkr.ecr.us-west-2.amazonaws.com" | quote }}
+      clusterName: string | default={{ .Values.vision.clusterName | default "agentex" | quote }}
+    status:
+      deploymentName: ${plannerLoopDeployment.metadata.name}
+      phase: ${plannerLoopDeployment.metadata.name}
+  resources:
+    - id: plannerLoopDeployment
+      readyWhen:
+        - ${plannerLoopDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: planner-loop
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-planner-loop
+            agentex/component: planner-loop
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate
+          selector:
+            matchLabels:
+              app: agentex-planner-loop
+          template:
+            metadata:
+              labels:
+                app: agentex-planner-loop
+                agentex/component: planner-loop
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: planner-loop
+                  image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
+                  imagePullPolicy: Always
+                  command: ["/bin/bash", "/usr/local/bin/planner-loop.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"
+                  livenessProbe:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - 'ps aux | grep -v grep | grep planner-loop.sh'
+                    initialDelaySeconds: 30
+                    periodSeconds: 60
+                    timeoutSeconds: 5
+                    failureThreshold: 3
+                  readinessProbe:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - 'ps aux | grep -v grep | grep planner-loop.sh'
+                    initialDelaySeconds: 10
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 2

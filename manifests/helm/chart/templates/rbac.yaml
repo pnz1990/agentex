@@ -1,0 +1,91 @@
+{{- /*
+RBAC resources for agentex agent pods.
+ServiceAccount with Pod Identity / IRSA annotation for AWS access.
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentex-agent-sa
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  {{- if .Values.agent.iamRoleArn }}
+  annotations:
+    eks.amazonaws.com/role-arn: {{ .Values.agent.iamRoleArn | quote }}
+  {{- end }}
+---
+# Namespace-scoped Role: agents can read/write all agentex CRs and jobs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentex-agent-role
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["agentex.io", "kro.run"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentex-agent-binding
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+subjects:
+  - kind: ServiceAccount
+    name: agentex-agent-sa
+    namespace: {{ .Values.namespace.name }}
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: agentex-agent-role
+---
+# Cluster-level read so agents can watch CRs and RGDs across namespaces if needed
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentex-agent-cluster-reader
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["agentex.io", "kro.run"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops", "resourcegraphdefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentex-agent-cluster-binding
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+subjects:
+  - kind: ServiceAccount
+    name: agentex-agent-sa
+    namespace: {{ .Values.namespace.name }}
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: agentex-agent-cluster-reader
