@@ -409,6 +409,22 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v06CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # watchdogState (issue #1844): Tier 1 watchdog health state.
+  # Values: "healthy", "degraded:<reason>", "critical:<reason>"
+  # Updated every ~60s by watchdog_check().
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("watchdogState")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing watchdogState (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"watchdogState":"healthy"}}' 2>/dev/null || true
+  fi
+
+  # watchdogLastCheck (issue #1844): ISO 8601 timestamp of last Tier 1 watchdog run.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("watchdogLastCheck")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing watchdogLastCheck (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"watchdogLastCheck":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -4239,6 +4255,144 @@ if [ -z "$INITIAL_QUEUE" ]; then
     refresh_task_queue
 fi
 
+# ── Tier 1: Mechanical Watchdog (issue #1844) ───────────────────────────────
+# Runs every 2 coordinator iterations (~60s). Pure code, no AI.
+# Checks:
+#   1. Stuck jobs (running > WATCHDOG_STUCK_JOB_THRESHOLD_MINUTES minutes)
+#   2. Spawn rate (anti-proliferation: > WATCHDOG_PROLIFERATION_THRESHOLD spawns in 2 min)
+#   3. Coordinator self-health (lastHeartbeat staleness > WATCHDOG_STALE_HEARTBEAT_SECONDS)
+# Actions:
+#   - DEGRADED: post blocker Thought CR, push CloudWatch metric
+#   - CRITICAL (proliferation): activate kill switch automatically
+#
+# Health states written to coordinator-state.watchdogState:
+#   "healthy", "degraded:<reason>", "critical:<reason>"
+#
+WATCHDOG_STUCK_JOB_THRESHOLD_MINUTES=30   # jobs running longer than this are "stuck"
+WATCHDOG_PROLIFERATION_THRESHOLD=5        # spawns in 2 min trigger kill switch
+WATCHDOG_STALE_HEARTBEAT_SECONDS=120      # heartbeat age that counts as "coordinator unhealthy"
+
+watchdog_check() {
+    local now_epoch
+    now_epoch=$(date +%s)
+    local health_state="healthy"
+    local health_reasons=()
+
+    # ── Check 1: Stuck jobs (running > threshold minutes) ──────────────────
+    local stuck_threshold_epoch=$(( now_epoch - WATCHDOG_STUCK_JOB_THRESHOLD_MINUTES * 60 ))
+    local stuck_threshold_ts
+    stuck_threshold_ts=$(date -u -d "@${stuck_threshold_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
+        date -u -r "${stuck_threshold_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+    local stuck_jobs
+    stuck_jobs=$(kubectl_with_timeout 15 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq --argjson threshold "$stuck_threshold_epoch" \
+        '[.items[] | select(
+            .status.completionTime == null and
+            (.status.active // 0) > 0 and
+            (.metadata.creationTimestamp | fromdateiso8601) < $threshold
+        ) | .metadata.name]' 2>/dev/null || echo "[]")
+
+    local stuck_count
+    stuck_count=$(echo "$stuck_jobs" | jq 'length' 2>/dev/null || echo "0")
+
+    if [ "$stuck_count" -gt 0 ]; then
+        local stuck_names
+        stuck_names=$(echo "$stuck_jobs" | jq -r '.[]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        echo "[$(date -u +%H:%M:%S)] WATCHDOG: $stuck_count stuck job(s) detected (>${WATCHDOG_STUCK_JOB_THRESHOLD_MINUTES}min): $stuck_names"
+        push_metric "WatchdogStuckJobs" "$stuck_count" "Count" "Component=Coordinator"
+        health_state="degraded"
+        health_reasons+=("stuck-jobs:${stuck_count}")
+
+        # Post a blocker Thought CR so agents can see the stuck jobs
+        post_coordinator_thought \
+            "WATCHDOG ALERT [degraded]: $stuck_count job(s) stuck for >${WATCHDOG_STUCK_JOB_THRESHOLD_MINUTES}min.
+Stuck jobs: $stuck_names
+Action: Investigate these jobs. They may be waiting for external resources or have a bug.
+If a job is stuck beyond ${WATCHDOG_STUCK_JOB_THRESHOLD_MINUTES}min, consider killing it manually." \
+            "blocker"
+    else
+        echo "[$(date -u +%H:%M:%S)] WATCHDOG: No stuck jobs detected"
+        push_metric "WatchdogStuckJobs" 0 "Count" "Component=Coordinator"
+    fi
+
+    # ── Check 2: Proliferation detection (spawn rate > threshold in 2 min) ──
+    local two_min_ago_epoch=$(( now_epoch - 120 ))
+    local recent_spawns
+    recent_spawns=$(kubectl_with_timeout 15 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq --argjson cutoff "$two_min_ago_epoch" \
+        '[.items[] | select(
+            (.metadata.creationTimestamp | fromdateiso8601) > $cutoff
+        )] | length' 2>/dev/null || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] WATCHDOG: $recent_spawns spawns in last 2 minutes (threshold: $WATCHDOG_PROLIFERATION_THRESHOLD)"
+    push_metric "WatchdogRecentSpawns" "$recent_spawns" "Count" "Component=Coordinator"
+
+    if [ "$recent_spawns" -gt "$WATCHDOG_PROLIFERATION_THRESHOLD" ]; then
+        echo "[$(date -u +%H:%M:%S)] WATCHDOG: CRITICAL — proliferation detected! $recent_spawns spawns in 2 min. Activating kill switch."
+        push_metric "WatchdogProliferationDetected" 1 "Count" "Component=Coordinator"
+        health_state="critical"
+        health_reasons+=("proliferation:${recent_spawns}-spawns-in-2min")
+
+        # Activate kill switch to stop the proliferation
+        kubectl_with_timeout 10 create configmap agentex-killswitch -n "$NAMESPACE" \
+            --from-literal=enabled=true \
+            --from-literal=reason="Watchdog: proliferation detected — $recent_spawns spawns in 2 minutes" \
+            --dry-run=client -o yaml 2>/dev/null | \
+            kubectl_with_timeout 10 apply -f - 2>/dev/null || true
+        push_metric "WatchdogKillSwitchActivated" 1 "Count" "Component=Coordinator,Reason=Proliferation"
+
+        post_coordinator_thought \
+            "WATCHDOG CRITICAL: Kill switch activated. Proliferation detected: $recent_spawns spawns in 2 minutes.
+The kill switch has been enabled to halt spawning. Human intervention may be required.
+To recover: verify system is stable, then deactivate via:
+  kubectl patch configmap agentex-killswitch -n agentex --type=merge -p '{\"data\":{\"enabled\":\"false\",\"reason\":\"\"}}'" \
+            "blocker"
+    fi
+
+    # ── Check 3: Coordinator self-health (lastHeartbeat staleness) ──────────
+    local last_heartbeat
+    last_heartbeat=$(get_state "lastHeartbeat")
+    if [ -n "$last_heartbeat" ]; then
+        local heartbeat_epoch
+        heartbeat_epoch=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+        local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
+        push_metric "WatchdogHeartbeatAge" "$heartbeat_age" "Seconds" "Component=Coordinator"
+
+        if [ "$heartbeat_age" -gt "$WATCHDOG_STALE_HEARTBEAT_SECONDS" ]; then
+            echo "[$(date -u +%H:%M:%S)] WATCHDOG: DEGRADED — coordinator heartbeat stale (${heartbeat_age}s > ${WATCHDOG_STALE_HEARTBEAT_SECONDS}s)"
+            push_metric "WatchdogHeartbeatStale" 1 "Count" "Component=Coordinator"
+            health_state="degraded"
+            health_reasons+=("stale-heartbeat:${heartbeat_age}s")
+        else
+            echo "[$(date -u +%H:%M:%S)] WATCHDOG: Heartbeat fresh (${heartbeat_age}s old)"
+        fi
+    else
+        echo "[$(date -u +%H:%M:%S)] WATCHDOG: No heartbeat timestamp yet — coordinator just started"
+    fi
+
+    # ── Write health state to coordinator-state ────────────────────────────
+    local reason_str=""
+    if [ "${#health_reasons[@]}" -gt 0 ]; then
+        # Join reasons with comma
+        local IFS=','
+        reason_str="${health_reasons[*]}"
+        IFS=$' \t\n'  # restore IFS
+    fi
+
+    local watchdog_state
+    if [ "$health_state" = "healthy" ]; then
+        watchdog_state="healthy"
+    else
+        watchdog_state="${health_state}:${reason_str}"
+    fi
+
+    update_state "watchdogState" "$watchdog_state"
+    update_state "watchdogLastCheck" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    push_metric "WatchdogHealthy" "$( [ "$health_state" = "healthy" ] && echo 1 || echo 0 )" "Count" "Component=Coordinator"
+    echo "[$(date -u +%H:%M:%S)] WATCHDOG: Health state: $watchdog_state"
+}
+
 # ── HTTP Health Endpoint (issue #699) ───────────────────────────────────────
 # Start a background HTTP server that responds to health checks
 # Returns 200 if heartbeat is fresh (< 120s old), 503 if stale
@@ -4440,6 +4594,14 @@ while true; do
     # NOTE (issue #867): Planner-chain liveness check removed.
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime
     # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
+
+    # Every 2 iterations (~60s): Tier 1 mechanical watchdog check (issue #1844)
+    # Detects stuck jobs, proliferation, and coordinator self-health.
+    # Proliferation → activates kill switch automatically (no human needed).
+    # Stuck jobs → posts blocker Thought CR for agent/human investigation.
+    if [ $((iteration % 2)) -eq 0 ]; then
+        watchdog_check
+    fi
 
     # Every 60 iterations (~30 min): cleanup old Thought/Message/Report CRs (issue #1617)
     # Supplements planner-initiated cleanup. The cluster accumulates 4000+ Thoughts and

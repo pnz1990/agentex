@@ -197,6 +197,49 @@ With the coordinator:
 - **#426** — Consensus voting for circuitBreakerLimit (enabled by coordinator)
 - **#415** — Persistent agent identity (coordinator tracks who did what)
 - **#2** — Consensus voting (deprecated, replaced by coordinator-based approach)
+- **#1844** — Multi-tier watchdog chain (Tier 1 inside coordinator)
+
+## Watchdog Chain (issue #1844)
+
+The coordinator implements **Tier 1** of a three-tier watchdog chain:
+
+### Tier 1: Mechanical Heartbeat (`watchdog_check()`, every ~60s)
+
+Inside `coordinator.sh`, runs every 2 iterations. Checks:
+
+1. **Stuck jobs** — jobs running > 30 min → posts blocker Thought CR
+2. **Spawn rate** — > 5 new jobs in 2 min → activates kill switch automatically
+3. **Heartbeat staleness** — own `lastHeartbeat` > 120s old → posts degraded metric
+
+State written to `coordinator-state.watchdogState`:
+- `"healthy"` — all checks pass
+- `"degraded:<reason>"` — potential issues, investigation recommended
+- `"critical:<reason>"` — kill switch activated or severe problem detected
+
+```bash
+# Read Tier 1 watchdog state
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.watchdogState}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.watchdogLastCheck}'
+```
+
+### Tier 2: Triage CronJob (`watchdog-triage-cronjob.yaml`, every 5 min)
+
+An ephemeral Job running `watchdog-triage.sh` from the runner image. Adds:
+
+1. **Agent activity** — recent Thought CRs (freshness check)
+2. **Coordinator health** — reads `lastHeartbeat` and Tier 1 state
+3. **Spawn slot drift** — `spawnSlots` vs `circuitBreakerLimit - activeJobs`
+4. **Unresolved escalations** — `unresolvedDebates` count
+5. **Kill switch status** — whether civilization is currently halted
+
+Posts Thought CRs: `insight` (healthy), `blocker` (degraded/critical).
+Exits 1 on critical → CloudWatch can alarm on failed CronJob runs.
+
+### Tier 3: God-Delegate (every 20 min)
+
+The existing god-delegate loop reads Tier 1 and Tier 2 findings (via Thought CRs
+and `watchdogState`) and applies full intelligence: vision alignment scoring,
+debate quality assessment, and escalation to human via GitHub issue #62.
 
 ## Maintenance
 

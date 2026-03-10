@@ -1,0 +1,99 @@
+# Tier 2 Watchdog Triage CronJob (issue #1844)
+#
+# Runs every 5 minutes to perform AI-assisted health assessment of the civilization.
+# Unlike the Tier 1 mechanical heartbeat (inside coordinator.sh), this is an
+# ephemeral Job with a fresh perspective that checks:
+#   1. Agent activity (recent Thought CRs)
+#   2. Active/stuck job counts
+#   3. Coordinator state consistency
+#   4. Unresolved escalations
+#   5. Kill switch status
+#
+# Health states: HEALTHY → emit metric | DEGRADED → post blocker Thought CR
+#                CRITICAL → post blocker + exit 1 (alerts CloudWatch alarm)
+#
+# Part of the three-tier watchdog chain:
+#   Tier 1: Mechanical heartbeat (coordinator.sh watchdog_check, every ~60s)
+#   Tier 2: This CronJob (every 5 min) — broader context, more checks
+#   Tier 3: God-delegate (every 20 min) — full intelligence, vision alignment
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: watchdog-triage
+  namespace: agentex
+  labels:
+    app: agentex-watchdog
+    agentex/component: watchdog-triage
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5   # Keep more failed history for debugging
+  concurrencyPolicy: Forbid   # Don't run concurrent triage jobs
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300   # Cleanup triage job after 5 minutes
+      backoffLimit: 1                # Only retry once on failure
+      activeDeadlineSeconds: 240     # Kill triage if it takes > 4 minutes
+      template:
+        metadata:
+          labels:
+            app: agentex-watchdog
+            agentex/component: watchdog-triage
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: watchdog-triage
+            image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+            imagePullPolicy: Always
+            command: ["/bin/bash", "/usr/local/bin/watchdog-triage.sh"]
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: false
+              capabilities:
+                drop: ["ALL"]
+            env:
+              - name: NAMESPACE
+                value: agentex
+              - name: BEDROCK_REGION
+                valueFrom:
+                  configMapKeyRef:
+                    name: agentex-constitution
+                    key: awsRegion
+              - name: REPO
+                valueFrom:
+                  configMapKeyRef:
+                    name: agentex-constitution
+                    key: githubRepo
+              - name: S3_BUCKET
+                valueFrom:
+                  configMapKeyRef:
+                    name: agentex-constitution
+                    key: s3Bucket
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: agentex-github-token
+                    key: token
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "500m"
+            volumeMounts:
+              - name: workspace
+                mountPath: /workspace
+          volumes:
+            - name: workspace
+              emptyDir:
+                sizeLimit: 256Mi
