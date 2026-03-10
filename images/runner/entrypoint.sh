@@ -636,6 +636,7 @@ query_thoughts() {
 # to prevent cluster clutter and kubectl performance degradation.
 # Issue #1020: increased list timeout from 10s to 60s (6000+ CRs take 10+ seconds to list)
 # Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
+# Issue #1044: batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
 # Should be called periodically by planners
 cleanup_old_thoughts() {
   local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
@@ -674,17 +675,15 @@ cleanup_old_thoughts() {
     return 0
   fi
   
-  local count=0
-  for thought_name in $old_thoughts; do
-    if kubectl_with_timeout 10 delete thought.kro.run "$thought_name" -n "$NAMESPACE" 2>/dev/null; then
-      count=$((count + 1))
-    fi
-  done
+  # Issue #1044: batch deletion via xargs -n50
+  # One kubectl call per 50 thoughts = ~78 calls for 3876 thoughts (~78s vs ~10+ hours one-by-one)
+  local count
+  count=$(echo "$old_thoughts" | wc -w)
+  log "Deleting $count old thoughts in batches of 50..."
+  echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
   
-  if [ $count -gt 0 ]; then
-    log "Cleaned up $count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
-    post_thought "Cleaned up $count thoughts (tiered TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
-  fi
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
 }
 
 # ── GENERATION 3 PLANNING HELPER FUNCTIONS (issue #786) ──────────────────────
