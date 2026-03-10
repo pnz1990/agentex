@@ -609,6 +609,24 @@ refresh_task_queue() {
         local covered_count
         covered_count=$(echo "$covered_issues" | wc -w | tr -d ' ')
         echo "[$(date -u +%H:%M:%S)] Issue #1384: Found $covered_count issues with open PRs (will skip from queue): ${covered_issues:-none}"
+
+        # Issue #1809: Detect issues with 2+ open PRs and warn via Thought CR.
+        # sort -u above deduplicates so we lose count info. Re-extract without -u to count.
+        local all_covered_raw
+        all_covered_raw=$(echo "$prs_json" | \
+            jq -r '.[].body // ""' 2>/dev/null | \
+            grep -oiE '(closes|fixes|resolves) #[0-9]+' | \
+            grep -oE '[0-9]+' | sort)
+        # Find issues appearing 2+ times (duplicate PRs)
+        local dup_issues
+        dup_issues=$(echo "$all_covered_raw" | uniq -d)
+        if [ -n "$dup_issues" ]; then
+            local dup_count
+            dup_count=$(echo "$dup_issues" | wc -w | tr -d ' ')
+            echo "[$(date -u +%H:%M:%S)] Issue #1809: WARNING — $dup_count issue(s) have 2+ open PRs: ${dup_issues//$'\n'/ }"
+            # Post a warning Thought CR so planners can identify duplicates to close
+            post_coordinator_thought "DUPLICATE PR WARNING (issue #1809): The following issue(s) each have 2+ open PRs, creating duplicate work. Consider closing the older PR for each: ${dup_issues//$'\n'/ }" "insight"
+        fi
     fi
 
     # Build scored list: "score:number"
