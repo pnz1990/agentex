@@ -224,6 +224,19 @@ ensure_state_fields_initialized() {
     fi
   done
 
+  # Issue #1475: agentSpecializations cache — populated by register_with_coordinator() at agent
+  # startup, read by score_agent_for_issue() at routing time. Format:
+  # "agent_name|displayName|label1=count1;label2=count2,...". This solves the ephemerality
+  # problem: new pods start with empty S3 identity files but may represent named agents
+  # (displayName) with prior specialization history. By caching at registration, the coordinator
+  # can route by specialization even for agents on their first task of a new session.
+  agentspec_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.agentSpecializations}' 2>/dev/null)
+  if [ -z "$agentspec_val" ] && ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("agentSpecializations")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing agentSpecializations (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"agentSpecializations":""}}' 2>/dev/null || true
+  fi
+
   # issueLabels: label cache for claimed issues (issue #1268, PR #1298, issue #1316)
   # Format: "issue:label1,label2|issue2:label3|..."
   issuelabels_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.issueLabels}' 2>/dev/null)
@@ -687,6 +700,27 @@ cleanup_active_agents() {
     if [ $removed_count -gt 0 ]; then
         update_state "activeAgents" "$cleaned_agents"
         echo "[$(date -u +%H:%M:%S)] Cleaned $removed_count stale agents from activeAgents list"
+
+        # Issue #1475: Also clean stale entries from agentSpecializations cache.
+        # When agents are removed from activeAgents, remove their specialization cache entries too.
+        # This prevents the cache from growing unbounded over time.
+        local current_spec
+        current_spec=$(get_state "agentSpecializations" 2>/dev/null || echo "")
+        if [ -n "$current_spec" ]; then
+            local cleaned_spec=""
+            IFS=',' read -ra spec_pairs <<< "$current_spec"
+            for spec_pair in "${spec_pairs[@]}"; do
+                [ -z "$spec_pair" ] && continue
+                local spec_agent="${spec_pair%%|*}"
+                # Only keep if agent is still in cleaned_agents list
+                if [ -n "$cleaned_agents" ] && echo "$cleaned_agents" | grep -q "^${spec_agent}:"; then
+                    [ -n "$cleaned_spec" ] \
+                        && cleaned_spec="${cleaned_spec},${spec_pair}" \
+                        || cleaned_spec="$spec_pair"
+                fi
+            done
+            update_state "agentSpecializations" "$cleaned_spec"
+        fi
     fi
 }
 
@@ -2003,8 +2037,61 @@ score_agent_for_issue() {
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    # Optional: pre-fetched agentSpecializations cache from coordinator-state
+    # Passed by find_best_agent_for_issue() to avoid N separate get_state() calls
+    local agent_spec_cache="${5:-}"
 
-    # Read agent identity from S3
+    # Issue #1475: Check agentSpecializations cache FIRST before fetching S3 by agent_name.
+    # Root cause: S3 identities are keyed by agent_name (e.g., worker-1773138105) which is a
+    # NEW ephemeral name each pod. The S3 file for a new agent is empty until it completes work.
+    # register_with_coordinator() pushes specialization into agentSpecializations at startup,
+    # so here we use that cache — which was populated from the agent's PRIOR S3 identity
+    # (looked up by AGENT_IDENTITY_FILE which uses the displayName-keyed S3 path).
+    #
+    # Cache format (in agentSpecializations): "agent_name|displayName|label1=count1;label2=count2"
+    # Multiple entries are comma-separated.
+    local cached_spec=""
+    if [ -n "$agent_spec_cache" ]; then
+        # Look up this agent in the pre-fetched cache
+        cached_spec=$(echo "$agent_spec_cache" | tr ',' '\n' | grep "^${agent_name}|" | head -1 || true)
+    fi
+    if [ -z "$cached_spec" ] && [ -n "$AGENT_SPEC_CACHE" ]; then
+        # Fallback: check module-level cache (if set by find_best_agent_for_issue)
+        cached_spec=$(echo "$AGENT_SPEC_CACHE" | tr ',' '\n' | grep "^${agent_name}|" | head -1 || true)
+    fi
+
+    if [ -n "$cached_spec" ]; then
+        # Parse cached specialization: "agent_name|displayName|label1=count1;label2=count2"
+        local label_counts_str
+        label_counts_str=$(echo "$cached_spec" | cut -d'|' -f3)
+        if [ -n "$label_counts_str" ]; then
+            local score=0
+            # Score label matches from cache (weight 3 each)
+            if [ -n "$issue_labels" ]; then
+                IFS=',' read -ra label_arr <<< "$issue_labels"
+                for label in "${label_arr[@]}"; do
+                    label=$(echo "$label" | tr -d ' ')
+                    [ -z "$label" ] && continue
+                    # Find count for this label in cache string
+                    local label_count
+                    label_count=$(echo "$label_counts_str" | tr ';' '\n' | grep "^${label}=" | cut -d'=' -f2 | head -1 || echo "0")
+                    [[ "$label_count" =~ ^[0-9]+$ ]] || label_count=0
+                    if [ "$label_count" -gt 0 ]; then
+                        score=$((score + 3))
+                    fi
+                done
+            fi
+            echo "[$(date -u +%H:%M:%S)] score_agent_for_issue: $agent_name cache-hit score=$score (labels=$label_counts_str)" >&2
+            echo "$score"
+            return 0
+        fi
+    fi
+
+    # Fallback: Read agent identity from S3 by agent_name.
+    # NOTE: For new (ephemeral) agents, this file will be empty until they complete their first task.
+    # Issue #1475: This S3 fallback only works for agents that have PREVIOUSLY been named agents
+    # (displayName agents whose current S3 identity file has been updated). For brand-new pods,
+    # the agentSpecializations cache (populated at registration) is the correct path.
     local identity_json
     identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
         --region "$BEDROCK_REGION" 2>/dev/null || echo "")
@@ -2117,12 +2204,24 @@ find_best_agent_for_issue() {
         return 0
     fi
 
+    # Issue #1475: Pre-fetch agentSpecializations cache once for all agents in this cycle.
+    # This avoids N redundant get_state() calls (one per agent) and provides the
+    # registration-time specialization data that score_agent_for_issue() needs.
+    # Without this, each score call fetches S3 by agent_name — which is empty for new pods.
+    local agent_spec_cache
+    agent_spec_cache=$(get_state "agentSpecializations" 2>/dev/null || echo "")
+
     # Extract issue keywords (limit API calls by calling once)
     local issue_keywords
     issue_keywords=$(extract_issue_keywords "$issue_number")
 
     local best_agent=""
     local best_score=0
+
+    # Issue #1478: Pre-fetch activeAssignments once outside the inner loop to avoid
+    # N redundant get_state() calls (one per agent).
+    local assignments
+    assignments=$(get_state "activeAssignments")
 
     IFS=',' read -ra agent_pairs <<< "$active_agents"
     for pair in "${agent_pairs[@]}"; do
@@ -2134,15 +2233,14 @@ find_best_agent_for_issue() {
         [ "$agent_role" != "worker" ] && continue
 
         # Don't route to agents that already have assignments
-        local assignments
-        assignments=$(get_state "activeAssignments")
         if echo "$assignments" | grep -q "${agent_name}:"; then
             continue
         fi
 
         local agent_score
+        # Issue #1475: Pass pre-fetched agentSpecializations cache to avoid S3 lookup by agent_name
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+            "$issue_labels" "$issue_keywords" "$agent_spec_cache")
 
         echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
 

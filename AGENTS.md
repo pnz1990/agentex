@@ -1070,6 +1070,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `genericAssignments`: Cumulative count of tasks assigned generically (issue #1113)
 - `lastSpecializedRouting`: ISO 8601 timestamp of most recent specialized routing decision (issue #1113)
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
+- `agentSpecializations`: Comma-separated specialization cache populated at agent registration time (issue #1475). Format: `agent_name|displayName|label1=count1;label2=count2`. Enables coordinator routing to use prior specialization history even for new (ephemeral) agent pods whose S3 identity files are empty. Stale entries cleaned when agents are removed from activeAgents.
 - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
 - `debateStats`: Aggregated debate statistics string (e.g., `responses=191 threads=110 disagree=37 synthesize=17`) — updated by coordinator debate tracking

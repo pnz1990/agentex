@@ -1747,6 +1747,12 @@ release_coordinator_task() {
 }
 
 # register_with_coordinator() - Announce this agent's presence to the coordinator
+# Issue #1475: Also push specializationLabelCounts into agentSpecializations cache
+# so the coordinator can route tasks by specialization at routing time (not S3 lookup time).
+# This fixes the ephemerality problem: new agent pods start with empty S3 identity files
+# but may represent named agents (displayName) with prior specialization history.
+# By pushing the specialization from S3 identity into coordinator state at registration,
+# routing can score agents based on their PRIOR history — not their current (empty) pod.
 register_with_coordinator() {
   local current
   current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
@@ -1781,6 +1787,41 @@ register_with_coordinator() {
   
   log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE})"
   [ "${AGENT_ROLE}" = "planner" ] && log "Coordinator: updated lastPlannerSeen=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Issue #1475: Push specialization data into coordinator-state.agentSpecializations cache.
+  # Only push if we have an S3 identity with specializationLabelCounts (workers only — planners
+  # don't work on labeled issues so they won't have relevant specialization data).
+  if [ "${AGENT_ROLE}" = "worker" ] && [ -n "${AGENT_IDENTITY_FILE:-}" ]; then
+    local spec_labels_json
+    spec_labels_json=$(aws s3 cp "${AGENT_IDENTITY_FILE}" - \
+      --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null | \
+      jq -r '.specializationLabelCounts // {}' 2>/dev/null || echo "")
+    if [ -n "$spec_labels_json" ] && [ "$spec_labels_json" != "{}" ] && [ "$spec_labels_json" != "null" ]; then
+      # Build compact label counts string: "label1=count1;label2=count2"
+      local label_counts
+      label_counts=$(echo "$spec_labels_json" | jq -r 'to_entries | map("\(.key)=\(.value)") | join(";")' 2>/dev/null || echo "")
+      if [ -n "$label_counts" ]; then
+        local display_name="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
+        # Format: "agent_name|displayName|label1=count1;label2=count2"
+        local spec_entry="${AGENT_NAME}|${display_name}|${label_counts}"
+        # Append to agentSpecializations (remove stale entry for this agent first)
+        local current_spec
+        current_spec=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+          -o jsonpath='{.data.agentSpecializations}' 2>/dev/null || echo "")
+        # Remove prior entry for this agent_name (deduplicate), then add fresh
+        local new_spec
+        new_spec=$(echo "$current_spec" | tr ',' '\n' | grep -v "^${AGENT_NAME}|" || true)
+        new_spec=$(echo "$new_spec" | tr '\n' ',' | sed 's/^,//;s/,$//')
+        [ -n "$new_spec" ] && new_spec="${new_spec},${spec_entry}" || new_spec="${spec_entry}"
+        # Sanitize: escape double quotes
+        new_spec=$(printf '%s' "$new_spec" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g' | sed 's/[[:space:]]*$//')
+        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+          --type=merge -p "{\"data\":{\"agentSpecializations\":\"${new_spec}\"}}" 2>/dev/null || true
+        log "Coordinator: pushed specialization cache for ${display_name} (${label_counts})"
+      fi
+    fi
+  fi
+
   return 0
 }
 
