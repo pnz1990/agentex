@@ -2920,9 +2920,9 @@ check_v05_milestone() {
 
     if [ "$promoted_count" -ge 3 ]; then
         criteria_met=$((criteria_met + 1))
-        criteria_report="${criteria_report}✅ Criterion 1: Dynamic role promotions — ${promoted_count} agents promoted\n"
+        criteria_report="${criteria_report}✅ Criterion 1: Dynamic role promotions — ${promoted_count} agents promoted"$'\n'
     else
-        criteria_report="${criteria_report}⏳ Criterion 1: Dynamic role promotions — ${promoted_count}/3 agents promoted\n"
+        criteria_report="${criteria_report}⏳ Criterion 1: Dynamic role promotions — ${promoted_count}/3 agents promoted"$'\n'
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 1: ${promoted_count} agents with promotedRole (need 3)"
 
@@ -2939,9 +2939,9 @@ check_v05_milestone() {
 
     if [ "$edge_count" -ge 5 ]; then
         criteria_met=$((criteria_met + 1))
-        criteria_report="${criteria_report}✅ Criterion 2: Trust graph — ${edge_count} citation edges\n"
+        criteria_report="${criteria_report}✅ Criterion 2: Trust graph — ${edge_count} citation edges"$'\n'
     else
-        criteria_report="${criteria_report}⏳ Criterion 2: Trust graph — ${edge_count}/5 citation edges\n"
+        criteria_report="${criteria_report}⏳ Criterion 2: Trust graph — ${edge_count}/5 citation edges"$'\n'
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 2: ${edge_count} trust graph edges (need 5)"
 
@@ -2961,9 +2961,9 @@ check_v05_milestone() {
 
     if [ "$proactive_count" -ge 2 ]; then
         criteria_met=$((criteria_met + 1))
-        criteria_report="${criteria_report}✅ Criterion 3: Proactive issue discovery — ${proactive_count} agents discovered issues\n"
+        criteria_report="${criteria_report}✅ Criterion 3: Proactive issue discovery — ${proactive_count} agents discovered issues"$'\n'
     else
-        criteria_report="${criteria_report}⏳ Criterion 3: Proactive issue discovery — ${proactive_count}/2 agents with proactiveIssuesFound > 0\n"
+        criteria_report="${criteria_report}⏳ Criterion 3: Proactive issue discovery — ${proactive_count}/2 agents with proactiveIssuesFound > 0"$'\n'
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 3: ${proactive_count} agents with proactiveIssuesFound > 0 (need 2)"
 
@@ -2985,9 +2985,9 @@ check_v05_milestone() {
 
     if [ "$mentor_credit_count" -ge 1 ]; then
         criteria_met=$((criteria_met + 1))
-        criteria_report="${criteria_report}✅ Criterion 4: Mentor credit loop — ${mentor_credit_count} mentor(s) credited\n"
+        criteria_report="${criteria_report}✅ Criterion 4: Mentor credit loop — ${mentor_credit_count} mentor(s) credited"$'\n'
     else
-        criteria_report="${criteria_report}⏳ Criterion 4: Mentor credit loop — no mentors credited yet\n"
+        criteria_report="${criteria_report}⏳ Criterion 4: Mentor credit loop — no mentors credited yet"$'\n'
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 4: ${mentor_credit_count} agents with mentorCredits > 0 (need 1)"
 
@@ -3002,9 +3002,9 @@ check_v05_milestone() {
 
     if [ "$vql_count" -ge 2 ]; then
         criteria_met=$((criteria_met + 1))
-        criteria_report="${criteria_report}✅ Criterion 5: Vision queue proposer identity — ${vql_count} items in visionQueueLog\n"
+        criteria_report="${criteria_report}✅ Criterion 5: Vision queue proposer identity — ${vql_count} items in visionQueueLog"$'\n'
     else
-        criteria_report="${criteria_report}⏳ Criterion 5: Vision queue proposer identity — ${vql_count}/2 items in visionQueueLog\n"
+        criteria_report="${criteria_report}⏳ Criterion 5: Vision queue proposer identity — ${vql_count}/2 items in visionQueueLog"$'\n'
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 5: ${vql_count} items in visionQueueLog (need 2)"
 
@@ -3012,7 +3012,9 @@ check_v05_milestone() {
     local status_summary="${criteria_met}/5 criteria met"
     # Sanitize for JSON (escape backslashes and newlines)
     local safe_report
-    safe_report=$(printf '%s' "$criteria_report" | tr '\n' ' ' | sed 's/"/\\"/g' | tr -s ' ')
+    # Issue #1769: criteria_report uses $'\n' (actual newlines) as delimiter — convert to ' | '
+    # so the stored v05CriteriaStatus is human-readable as a single kubectl jsonpath output.
+    safe_report=$(printf '%s' "$criteria_report" | tr '\n' '|' | sed 's/|$//;s/|/ | /g;s/"/\\"/g')
     local safe_status
     safe_status=$(printf '%s' "${status_summary} | ${safe_report}" | tr '\n' ' ' | sed 's/"/\\"/g')
     kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
