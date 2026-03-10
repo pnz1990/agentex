@@ -737,5 +737,171 @@ EOF
   log "Vision feature proposed: issue #$issue_number ('$safe_name') — awaiting 3+ votes"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature available"
+# ── query_thoughts ───────────────────────────────────────────────────────────
+# Query thoughts by topic, type, confidence, or file path.
+# Use this from OpenCode bash context to find relevant peer thoughts.
+# AGENTS.md mandates querying specific thoughts by topic before working.
+#
+# Usage: query_thoughts [--topic TOPIC] [--type TYPE] [--min-confidence N] [--file PATH] [--limit N]
+# Returns: formatted thoughts matching the criteria
+#
+# Example:
+#   source /agent/helpers.sh && query_thoughts --topic "circuit-breaker" --min-confidence 8
+#   source /agent/helpers.sh && query_thoughts --file "entrypoint.sh" --type "blocker"
+#   source /agent/helpers.sh && query_thoughts --type "decision" --min-confidence 9 --limit 10
+query_thoughts() {
+  local topic="" type="" min_conf=7 file_path="" limit=20
+
+  # Parse arguments
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --topic) topic="$2"; shift 2 ;;
+      --type) type="$2"; shift 2 ;;
+      --min-confidence) min_conf="$2"; shift 2 ;;
+      --file) file_path="$2"; shift 2 ;;
+      --limit) limit="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  # Build label selector
+  local labels=""
+  [ -n "$topic" ] && labels="${labels}agentex/topic=${topic},"
+  [ -n "$type" ] && labels="${labels}agentex/type=${type},"
+  [ -n "$file_path" ] && labels="${labels}agentex/file=${file_path},"
+  labels="${labels%,}"  # Remove trailing comma
+
+  # Query thoughts
+  local selector_arg=""
+  [ -n "$labels" ] && selector_arg="-l ${labels}"
+
+  kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" \
+    $selector_arg \
+    --sort-by=.metadata.creationTimestamp \
+    -o json 2>/dev/null | jq -r \
+    --argjson min_conf "$min_conf" \
+    --argjson limit "$limit" \
+    --arg name "$AGENT_NAME" \
+    '.items |
+     map(select(.spec.confidence >= $min_conf)) |
+     map(select(.spec.agentRef != $name)) |
+     .[-$limit:] |
+     .[] |
+     "[\(.spec.agentRef)/\(.spec.thoughtType)/c=\(.spec.confidence)] \(.spec.content)"' \
+    2>/dev/null || true
+}
+
+# ── cleanup_old_thoughts ─────────────────────────────────────────────────────
+# Delete thoughts older than 24 hours (or 2h for low-signal types like
+# blockers and observations) to prevent cluster clutter and kubectl performance
+# degradation. Planners should call this periodically.
+#
+# Low-signal types (blocker, observation): 2h TTL
+# High-signal types (insight, decision, debate, proposal, vote): 24h TTL
+#
+# Usage: cleanup_old_thoughts
+cleanup_old_thoughts() {
+  local cutoff_24h
+  cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_2h
+  cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ]; then
+    log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
+    return 0
+  fi
+
+  # Use 60s timeout to handle large clusters (6000+ CRs take 10+ seconds to list)
+  local all_thoughts_json
+  all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+  if [ -z "$all_thoughts_json" ]; then
+    log "No thoughts found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  # Tiered TTL: low-signal types (blocker, observation) expire after 2h
+  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  local old_thoughts
+  old_thoughts=$(echo "$all_thoughts_json" | jq -r \
+    --arg cutoff_24h "$cutoff_24h" \
+    --arg cutoff_2h "$cutoff_2h" \
+    '.items[] |
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+      then $cutoff_2h
+      else $cutoff_24h
+      end) as $cutoff |
+     select(.metadata.creationTimestamp < $cutoff) |
+     .metadata.name' 2>/dev/null || true)
+
+  if [ -z "$old_thoughts" ]; then
+    log "No old thoughts to clean up"
+    return 0
+  fi
+
+  # Batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
+  local count
+  count=$(echo "$old_thoughts" | wc -w)
+  log "Deleting $count old thoughts in batches of 50..."
+  echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance" 2>/dev/null || true
+}
+
+# ── cleanup_old_messages ─────────────────────────────────────────────────────
+# Delete read messages older than 24h, unread messages older than 48h
+# to prevent unbounded accumulation. Planners should call periodically.
+#
+# Read messages: 24h TTL
+# Unread messages: 48h TTL (safety buffer)
+#
+# Usage: cleanup_old_messages
+cleanup_old_messages() {
+  local cutoff_24h
+  cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_48h
+  cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_48h" ]; then
+    log "WARNING: Cannot calculate cutoff time for message cleanup (date command incompatible)"
+    return 0
+  fi
+
+  # Get all messages
+  local all_messages_json
+  all_messages_json=$(kubectl_with_timeout 30 get messages -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+  if [ -z "$all_messages_json" ]; then
+    log "No messages found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  # Delete read messages older than 24h, unread messages older than 48h
+  local old_messages
+  old_messages=$(echo "$all_messages_json" | jq -r \
+    --arg cutoff_24h "$cutoff_24h" \
+    --arg cutoff_48h "$cutoff_48h" \
+    '.items[] |
+     (if (.status.read // "false") == "true"
+      then $cutoff_24h
+      else $cutoff_48h
+      end) as $cutoff |
+     select(.metadata.creationTimestamp < $cutoff) |
+     .metadata.name' 2>/dev/null || true)
+
+  if [ -z "$old_messages" ]; then
+    log "No old messages to clean up"
+    return 0
+  fi
+
+  local count
+  count=$(echo "$old_messages" | wc -w)
+  log "Deleting $count old messages in batches of 50..."
+  echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+
+  log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
