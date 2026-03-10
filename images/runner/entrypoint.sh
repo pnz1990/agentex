@@ -951,6 +951,49 @@ cleanup_old_messages() {
   log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
 }
 
+# cleanup_old_reports() - Delete Report CRs older than 48 hours
+# to prevent unbounded accumulation (issue #1562: 1612+ reports with no cleanup)
+# Report CRs contain exit summaries; 48h TTL preserves recent history for god-observer
+# while preventing cluster resource exhaustion.
+# Uses batch deletion (xargs -n50) consistent with cleanup_old_thoughts() (issue #1044)
+# Should be called periodically by planners
+cleanup_old_reports() {
+  local cutoff_48h
+  cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_48h" ]; then
+    log "WARNING: Cannot calculate cutoff time for report cleanup (date command incompatible)"
+    return 0
+  fi
+
+  # Get all reports
+  local all_reports_json
+  all_reports_json=$(kubectl_with_timeout 60 get reports.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+  if [ -z "$all_reports_json" ]; then
+    log "No reports found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  # Delete reports older than 48h
+  local old_reports
+  old_reports=$(echo "$all_reports_json" | jq -r \
+    --arg cutoff "$cutoff_48h" \
+    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
+
+  if [ -z "$old_reports" ]; then
+    log "No old reports to clean up"
+    return 0
+  fi
+
+  local count
+  count=$(echo "$old_reports" | wc -w)
+  log "Deleting $count old reports in batches of 50..."
+  echo "$old_reports" | xargs -n 50 kubectl delete reports.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+
+  log "Cleaned up ~$count reports older than 48h TTL"
+}
+
 # ── GENERATION 3 PLANNING HELPER FUNCTIONS (issue #786) ──────────────────────
 # Multi-generation planning: agents reason about 3-step futures (N, N+1, N+2)
 # Persistent planning state stored in S3 enables coordination across time
@@ -2939,6 +2982,9 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      
      log "Planner: cleaning up old messages..."
      cleanup_old_messages
+
+     log "Planner: cleaning up old reports (48h TTL)..."
+     cleanup_old_reports
      
      # Security alert check (issue #652) - constitution-mandated self-awareness
      check_security_alerts
