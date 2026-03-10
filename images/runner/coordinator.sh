@@ -868,6 +868,109 @@ Vision score: 9/10 — prioritize implementation."
     done <<< "$topics"
 }
 
+# record_synthesis_debates_to_s3: Write synthesis debate thoughts to S3 for collective memory
+# Issue #1161: Coordinator is the authoritative S3 writer for debate outcomes because it sees
+# ALL synthesis thoughts, including manually-posted ones that bypass post_debate_response().
+#
+# Thread ID: sha256(parentRef)[0:16] — same algorithm as post_debate_response() in entrypoint.sh
+# S3 path: s3://${IDENTITY_BUCKET}/debates/<thread_id>.json
+# Idempotent: skips threads already written to S3
+record_synthesis_debates_to_s3() {
+    local s3_bucket="${IDENTITY_BUCKET:-agentex-thoughts}"
+    local namespace="${NAMESPACE:-agentex}"
+
+    # Fetch synthesis debate thoughts with FULL content (not truncated)
+    local synthesis_thoughts
+    synthesis_thoughts=$(kubectl_with_timeout 10 get configmaps -n "$namespace" -l agentex/thought -o json 2>/dev/null \
+        | jq -r '[.items[] | select(.data.thoughtType == "debate") |
+            select((.data.content // "") | test("synthes(is|ize)"; "i")) |
+            {
+                name: .metadata.name,
+                parent: (.data.parentRef // ""),
+                agent: (.data.agentRef // ""),
+                content: (.data.content // ""),
+                timestamp: .metadata.creationTimestamp
+            }]' 2>/dev/null) || return 0
+
+    [ -z "$synthesis_thoughts" ] || [ "$synthesis_thoughts" = "null" ] || [ "$synthesis_thoughts" = "[]" ] && return 0
+
+    local synth_count
+    synth_count=$(echo "$synthesis_thoughts" | jq 'length' 2>/dev/null || echo "0")
+    echo "[$(date -u +%H:%M:%S)] Recording $synth_count synthesis debates to S3"
+
+    # Process each synthesis thought
+    local idx=0
+    while [ "$idx" -lt "$synth_count" ]; do
+        local thought_name parent_ref agent_name content timestamp
+        thought_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].name" 2>/dev/null || echo "")
+        parent_ref=$(echo "$synthesis_thoughts" | jq -r ".[$idx].parent" 2>/dev/null || echo "")
+        agent_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].agent" 2>/dev/null || echo "coordinator")
+        content=$(echo "$synthesis_thoughts" | jq -r ".[$idx].content" 2>/dev/null || echo "")
+        timestamp=$(echo "$synthesis_thoughts" | jq -r ".[$idx].timestamp" 2>/dev/null || echo "")
+
+        # Use same thread_id algorithm as post_debate_response() in entrypoint.sh
+        # thread_id = sha256(parent_thought_name)[0:16]
+        local raw_parent="${parent_ref:-${thought_name}}"
+        local thread_id
+        thread_id=$(echo "$raw_parent" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+
+        local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
+
+        # Idempotent: skip if already written to S3
+        if aws s3 ls "$s3_path" >/dev/null 2>&1; then
+            idx=$((idx + 1))
+            continue
+        fi
+
+        # Extract topic from thought content (look for #proposal- or common keywords)
+        local topic=""
+        if echo "$content" | grep -qi "circuit.breaker"; then
+            topic="circuit-breaker"
+        elif echo "$content" | grep -qi "spawn"; then
+            topic="spawn-control"
+        elif echo "$content" | grep -qi "speciali"; then
+            topic="specialization"
+        elif echo "$content" | grep -qi "debate"; then
+            topic="debate-protocol"
+        elif echo "$content" | grep -qi "coordinator"; then
+            topic="coordinator"
+        fi
+
+        # Truncate content to first 500 chars for resolution field
+        local resolution
+        resolution=$(echo "$content" | head -c 500)
+
+        # Escape JSON special characters in resolution text
+        local escaped_resolution
+        escaped_resolution=$(echo "$resolution" | jq -Rs '.')
+
+        # Build JSON document
+        local debate_json
+        debate_json=$(cat <<EOF
+{
+  "threadId": "$thread_id",
+  "topic": "$topic",
+  "outcome": "synthesized",
+  "resolution": $escaped_resolution,
+  "participants": ["$agent_name"],
+  "timestamp": "$timestamp",
+  "recordedBy": "coordinator",
+  "thoughtName": "$thought_name",
+  "parentRef": "$parent_ref"
+}
+EOF
+)
+        # Write to S3
+        if echo "$debate_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
+            echo "[$(date -u +%H:%M:%S)] Recorded synthesis debate: thread=$thread_id agent=$agent_name topic=$topic"
+        else
+            echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write debate outcome for thread=$thread_id"
+        fi
+
+        idx=$((idx + 1))
+    done
+}
+
 # Track debate activity — count debate threads, surface unresolved disagreements
 track_debate_activity() {
     local all_cm
@@ -904,6 +1007,15 @@ track_debate_activity() {
     synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))] | length' 2>/dev/null || echo "0")
 
     echo "[$(date -u +%H:%M:%S)] Debate stats: responses=$debate_count threads=$thread_count disagree=$disagree_count synthesize=$synthesize_count"
+
+    # ── Issue #1161: Write synthesis debate outcomes to S3 for collective memory ──
+    # The coordinator is the authoritative writer for debate memory because it sees ALL
+    # synthesis thoughts — including those posted manually via kubectl (which bypass
+    # post_debate_response() and its S3 write). This ensures the debates/ folder in S3
+    # is populated even when agents don't use the canonical helper function.
+    if [ "$synthesize_count" -gt 0 ]; then
+        record_synthesis_debates_to_s3
+    fi
 
     update_state "debateStats" "responses=${debate_count} threads=${thread_count} disagree=${disagree_count} synthesize=${synthesize_count}"
     push_metric "DebateResponses" "$debate_count" "Count" "Component=Coordinator"
