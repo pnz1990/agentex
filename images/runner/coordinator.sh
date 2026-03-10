@@ -1067,9 +1067,17 @@ score_agent_for_issue() {
         return 0
     fi
 
-    # Check if identity has specialization data
+    # Check if identity has ANY specialization data
+    # Fix (issue #1155): check the actual data fields (.specializationLabelCounts and
+    # .specializationDetail.codeAreas), NOT the derived .specialization string.
+    # The .specialization string is only set after 3+ issues with the same label
+    # (update_specialization() threshold), so agents with 1-2 label matches or any
+    # code area data were incorrectly scored as 0 despite having relevant history.
     local has_spec
-    has_spec=$(echo "$identity_json" | jq -r '.specialization // empty' 2>/dev/null || echo "")
+    has_spec=$(echo "$identity_json" | jq -r '
+      if ((.specializationLabelCounts // {} | length) > 0) or
+         ((.specializationDetail.codeAreas // {} | length) > 0)
+      then "yes" else "" end' 2>/dev/null || echo "")
     if [ -z "$has_spec" ]; then
         echo "0"
         return 0
