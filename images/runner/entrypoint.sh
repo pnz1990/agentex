@@ -306,6 +306,13 @@ cleanup_agent_cr_on_exit() {
   fi
   
   log "EXIT trap: cleaning up Agent CR $AGENT_NAME (exit_code=$exit_code)"
+
+  # Step 0: Release identity name back to registry so future agents can reuse it.
+  # Issue #1483: names were permanently claimed — this releases them on every exit path.
+  # Must run BEFORE Agent CR deletion to avoid kubectl failures after AGENT_NAME CR is gone.
+  if type release_identity &>/dev/null; then
+    release_identity || log "WARNING: release_identity failed (non-fatal)"
+  fi
   
   # Step 1: Remove kro finalizer so deletion is not blocked
   # kro adds kro.run/finalizer to Agent CRs. If kro is busy/restarting,
