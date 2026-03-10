@@ -2219,8 +2219,10 @@ track_debate_activity() {
             [ -z "$thought_name" ] && continue
             { [ -z "$parent_ref" ] || [ "$parent_ref" = "null" ]; } && continue
 
-            # Use parentRef as thread_id (consistent with entrypoint.sh record_debate_outcome)
-            local thread_id="$parent_ref"
+            # Use sha256(parentRef)[0:16] as thread_id — consistent with post_debate_response()
+            # in helpers.sh and record_synthesis_debates_to_s3() (issue #1640)
+            local thread_id
+            thread_id=$(echo "$parent_ref" | sha256sum | cut -d' ' -f1 | cut -c1-16)
             local s3_path="s3://${IDENTITY_BUCKET}/debates/${thread_id}.json"
 
             # Issue #1625: Check against prefetched list (no S3 API call per debate)
