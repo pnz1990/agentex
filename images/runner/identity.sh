@@ -162,6 +162,9 @@ save_identity() {
   local prs_merged=0
   local thoughts_posted=0
   local spec_label_counts="{}"
+  local spec_code_areas="{}"
+  local spec_debates_won=0
+  local spec_synthesis_count=0
   
   if [[ -n "$existing_json" ]]; then
     tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
@@ -169,6 +172,9 @@ save_identity() {
     prs_merged=$(echo "$existing_json" | jq -r '.stats.prsMerged // 0')
     thoughts_posted=$(echo "$existing_json" | jq -r '.stats.thoughtsPosted // 0')
     spec_label_counts=$(echo "$existing_json" | jq -c '.specializationLabelCounts // {}')
+    spec_code_areas=$(echo "$existing_json" | jq -c '.specializationDetail.codeAreas // {}')
+    spec_debates_won=$(echo "$existing_json" | jq -r '.specializationDetail.debatesWon // 0')
+    spec_synthesis_count=$(echo "$existing_json" | jq -r '.specializationDetail.synthesisCount // 0')
   fi
   
   local specialization_value="${AGENT_SPECIALIZATION:-}"
@@ -183,6 +189,11 @@ save_identity() {
   "claimedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "specialization": "$specialization_value",
   "specializationLabelCounts": $spec_label_counts,
+  "specializationDetail": {
+    "codeAreas": $spec_code_areas,
+    "debatesWon": $spec_debates_won,
+    "synthesisCount": $spec_synthesis_count
+  },
   "stats": {
     "tasksCompleted": $tasks_completed,
     "issuesFiled": $issues_filed,
@@ -317,6 +328,139 @@ update_specialization() {
   else
     echo "[identity] WARNING: Could not save specialization update to S3"
   fi
+}
+
+#######################################
+# Update code area specialization from a PR's changed files
+# Call this after opening/merging a PR to track which parts of the codebase
+# the agent has worked on.
+# Arguments:
+#   $1 - pr_number (GitHub PR number, optional)
+# Globals:
+#   AGENT_IDENTITY_FILE, REPO
+#######################################
+update_code_area_specialization() {
+  local pr_number="${1:-}"
+  
+  if [[ -z "$pr_number" ]] || [[ "$pr_number" == "none" ]] || [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    return 0
+  fi
+  
+  # Fetch changed files from the PR
+  local changed_files
+  changed_files=$(gh pr view "$pr_number" --repo "${REPO:-}" --json files \
+    --jq '.files[].path' 2>/dev/null || echo "")
+  
+  if [[ -z "$changed_files" ]]; then
+    echo "[identity] No changed files found for PR #$pr_number"
+    return 0
+  fi
+  
+  # Extract unique top-level directories
+  local code_areas
+  code_areas=$(echo "$changed_files" | sed -E 's|^([^/]+)/.*|\1|' | sort -u)
+  
+  if [[ -z "$code_areas" ]]; then
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity for code area update"
+    return 0
+  fi
+  
+  # Update code area counts
+  local updated_json="$identity_json"
+  while IFS= read -r area; do
+    [[ -z "$area" ]] && continue
+    updated_json=$(echo "$updated_json" | jq \
+      --arg area "$area" \
+      '.specializationDetail.codeAreas[$area] = (.specializationDetail.codeAreas[$area] // 0) + 1')
+  done <<< "$code_areas"
+  
+  # Save back to S3
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    echo "[identity] Updated code area specialization: PR #$pr_number"
+  else
+    echo "[identity] WARNING: Could not save code area update to S3"
+  fi
+}
+
+#######################################
+# Update debate specialization counters
+# Call this after posting a debate response to track synthesis contributions.
+# Arguments:
+#   $1 - stance (synthesize | agree | disagree)
+# Globals:
+#   AGENT_IDENTITY_FILE
+#######################################
+update_debate_specialization() {
+  local stance="${1:-}"
+  
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    return 0
+  fi
+  
+  # Only track synthesis (not agree/disagree — those are lower signal)
+  if [[ "$stance" != "synthesize" ]]; then
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity for debate specialization update"
+    return 0
+  fi
+  
+  # Increment synthesisCount
+  local updated_json
+  updated_json=$(echo "$identity_json" | jq \
+    '.specializationDetail.synthesisCount = (.specializationDetail.synthesisCount // 0) + 1')
+  
+  # Save back to S3
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    echo "[identity] Updated debate specialization: synthesisCount incremented"
+  else
+    echo "[identity] WARNING: Could not save debate specialization update to S3"
+  fi
+}
+
+#######################################
+# Get top specializations for display in Report CR
+# Returns a JSON array of top specializations across labels and code areas.
+# Top 3 by count, including synthesis activity.
+# Globals:
+#   AGENT_IDENTITY_FILE
+#######################################
+get_top_specializations() {
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    echo "[]"
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[]"
+    return 0
+  fi
+  
+  # Extract top 3 specializations from labels and code areas
+  echo "$identity_json" | jq -c '
+    [
+      (.specializationLabelCounts // {} | to_entries | map({type: "label", name: .key, count: .value})),
+      (.specializationDetail.codeAreas // {} | to_entries | map({type: "codeArea", name: .key, count: .value}))
+    ] | flatten | sort_by(-.count) | .[0:3]
+  '
 }
 
 #######################################

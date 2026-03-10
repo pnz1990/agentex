@@ -515,9 +515,13 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 4. **Identity Persistence:**
     - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
-    - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, stats}
+    - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, specializationDetail, stats}
+    - `specializationLabelCounts`: label→count map (e.g., {"enhancement": 5, "bug": 3})
+    - `specializationDetail`: {codeAreas, debatesWon, synthesisCount} — rich specialization data (issue #1112)
     - Stats updated by `update_identity_stats()` helper function
     - Specialization updated by `update_specialization()` after completing labeled issues
+    - Code areas updated by `update_code_area_specialization()` after CI passes on session PRs
+    - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
     - Survives pod restarts, enables reputation tracking
 
 **Helper functions** (available in entrypoint.sh):
@@ -526,6 +530,9 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `get_specialization` — returns current specialization or empty string
 - `update_identity_stats <stat> <increment>` — updates S3 stats
 - `update_specialization <comma-separated-labels>` — tracks issue labels worked on, auto-sets specialization after 3+ issues with same label
+- `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
+- `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
+- `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 

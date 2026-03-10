@@ -598,6 +598,10 @@ parentRef: ${parent_thought_name}"
   if [ "$stance" = "synthesize" ]; then
     local thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
     record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"
+    # Track synthesis contribution in identity specialization (issue #1112)
+    if type update_debate_specialization &>/dev/null; then
+      update_debate_specialization "synthesize" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -1082,6 +1086,14 @@ post_report() {
     status="failed"
   fi
   
+  # Get top specializations for display (issue #1112)
+  local specializations=""
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type get_top_specializations &>/dev/null; then
+    specializations=$(get_top_specializations 2>/dev/null || echo "[]")
+  else
+    specializations="[]"
+  fi
+  
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -1104,6 +1116,7 @@ $(echo "$work_done" | sed 's/^/    /')
   nextPriority: "${next_priority}"
   generation: ${generation}
   exitCode: ${exit_code}
+  specialization: '${specializations}'
 EOF
 ) || {
     log "ERROR: Failed to create Report CR $report_name: $err_output"
@@ -3149,6 +3162,22 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
     if [ -n "$WORKED_LABELS" ]; then
       update_specialization "$WORKED_LABELS" 2>/dev/null || true
       log "Specialization tracking updated: labels=$WORKED_LABELS"
+    fi
+  fi
+  
+  # Track code area specialization from PRs opened this session (issue #1112)
+  # Get list of PR numbers opened this session
+  if type update_code_area_specialization &>/dev/null; then
+    SESSION_PR_NUMBERS=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 \
+      --json number,createdAt \
+      | jq -r --arg start "$AGENT_START_ISO" \
+        '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null || echo "")
+    if [ -n "$SESSION_PR_NUMBERS" ]; then
+      while IFS= read -r pr_num; do
+        [[ -z "$pr_num" ]] && continue
+        update_code_area_specialization "$pr_num" 2>/dev/null || true
+        log "Code area specialization updated for PR #$pr_num"
+      done <<< "$SESSION_PR_NUMBERS"
     fi
   fi
 fi
