@@ -2939,6 +2939,24 @@ else
   export RECOVERY_MODE=false
 fi
 
+# ── 3.6.5. Load GitHub token (early — required before coordinator task validation) ──
+# request_coordinator_task() calls `gh api` to validate issue state.
+# GITHUB_TOKEN must be available before that call or gh fails unauthenticated,
+# causing a spurious release_coordinator_task → script exit under set -euo pipefail.
+# The token file is mounted at pod startup; we just need to read it early.
+# (issue #1601 — token was previously only loaded in step 7, ~270 lines too late)
+if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
+  export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
+  export GH_TOKEN="$GITHUB_TOKEN"
+  log "GitHub token loaded early (required for coordinator task validation)"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GH_TOKEN="$GITHUB_TOKEN"
+  log "GitHub token already set in environment"
+else
+  log "ERROR: No GitHub token available (neither GITHUB_TOKEN_FILE nor GITHUB_TOKEN set)"
+  exit 1
+fi
+
 # ── 3.7. Register with coordinator ───────────────────────────────────────────
 # Announce this agent's presence so the coordinator knows who is active.
 register_with_coordinator
@@ -3225,20 +3243,13 @@ post_thought "Task received: $TASK_TITLE. Beginning work." "observation" 8
 
 # ── 7. Clone repo ─────────────────────────────────────────────────────────────
 # Issue #6: Read GitHub token from read-only file mount instead of environment variable
+# Issue #1601: Token is already loaded in step 3.6.5 — this is a no-op guard for safety.
 log "Configuring GitHub authentication..."
-if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
-  export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
-  log "GitHub token loaded from read-only file mount"
-elif [ -n "${GITHUB_TOKEN:-}" ]; then
-  log "GitHub token loaded from environment variable (legacy)"
-else
+if [ -z "${GITHUB_TOKEN:-}" ]; then
   log "ERROR: No GitHub token available (neither GITHUB_TOKEN_FILE nor GITHUB_TOKEN set)"
   exit 1
 fi
-# Issue #1576: Export GH_TOKEN so gh CLI uses REST API without needing gh auth login.
-# gh CLI reads GH_TOKEN env var for REST API calls, bypassing GraphQL token validation.
-# This ensures gh commands work even when GraphQL rate limit is exceeded.
-export GH_TOKEN="$GITHUB_TOKEN"
+# GH_TOKEN already exported in step 3.6.5
 
 log "Cloning repo..."
 gh auth setup-git
