@@ -744,6 +744,36 @@ cleanup_stale_assignments() {
         echo "$fetched"
     }
 
+    # Issue #1474/#1546: Load pre-claim timestamps to protect coordinator-created pre-claims
+    # from being pruned before the worker's Job starts. Format: "agent:issue:ts;..."
+    # route_tasks_by_specialization() writes here when pre-claiming on an agent's behalf.
+    local pre_claim_timestamps
+    pre_claim_timestamps=$(get_state "preClaimTimestamps" 2>/dev/null || echo "")
+    local now_epoch
+    now_epoch=$(date +%s)
+    # Grace window: 120 seconds — worker spawn latency can exceed 60s (kro + EKS node scaling).
+    local PRE_CLAIM_GRACE_WINDOW=120
+    # Extended TTL: drop any pre-claim timestamp entries older than 300s (5 min)
+    # to prevent stale entries from accumulating forever.
+    if [ -n "$pre_claim_timestamps" ]; then
+        local cleaned_ts=""
+        while IFS= read -r ts_entry; do
+            [ -z "$ts_entry" ] && continue
+            local ts_val
+            ts_val=$(echo "$ts_entry" | cut -d: -f3)
+            if [[ "$ts_val" =~ ^[0-9]+$ ]]; then
+                local age=$(( now_epoch - ts_val ))
+                if [ "$age" -lt 300 ]; then
+                    cleaned_ts="${cleaned_ts:+$cleaned_ts;}${ts_entry}"
+                fi
+            fi
+        done < <(echo "$pre_claim_timestamps" | tr ';' '\n')
+        if [ "$cleaned_ts" != "$pre_claim_timestamps" ]; then
+            update_state "preClaimTimestamps" "$cleaned_ts"
+            pre_claim_timestamps="$cleaned_ts"
+        fi
+    fi
+
     IFS=',' read -ra PAIRS <<< "$assignments"
     for pair in "${PAIRS[@]}"; do
         [ -z "$pair" ] && continue
@@ -819,6 +849,7 @@ cleanup_stale_assignments() {
                     update_state "preClaimTimestamps" "$updated_ts"
                     pre_claim_timestamps="$updated_ts"
                 fi
+            fi
             fi
 
             # Issue #1556: Job completed, but check if issue is closed before releasing claim.
@@ -2504,8 +2535,8 @@ route_tasks_by_specialization() {
 
         # Find best specialized agent
         # Issue #1478: pass active_assignments to avoid N redundant get_state calls inside find_best_agent_for_issue
-        local best_agent
-        best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
+         local best_agent
+         best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
 
         if [ -n "$best_agent" ]; then
             # Issue #1474: Pre-claim the issue on behalf of the specialized agent.
