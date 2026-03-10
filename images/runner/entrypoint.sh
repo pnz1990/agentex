@@ -1758,10 +1758,14 @@ request_coordinator_task() {
     # The coordinator queue may be stale and contain closed issues.
     # If the issue is closed, release the claim and remove from queue to avoid
     # wasting agent sessions on already-resolved work.
+    # Issue #1586: Use REST API instead of gh issue view --json (which uses GraphQL).
+    # Under GraphQL rate limits, gh issue view returns "NOT_FOUND" for valid open issues.
+    # Old behavior: release claim + remove from queue for NOT_FOUND → queue wiped empty.
+    # Fix: use REST API; fail-open (keep in queue) if API unavailable.
     local issue_state
-    issue_state=$(gh issue view "$claimed_issue" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")  # issue #1066: was GITHUB_REPO (undefined), correct var is REPO
-    if [ "$issue_state" != "OPEN" ]; then
-      log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and removing from queue"
+    issue_state=$(gh api "repos/${REPO}/issues/${claimed_issue}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "")  # issue #1066: was GITHUB_REPO (undefined), correct var is REPO
+    if [ "$issue_state" = "CLOSED" ]; then
+      log "Coordinator: issue #$claimed_issue is CLOSED — releasing claim and removing from queue"
       # Release the claim atomically
       release_coordinator_task "$claimed_issue"
       # Remove from queue to prevent future agents from wasting time on it
@@ -1773,6 +1777,10 @@ request_coordinator_task() {
         -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
       retry=$((retry + 1))
       continue
+    elif [ -z "$issue_state" ]; then
+      # REST API unavailable — fail-open: keep claim and proceed with work
+      # Better to attempt work on a potentially stale issue than to wipe the queue under rate limits
+      log "WARNING: GitHub API unavailable for issue #${claimed_issue} state check — failing open (keeping claim)"
     fi
 
     # Remove claimed issue from the queue
@@ -2475,24 +2483,28 @@ spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}" bypass_killswitch="${9:-false}" capacity_type="${10:-on-demand}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
-  # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
+   # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
+  # Issue #1586: Use REST API instead of gh issue view --json (which uses GraphQL).
+  # gh issue view --json fails under GraphQL rate limits, returning NOT_FOUND for valid issues.
+  # This caused spawn_task_and_agent() to silently skip spawning workers during rate-limit storms.
+  # Fix: use REST API (gh api /repos/REPO/issues/N) which works independently of GraphQL quota.
+  # Fail-open: if REST API also fails (network issue), assume OPEN and let worker verify.
   if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
-    local issue_state=$(gh issue view "$issue" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+    local issue_state
+    issue_state=$(gh api "repos/${REPO}/issues/${issue}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "")
     
-    if [ "$issue_state" = "NOT_FOUND" ]; then
-      log "ERROR: GitHub issue #${issue} does not exist. Skipping spawn."
-      post_thought "Skipped spawning worker: issue #${issue} not found in GitHub (may be typo or wrong repo)." "observation" 7
-      return 0
-    fi
-    
-    if [ "$issue_state" = "CLOSED" ]; then
+    if [ -z "$issue_state" ]; then
+      # REST API also failed (network issue or rate limit on both APIs) — fail-open
+      # Let the worker proceed and validate on its own; better than silently skipping
+      log "WARNING: GitHub API unavailable for issue #${issue} validation — failing open (assuming OPEN)"
+    elif [ "$issue_state" = "CLOSED" ]; then
       log "WARNING: GitHub issue #${issue} is closed. Skipping spawn."
       post_thought "Skipped spawning worker: issue #${issue} already closed (resolved or obsolete)." "observation" 7
       return 0
+    else
+      # Log successful validation
+      log "Issue #${issue} validated: state=$issue_state"
     fi
-    
-    # Log successful validation
-    log "Issue #${issue} validated: state=$issue_state"
   fi
 
   # DUPLICATE WORK PREVENTION (issue #439): Check if issue already has open PR
