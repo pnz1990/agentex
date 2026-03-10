@@ -3564,13 +3564,16 @@ if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n 
   fi
 
   # Extract *.sh and *.yaml file mentions from the issue content
+  # Issue #1684: Use dynamic pattern matching for any *.sh/*.yaml/*.yml/*.json files
+  # instead of a brittle hardcoded list. New platform files are detected automatically.
   local_components_raw=""
   if [ -n "$local_issue_body" ] || [ -n "$local_issue_title" ]; then
     combined_text="${local_issue_title} ${local_issue_body}"
-    # Extract common agentex file names (.sh, .yaml, .yml, .json patterns)
-    # Also capture bare component names like "coordinator", "entrypoint", "helpers"
+    # Dynamic extraction: match any *.sh, *.yaml, *.yml, or *.json filenames mentioned
+    # in the issue body/title. This automatically picks up new platform files without
+    # requiring manual updates to a hardcoded list (fix for issue #1684).
     local_components_raw=$(echo "$combined_text" | \
-      grep -oE '\b(coordinator\.sh|entrypoint\.sh|helpers\.sh|identity\.sh|planner-loop\.sh|agent-graph\.yaml|task-graph\.yaml|message-graph\.yaml|thought-graph\.yaml|report-graph\.yaml|swarm-graph\.yaml|coordinator-graph\.yaml|planner-loop-graph\.yaml)\b' | \
+      grep -oE '\b[a-zA-Z0-9_-]+\.(sh|yaml|yml|json)\b' | \
       sort -u | head -5 || true)
   fi
 
@@ -3615,7 +3618,7 @@ ${component_context_parts}
 These debates reflect past architectural decisions. Review before making changes.
 Query more: source /agent/helpers.sh && query_debate_outcomes_by_component <file>
 ═══════════════════════════════════════════════════════"
-      log "Issue #1645: Injected component knowledge graph context (components: $(echo "$local_components_raw" | tr '\n' ' '))"
+      log "Issue #1645/#1684: Injected component knowledge graph context (dynamic detection, components: $(echo "$local_components_raw" | tr '\n' ' '))"
     fi
   fi
 fi
