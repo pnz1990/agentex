@@ -191,6 +191,8 @@ parentRef: ${parent_thought_name}"
     thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
     if record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"; then
       # Set flag for audit: synthesis was persisted to S3 (anti-amnesia behavior)
+      # Use temp file (subprocess-safe) in addition to env var (entrypoint.sh context)
+      touch /tmp/agentex-synthesis-persisted 2>/dev/null || true
       export SYNTHESIS_PERSISTED=1
     fi
   fi
@@ -642,6 +644,12 @@ plan_for_n_plus_2() {
   # Post thought for immediate peer visibility
   post_planning_thought "$my_work" "$n1_priority" "$n2_priority" "$generation"
   
+  # Signal to parent process (subprocess-safe) that N+2 planning was done
+  # Use temp file (subprocess-safe) in addition to env var (issue #1449)
+  # The env var propagates when called in-process; temp file works from subprocesses
+  touch /tmp/agentex-n2-priority-set 2>/dev/null || true
+  export N2_PRIORITY_SET=1
+
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
 

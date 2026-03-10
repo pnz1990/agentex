@@ -611,6 +611,8 @@ parentRef: ${parent_thought_name}"
     local thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
     if record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"; then
       # Set flag for audit: synthesis was persisted to S3 (anti-amnesia behavior)
+      # Use temp file (subprocess-safe) in addition to env var (issue #1449)
+      touch /tmp/agentex-synthesis-persisted 2>/dev/null || true
       export SYNTHESIS_PERSISTED=1
     fi
     # Track synthesis contribution in identity specialization (issue #1112)
@@ -1057,6 +1059,8 @@ plan_for_n_plus_2() {
   post_planning_thought "$my_work" "$n1_priority" "$n2_priority"
   
   # Set flag so audit can detect N+2 coordination usage (issue #1283)
+  # Use temp file (subprocess-safe) in addition to env var (issue #1449)
+  touch /tmp/agentex-n2-priority-set 2>/dev/null || true
   export N2_PRIORITY_SET=1
   
   log "✓ Completed 3-step planning (S3 + Thought CR)"
@@ -3786,7 +3790,11 @@ DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l age
 
 # Check if agent posted a synthesis response persisted to S3 (anti-amnesia behavior)
 # SYNTHESIS_PERSISTED is set by post_debate_response() when record_debate_outcome() succeeds
-SYNTHESIS_PERSISTED_FLAG=$([ -n "${SYNTHESIS_PERSISTED:-}" ] && echo 1 || echo 0)
+# Check via temp file (subprocess-safe) OR env var (entrypoint.sh-context calls) (issue #1449)
+SYNTHESIS_PERSISTED_FLAG=0
+if [ -f /tmp/agentex-synthesis-persisted ] || [ -n "${SYNTHESIS_PERSISTED:-}" ]; then
+  SYNTHESIS_PERSISTED_FLAG=1
+fi
 
 # Check if agent filed vision-aligned issues (enhancement or self-improvement labels)
 VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels \
@@ -3801,7 +3809,11 @@ PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --j
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
 # Check if agent called plan_for_n_plus_2() — flag set in that function (issue #1283)
-N2_COORDINATION=$([ -n "${N2_PRIORITY_SET:-}" ] && echo 1 || echo 0)
+# Check via temp file (subprocess-safe) OR env var (entrypoint.sh-context calls) (issue #1449)
+N2_COORDINATION=0
+if [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ]; then
+  N2_COORDINATION=1
+fi
 
 # Compute vision-aligned self-improvement score (issue #1283)
 # Replaces volume-based scoring (issues + PRs) with quality-based metrics:
