@@ -571,12 +571,13 @@ sync_constitution_to_git() {
     echo "data:" >> "${constitution_file}.new"
     
     # Extract each key=value from ConfigMap .data and format as YAML
+    # Issue #1260: Add 2>/dev/null to suppress jq parse errors when current_cm is empty/invalid
     echo "$current_cm" | jq -r '.data | to_entries[] | 
         if (.value | contains("\n")) then
             "  \(.key): |\n    \(.value | gsub("\n"; "\n    "))"
         else
             "  \(.key): \"\(.value)\""
-        end' >> "${constitution_file}.new"
+        end' 2>/dev/null >> "${constitution_file}.new"
     
     mv "${constitution_file}.new" "$constitution_file"
     
@@ -986,7 +987,8 @@ record_synthesis_debates_to_s3() {
 
         # Escape JSON special characters in resolution text
         local escaped_resolution
-        escaped_resolution=$(echo "$resolution" | jq -Rs '.')
+        # Issue #1260: Add 2>/dev/null to suppress jq parse errors on unexpected input
+        escaped_resolution=$(echo "$resolution" | jq -Rs '.' 2>/dev/null || echo '""')
 
         # Build JSON document
         local debate_json
@@ -1145,7 +1147,8 @@ track_debate_activity() {
             local timestamp
             timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             local escaped_resolution
-            escaped_resolution=$(echo "$full_content" | jq -Rs '.')
+            # Issue #1260: Add 2>/dev/null to suppress jq parse errors on unexpected input
+            escaped_resolution=$(echo "$full_content" | jq -Rs '.' 2>/dev/null || echo '""')
 
             local debate_json
             debate_json=$(cat <<DEBATE_EOF
