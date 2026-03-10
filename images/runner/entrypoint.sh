@@ -1230,6 +1230,17 @@ post_report() {
     specializations="[]"
   fi
   
+  # Issue #1823: Update tasksCompleted BEFORE creating Report CR.
+  # Previously this was called AFTER kubectl apply, so a Report CR creation failure
+  # (kubectl timeout, RBAC error, kro unavailable) would silently skip the increment.
+  # Result: tasksCompleted=0 for all 1,162+ agents despite completing real work.
+  # Fix: increment here, unconditionally, before the Report CR attempt. Even if the
+  # Report CR fails to create, the agent DID complete work and should be credited.
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+    update_identity_stats "tasksCompleted" 1 2>/dev/null || true
+    log "Identity: tasksCompleted incremented (issue #1823 fix)"
+  fi
+
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -1260,11 +1271,6 @@ EOF
   }
   push_metric "ReportCreated" 1
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
-  
-  # Update identity stats (if identity system is active)
-  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
-    update_identity_stats "tasksCompleted" 1
-  fi
 
   # Issue #1602: Update reputation history with this session's visionScore
   # Called after filing Report CR so visionScore is final.
@@ -4958,7 +4964,8 @@ Closes #${PR939_ISSUE}"
     push_metric "CIFailureOnExit" 1
     # Skip to cleanup — emergency perpetuation handles chain recovery
     # but the failing PR is left for god-review rather than a context-free successor
-    update_identity_stats "tasksCompleted" 1 2>/dev/null || true
+    # NOTE: tasksCompleted is already incremented by post_report() above (issue #1823 fix).
+    # Do NOT call update_identity_stats "tasksCompleted" here — would double-count.
     cleanup_agent_cr
     exit 1
   fi

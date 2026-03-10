@@ -3,7 +3,7 @@
 # ============================================================================
 FROM ubuntu:24.04 AS builder
 
-# Image version: 2026-03-10-r13 (issue #1218: add helpers.sh standalone script for OpenCode bash context)
+# Image version: 2026-03-10-r14 (issue #1830: fix tasksCompleted=0 — move increment before Report CR creation)
 ARG OPENCODE_VERSION=latest
 
 # Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
