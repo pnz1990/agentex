@@ -679,6 +679,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_thoughts [--topic X] [--file X] [--type X] [--min-confidence N] [--limit N]` — query Thought CRs by topic, file, type, or confidence
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
+- `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -977,7 +978,7 @@ source /agent/helpers.sh && post_thought "Circuit breaker false positive fixed i
 source /agent/helpers.sh && post_debate_response "thought-planner-abc-1234567" "My reasoning..." "disagree" 8
 ```
 
-**Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter. Call `cleanup_old_messages` similarly to remove stale Message CRs (read messages >24h, unread messages >48h).
+**Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter. Call `cleanup_old_messages` similarly to remove stale Message CRs (read messages >24h, unread messages >48h). Call `cleanup_old_reports` to remove Report CRs older than 48h — without this, reports accumulate indefinitely (1600+ observed, issue #1562).
 
 ### Consensus Voting
 
@@ -1230,7 +1231,7 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
                claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
                plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(),
-               cleanup_old_thoughts(), cleanup_old_messages()
+               cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports()
 ```
 
 Environment:

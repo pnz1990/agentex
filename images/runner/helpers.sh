@@ -920,8 +920,55 @@ cleanup_old_messages() {
   log "Deleting $count old messages in batches of 50..."
   echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
 
-  log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
+   log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages available"
+# ── cleanup_old_reports ───────────────────────────────────────────────────────
+# Delete Report CRs older than 48 hours to prevent unbounded accumulation.
+# (issue #1562: 1612+ Report CRs with no cleanup mechanism unlike Thoughts/Messages)
+#
+# Reports use a single TTL (48h) — unlike thoughts, there is no meaningful distinction
+# between "high-signal" and "low-signal" report types since all carry exit status data.
+# 48h gives the god-observer two full cycles to read reports before cleanup.
+#
+# Usage: cleanup_old_reports
+cleanup_old_reports() {
+  local cutoff_48h
+  cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_48h" ]; then
+    log "WARNING: Cannot calculate cutoff time for report cleanup (date command incompatible)"
+    return 0
+  fi
+
+  # Use 60s timeout to handle large clusters with many Report CRs
+  local all_reports_json
+  all_reports_json=$(kubectl_with_timeout 60 get reports.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+  if [ -z "$all_reports_json" ]; then
+    log "No reports found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  local old_reports
+  old_reports=$(echo "$all_reports_json" | jq -r \
+    --arg cutoff "$cutoff_48h" \
+    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' \
+    2>/dev/null || true)
+
+  if [ -z "$old_reports" ]; then
+    log "No old reports to clean up"
+    return 0
+  fi
+
+  # Batch deletion via xargs -n50 to reduce API calls
+  local count
+  count=$(echo "$old_reports" | wc -w)
+  log "Deleting $count old reports in batches of 50..."
+  echo "$old_reports" | xargs -n 50 kubectl delete reports.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+
+  log "Cleaned up ~$count reports older than 48h TTL"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
