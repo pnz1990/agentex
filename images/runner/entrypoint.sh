@@ -1230,6 +1230,13 @@ post_report() {
     specializations="[]"
   fi
   
+  # Update identity stats BEFORE kubectl apply so it runs even if Report CR creation fails
+  # (issue #1830: tasksCompleted was 0 for all agents because update_identity_stats was called
+  #  after kubectl apply — if apply failed, the early return skipped the stat update entirely)
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+    update_identity_stats "tasksCompleted" 1
+  fi
+
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -1260,11 +1267,6 @@ EOF
   }
   push_metric "ReportCreated" 1
   log "Report filed: vision=$vision_score issues=$issues_found pr=$pr_opened"
-  
-  # Update identity stats (if identity system is active)
-  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
-    update_identity_stats "tasksCompleted" 1
-  fi
 
   # Issue #1602: Update reputation history with this session's visionScore
   # Called after filing Report CR so visionScore is final.
@@ -4958,7 +4960,9 @@ Closes #${PR939_ISSUE}"
     push_metric "CIFailureOnExit" 1
     # Skip to cleanup — emergency perpetuation handles chain recovery
     # but the failing PR is left for god-review rather than a context-free successor
-    update_identity_stats "tasksCompleted" 1 2>/dev/null || true
+    # NOTE: update_identity_stats "tasksCompleted" 1 removed here (issue #1830) — it is now
+    # called at the start of post_report() before kubectl apply, so it always runs.
+    # Calling it here again would double-count tasksCompleted on CI failure paths.
     cleanup_agent_cr
     exit 1
   fi
