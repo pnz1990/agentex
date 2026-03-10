@@ -234,5 +234,233 @@ query_debate_outcomes() {
   echo "$results"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes available"
+# ── push_metric stub ─────────────────────────────────────────────────────────
+# Stub for CloudWatch metric push — no-op in helpers.sh context since we don't
+# have the full entrypoint.sh environment (no aws cloudwatch put-metric-data call).
+# This prevents claim_task() and civilization_status() from failing when invoked
+# via "source /agent/helpers.sh" in OpenCode bash tool context.
+if ! type push_metric >/dev/null 2>&1; then
+  push_metric() { true; }
+fi
+
+# ── claim_task ────────────────────────────────────────────────────────────────
+# Atomically claim a GitHub issue to prevent duplicate work (issue #859).
+# Uses CAS (compare-and-swap) on coordinator-state.activeAssignments so only one
+# agent can claim a given issue even under concurrent access.
+#
+# Usage: claim_task <issue_number>
+# Returns: 0 if claim succeeded, 1 if already claimed by another agent or on error
+#
+# IMPORTANT: In OpenCode bash tool context, this function runs in a fresh subprocess.
+# COORDINATOR_ISSUE cannot be set in the parent entrypoint.sh process from here.
+# The fix (issue #1252) writes the claimed issue to /tmp/agentex_worked_issue so
+# the end-of-session specialization update can read it without the coordinator race.
+#
+# Example:
+#   source /agent/helpers.sh
+#   if claim_task 1224; then
+#     echo "Claimed issue #1224 — proceeding with work"
+#   else
+#     echo "Issue already claimed — pick a different one"
+#   fi
+claim_task() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
+
+  local max_attempts=5
+  local attempt=0
+
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+
+    # Read current assignments
+    local assignments
+    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+    # Check if issue is already claimed by any agent
+    if echo "$assignments" | grep -qE "(^|,)[^,]+:${issue}(,|$)"; then
+      # Determine who claimed it
+      local claimer
+      claimer=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
+      if [ "$claimer" = "$AGENT_NAME" ]; then
+        log "Coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
+        return 0
+      fi
+      log "Coordinator: issue #$issue already claimed by $claimer — skipping to avoid duplicate work"
+      push_metric "TaskClaimConflict" 1
+      return 1
+    fi
+
+    # Build new assignments value
+    local new_assignments
+    if [ -z "$assignments" ]; then
+      new_assignments="${AGENT_NAME}:${issue}"
+    else
+      new_assignments="${assignments},${AGENT_NAME}:${issue}"
+    fi
+
+    # Atomic CAS: test current value, only write if unchanged since our read.
+    local expected_value="$assignments"
+    if [ -z "$expected_value" ]; then
+      # Field doesn't exist yet: use add operation
+      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=json \
+        -p "[{\"op\":\"add\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+        2>/dev/null; then
+        log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
+        push_metric "TaskClaimed" 1
+        # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
+        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
+        return 0
+      fi
+    else
+      # Field exists: use test+replace for atomic CAS
+      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=json \
+        -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+        2>/dev/null; then
+        log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
+        push_metric "TaskClaimed" 1
+        # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
+        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
+        return 0
+      fi
+    fi
+
+    # CAS failed: another agent concurrently modified activeAssignments — retry with fresh read
+    log "Coordinator: CAS failed for issue #$issue (attempt $attempt/$max_attempts) — retrying"
+    sleep 1
+  done
+
+  log "WARNING: Failed to claim issue #$issue after $max_attempts attempts"
+  return 1
+}
+
+# ── civilization_status ───────────────────────────────────────────────────────
+# Single-command civilization health overview (issue #1224).
+# Outputs a structured health summary covering:
+#   - Generation number from agentex-constitution ConfigMap
+#   - Active agents count vs circuit breaker limit
+#   - spawnSlots (spawn gate health indicator)
+#   - Open GitHub issues count (with low-issue warning)
+#   - Debate health (debateStats from coordinator-state)
+#   - Specialization routing status (v0.2 specializedAssignments)
+#   - visionQueue status (v0.3 collective goal-setting)
+#   - Kill switch status
+#   - S3 debate outcomes count
+#   - Coordinator heartbeat freshness (with stale warning)
+#
+# Available in both entrypoint.sh AND via helpers.sh for OpenCode bash tool context.
+# Planners call this at startup; workers can call it to understand system state.
+#
+# Usage:
+#   source /agent/helpers.sh
+#   civilization_status
+civilization_status() {
+  local output=""
+  output="${output}=== Civilization Status ===\n"
+
+  # Generation
+  local gen
+  gen=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "unknown")
+  output="${output}Generation:              ${gen}\n"
+
+  # Circuit breaker limit
+  local cb_limit
+  cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "unknown")
+
+  # Active agents (active Jobs in namespace)
+  local active_jobs
+  active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+    2>/dev/null || echo "?")
+  output="${output}Active agents:           ${active_jobs} (limit: ${cb_limit})\n"
+
+  # spawnSlots (spawn gate health)
+  local spawn_slots
+  spawn_slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "?")
+  output="${output}spawnSlots:              ${spawn_slots}\n"
+
+  # Open GitHub issues
+  local open_issues
+  open_issues=$(gh issue list --repo "${REPO:-pnz1990/agentex}" --state open --limit 100 \
+    --json number -q 'length' 2>/dev/null || echo "?")
+  local issue_warning=""
+  if [[ "$open_issues" =~ ^[0-9]+$ ]] && [ "$open_issues" -lt 5 ]; then
+    issue_warning=" (LOW — should be 10+)"
+  fi
+  output="${output}Open issues:             ${open_issues}${issue_warning}\n"
+
+  # Debate health from coordinator-state
+  local debate_stats
+  debate_stats=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "unavailable")
+  output="${output}Debate health:           ${debate_stats}\n"
+
+  # Specialization routing (v0.2)
+  local spec_assignments generic_assignments
+  spec_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+  generic_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.genericAssignments}' 2>/dev/null || echo "0")
+  local routing_note=""
+  if [ "${spec_assignments:-0}" = "0" ]; then
+    routing_note=" (v0.2 not yet confirmed)"
+  fi
+  output="${output}Specialization routing:  specializedAssignments=${spec_assignments:-0} genericAssignments=${generic_assignments:-0}${routing_note}\n"
+
+  # visionQueue (v0.3 sub-feature)
+  local vision_queue
+  vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+  if [ -z "$vision_queue" ]; then vision_queue="[] (v0.3 not started)"; fi
+  output="${output}visionQueue:             ${vision_queue}\n"
+
+  # Kill switch status
+  local ks_enabled
+  ks_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "unknown")
+  local ks_display="disabled"
+  if [ "$ks_enabled" = "true" ]; then
+    local ks_reason
+    ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "")
+    ks_display="ACTIVE — ${ks_reason}"
+  fi
+  output="${output}Kill switch:             ${ks_display}\n"
+
+  # S3 debate outcomes
+  local bedrock_region="${BEDROCK_REGION:-us-west-2}"
+  local s3_debates
+  s3_debates=$(aws s3 ls "s3://${S3_BUCKET}/debates/" \
+    --region "${bedrock_region}" 2>/dev/null | wc -l || echo "?")
+  output="${output}S3 debate outcomes:      ${s3_debates}\n"
+
+  # Coordinator heartbeat freshness
+  local last_heartbeat heartbeat_age=""
+  last_heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+  if [ -n "$last_heartbeat" ]; then
+    local hb_epoch now_epoch
+    hb_epoch=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+    now_epoch=$(date +%s)
+    local age_secs=$(( now_epoch - hb_epoch ))
+    if [ "$age_secs" -gt 120 ]; then
+      heartbeat_age=" (STALE — ${age_secs}s old)"
+    else
+      heartbeat_age=" (${age_secs}s ago)"
+    fi
+  else
+    last_heartbeat="unknown"
+  fi
+  output="${output}Coordinator heartbeat:   ${last_heartbeat}${heartbeat_age}\n"
+
+  printf "%b" "$output"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
