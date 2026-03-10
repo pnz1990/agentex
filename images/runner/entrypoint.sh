@@ -5433,11 +5433,21 @@ if [ -n "$SWARM_REF" ]; then
           kubectl_with_timeout 10 patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
             --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
           
+          # Issue #1773 v0.6: Persist swarm memory to S3 before dissolution
+          # Read the swarm goal from the state ConfigMap for the memory record
+          SWARM_GOAL=$(echo "$SWARM_STATE" | jq -r '.data.goal // "unknown goal"' 2>/dev/null || echo "unknown goal")
+          # Collect key decisions from recent swarm thoughts (best-effort)
+          SWARM_DECISIONS=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l "agentex/thought,agentex/swarm=${SWARM_REF}" -o json 2>/dev/null | \
+            jq -r '[.items[] | select(.data.thoughtType=="decision" or .data.thoughtType=="insight") | .data.content] | join("; ")' 2>/dev/null | \
+            cut -c1-500 || echo "none recorded")
+          [ -z "$SWARM_DECISIONS" ] && SWARM_DECISIONS="none recorded"
+          write_swarm_memory "$SWARM_REF" "$SWARM_GOAL" "$NEW_MEMBERS" "$TOTAL_TASKS" "$SWARM_DECISIONS"
+          
           # Broadcast dissolution message
           post_message "broadcast" "Swarm $SWARM_REF has disbanded after completing all tasks. Members: $NEW_MEMBERS. Total tasks: $TOTAL_TASKS." "status"
           
           # Post thought about dissolution
-          post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed." "insight" 9
+          post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed. Swarm memory persisted to S3 (issue #1773)." "insight" 9
         else
           log "All tasks complete but only ${IDLE_SECONDS}s idle (need 300s for dissolution)"
         fi
