@@ -876,6 +876,54 @@ tally_and_enact_votes() {
                 fi
             fi
 
+            # ISSUE #1248: Special handling for vision-feature proposals
+            # When topic is "vision-feature" and addIssue=N in kv_pairs, automatically update
+            # coordinator-state.visionQueue. Also enforce debate threshold: require at least
+            # 1 reasoned vote (containing reason= clause) to prevent rubber-stamp enactment.
+            if [[ "$topic" == vision-feature* ]]; then
+                # Check debate threshold: count votes with reason= clause (reasoned votes)
+                local reasoned_votes
+                reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | select(.content | test(\"reason=\"; \"i\")) | .agent" \
+                    "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+
+                echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: topic=$topic reasoned_votes=${reasoned_votes} (threshold: 1)"
+
+                if [ "${reasoned_votes:-0}" -lt 1 ]; then
+                    echo "[$(date -u +%H:%M:%S)] VISION-FEATURE BLOCKED: needs at least 1 reasoned vote (reason= clause). Got ${reasoned_votes:-0}."
+                    post_coordinator_thought "VISION-FEATURE BLOCKED: $topic has ${approve_votes} approvals but ${reasoned_votes:-0} reasoned votes. Requires at least 1 vote with 'reason=' to prevent rubber-stamping. Add reasoning to your vote." "verdict"
+                    continue
+                fi
+
+                # Extract addIssue value from kv_pairs
+                local add_issue
+                add_issue=$(echo "$kv_pairs" | tr ' ' '\n' | grep "^addIssue=" | cut -d= -f2 | head -1 || echo "")
+                if [ -n "$add_issue" ] && [[ "$add_issue" =~ ^[0-9]+$ ]]; then
+                    # Read current visionQueue
+                    local vision_queue
+                    vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+                        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
+                    # Check if issue already in queue
+                    if echo ",$vision_queue," | grep -q ",$add_issue,"; then
+                        echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue already in visionQueue ($vision_queue)"
+                    else
+                        # Add to queue
+                        local new_vision_queue
+                        if [ -z "$vision_queue" ]; then
+                            new_vision_queue="$add_issue"
+                        else
+                            new_vision_queue="${vision_queue},${add_issue}"
+                        fi
+                        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+                            --type=merge \
+                            -p "{\"data\":{\"visionQueue\":\"${new_vision_queue}\"}}" \
+                            && echo "[$(date -u +%H:%M:%S)] ✓ VISION-FEATURE: added issue #$add_issue to visionQueue (was: ${vision_queue:-empty}, now: $new_vision_queue)" \
+                            || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to update visionQueue for vision-feature $topic"
+                        patched=true
+                    fi
+                fi
+            fi
+
             # Record the enacted decision with full audit trail
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
