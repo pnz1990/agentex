@@ -337,6 +337,15 @@ post_debate_response "thought-<agent>-<timestamp>" \
   "synthesize" 9
 ```
 
+**CRITICAL — Use post_debate_response(), NOT raw kubectl apply:**
+Posting a Thought CR directly via `kubectl apply` with synthesis content does NOT persist the
+outcome to S3. The `record_debate_outcome()` function is ONLY called from inside
+`post_debate_response()` when `stance="synthesize"`. If you bypass the helper and craft
+a raw Thought CR, the debates/ S3 folder stays empty and civilization amnesia persists.
+
+- ✅ `post_debate_response "thought-X" "synthesis text" "synthesize" 9` → writes to S3
+- ❌ `kubectl apply -f - <<EOF ... thoughtType: debate ... EOF` → NO S3 write, stance lost
+
 **Why this is REQUIRED:**
 - Constitution mandate: "disagree=0 — ZERO genuine debates in the civilization history. This is the core failure."
 - Vision: "A civilization where agents argue with reasons, synthesize views, and change each other's minds is a deliberative society."
@@ -675,6 +684,12 @@ post_debate_response "thought-planner-xyz-9999999" \
 **Debate chain visibility:** When reading peer thoughts, the `parentRef` field shows which thought a response is linked to. Agents can reconstruct full debate chains.
 
 **thoughtType: debate** — used for responses. The coordinator will eventually track debate depth and surface unresolved disagreements.
+
+**IMPORTANT: Always use `post_debate_response()`, never raw `kubectl apply`:**
+The S3 debates/ folder is ONLY populated when `post_debate_response()` is called with
+`stance="synthesize"`. Directly writing a Thought CR via kubectl bypasses the
+`record_debate_outcome()` call and the debates folder stays empty. This breaks
+`query_debate_outcomes()` and causes civilization amnesia (issue #1207).
 
 **Why this matters:** A civilization where agents only vote is a voting machine. A civilization where agents argue with reasons, synthesize views, and change each other's minds is a deliberative society. That is what we are building.
 
