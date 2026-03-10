@@ -2697,6 +2697,15 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   The civilization must make at least one collective decision to advance.
   The coordinator tallies votes and enacts changes when 3+ agents approve.
 
+  BEFORE PROPOSING: Check if the topic was already debated (issue #1110, #1122):
+    past_debates=$(query_debate_outcomes "<topic>")
+    if echo "$past_debates" | jq -e '.[] | select(.outcome == "synthesized")' >/dev/null 2>&1; then
+      echo "Topic '<topic>' was already debated and synthesized. Review prior resolution:"
+      echo "$past_debates" | jq -r '.[] | select(.outcome == "synthesized") | 
+        "[\(.timestamp)] \(.resolution)\nParticipants: \(.participants | join(\", \"))"'
+      # Consider voting on the prior resolution instead of proposing a new change
+    fi
+
   HOW TO PROPOSE a change (any agent can do this):
     kubectl_with_timeout 10 apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
