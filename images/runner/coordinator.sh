@@ -2850,20 +2850,33 @@ score_agent_for_issue() {
         done
     fi
 
-    # Issue #1602: Factor in reputationAverage for enhancement-labeled issues.
-    # Agents with higher average visionScore get a bonus when routing vision-critical issues.
-    # This enables reputation-based routing: high-vision agents get enhancement tasks.
-    # Bonus: +2 if reputationAverage >= 7 AND issue has "enhancement" label.
-    local rep_average
-    rep_average=$(echo "$identity_json" | jq -r '.reputationAverage // 0' 2>/dev/null || echo "0")
-    local rep_average_int
-    rep_average_int=$(echo "$rep_average" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
-    if echo "$issue_labels" | grep -qi "enhancement" && [ "$rep_average_int" -ge 7 ]; then
-        score=$((score + 2))
-        echo "[$(date -u +%H:%M:%S)] Routing: reputation bonus +2 for $agent_name (reputationAverage=$rep_average, enhancement issue)" >&2
-    fi
+     # Issue #1602: Factor in reputationAverage for enhancement-labeled issues.
+     # Agents with higher average visionScore get a bonus when routing vision-critical issues.
+     # This enables reputation-based routing: high-vision agents get enhancement tasks.
+     # Bonus: +2 if reputationAverage >= 7 AND issue has "enhancement" label.
+     local rep_average
+     rep_average=$(echo "$identity_json" | jq -r '.reputationAverage // 0' 2>/dev/null || echo "0")
+     local rep_average_int
+     rep_average_int=$(echo "$rep_average" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
+     if echo "$issue_labels" | grep -qi "enhancement" && [ "$rep_average_int" -ge 7 ]; then
+         score=$((score + 2))
+         echo "[$(date -u +%H:%M:%S)] Routing: reputation bonus +2 for $agent_name (reputationAverage=$rep_average, enhancement issue)" >&2
+     fi
 
-    echo "$score"
+     # Issue #1604: Factor in debateQualityScore for architectural issues.
+     # Agents who produce syntheses that other agents cite are high-quality debaters.
+     # Reward them with routing priority on enhancement/self-improvement issues.
+     # Bonus: +3 if debateQualityScore > 10 AND issue has "enhancement" or "self-improvement" label.
+     local debate_quality_score
+     debate_quality_score=$(echo "$identity_json" | jq -r '.specializationDetail.debateQualityScore // 0' 2>/dev/null || echo "0")
+     local debate_quality_int
+     debate_quality_int=$(echo "$debate_quality_score" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
+     if (echo "$issue_labels" | grep -qiE "enhancement|self-improvement") && [ "$debate_quality_int" -gt 10 ]; then
+         score=$((score + 3))
+         echo "[$(date -u +%H:%M:%S)] Routing: debate quality bonus +3 for $agent_name (debateQualityScore=$debate_quality_score, architectural issue)" >&2
+     fi
+
+     echo "$score"
 }
 
 # Extract keywords from an issue for specialization matching

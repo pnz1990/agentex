@@ -227,6 +227,104 @@ EOF
   fi
 }
 
+# ── cite_debate_outcome ───────────────────────────────────────────────────────
+# Issue #1604: Record that this agent cited a synthesis debate outcome in a decision.
+# This increments the citedBy array in the debate JSON and updates the synthesis
+# author's debateQualityScore in their identity file.
+#
+# Only tracks citations on `synthesized` debates — lower-signal agree/disagree outcomes
+# don't produce lasting knowledge worth rewarding.
+#
+# Usage: cite_debate_outcome <thread_id>
+#
+# Call after query_debate_outcomes() returns a synthesis you used to make a decision.
+# This rewards high-quality debates that future agents actually reference.
+#
+# Example:
+#   past=$(query_debate_outcomes "circuit-breaker")
+#   thread_id=$(echo "$past" | jq -r '.[0] | select(.outcome=="synthesized") | .threadId // ""')
+#   [ -n "$thread_id" ] && cite_debate_outcome "$thread_id"
+cite_debate_outcome() {
+  local thread_id="${1:-}"
+
+  if [ -z "$thread_id" ]; then
+    log "WARNING: cite_debate_outcome called without thread_id — skipping"
+    return 0
+  fi
+
+  local s3_path="s3://${S3_BUCKET}/debates/${thread_id}.json"
+
+  # Read existing debate record
+  local debate_json
+  debate_json=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "")
+  if [ -z "$debate_json" ]; then
+    log "WARNING: cite_debate_outcome: debate ${thread_id} not found in S3 — skipping"
+    return 0
+  fi
+
+  # Only track citations on synthesized debates (high-signal debates only)
+  local outcome
+  outcome=$(echo "$debate_json" | jq -r '.outcome // ""' 2>/dev/null)
+  if [ "$outcome" != "synthesized" ]; then
+    log "cite_debate_outcome: skipping non-synthesis debate (outcome=${outcome})"
+    return 0
+  fi
+
+  # Add this agent to citedBy array (deduplicated)
+  local updated_debate
+  updated_debate=$(echo "$debate_json" | jq \
+    --arg agent "${AGENT_NAME:-unknown}" \
+    '.citedBy = ((.citedBy // []) | if index($agent) != null then . else . + [$agent] end)')
+
+  # Write updated debate JSON back to S3
+  if ! echo "$updated_debate" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
+    log "WARNING: cite_debate_outcome: failed to update debate ${thread_id} in S3 (non-fatal)"
+    return 0
+  fi
+
+  log "cite_debate_outcome: recorded citation of ${thread_id} by ${AGENT_NAME:-unknown}"
+
+  # Update the synthesis author's debate quality score
+  local recorded_by
+  recorded_by=$(echo "$debate_json" | jq -r '.recordedBy // ""' 2>/dev/null)
+  if [ -z "$recorded_by" ]; then
+    log "cite_debate_outcome: no recordedBy field in debate — skipping quality score update"
+    return 0
+  fi
+
+  local author_identity_path="s3://${S3_BUCKET}/identities/${recorded_by}.json"
+  if ! aws s3 ls "$author_identity_path" >/dev/null 2>&1; then
+    log "cite_debate_outcome: author identity not found for ${recorded_by} — skipping quality update"
+    return 0
+  fi
+
+  # Use update_debate_quality_score() if available (entrypoint.sh context with identity.sh sourced)
+  if declare -f update_debate_quality_score >/dev/null 2>&1; then
+    update_debate_quality_score "$author_identity_path"
+  else
+    # Inline update for OpenCode bash context (where identity.sh is not sourced)
+    local identity_json
+    identity_json=$(aws s3 cp "$author_identity_path" - 2>/dev/null || echo "")
+    if [ -n "$identity_json" ]; then
+      local updated_identity
+      updated_identity=$(echo "$identity_json" | jq '
+        .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+        .specializationDetail.debateQualityScore = (
+          (.specializationDetail.synthesisCount // 0) * 2 +
+          (.specializationDetail.citedSynthesesCount // 0) * 5
+        )
+      ')
+      if echo "$updated_identity" | aws s3 cp - "$author_identity_path" --content-type application/json >/dev/null 2>&1; then
+        local new_score
+        new_score=$(echo "$updated_identity" | jq -r '.specializationDetail.debateQualityScore // 0')
+        log "cite_debate_outcome: updated ${recorded_by} debateQualityScore=${new_score}"
+      else
+        log "WARNING: cite_debate_outcome: could not update author identity (non-fatal)"
+      fi
+    fi
+  fi
+}
+
 # ── post_debate_response ──────────────────────────────────────────────────────
 # Respond to a specific peer thought with reasoning.
 # This is the PRIMARY function for cross-agent debate — use this instead of raw kubectl.
@@ -1230,5 +1328,5 @@ Proposed by: ${AGENT_NAME}"
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
