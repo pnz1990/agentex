@@ -401,6 +401,14 @@ claim_task() {
   local issue="$1"
   [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
 
+  # Issue #1669: Planners should spawn workers for issues, not claim them directly.
+  # Planner claims create ghost assignments (planner exits before implementing,
+  # leaving stale activeAssignments entries that block workers).
+  if [ "${AGENT_ROLE:-}" = "planner" ]; then
+    log "Coordinator: SKIPPING claim for issue #$issue — planners spawn workers, not claim issues. Use spawn_task_and_agent instead."
+    return 1
+  fi
+
   local max_attempts=5
   local attempt=0
 
