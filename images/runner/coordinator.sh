@@ -1052,6 +1052,8 @@ score_agent_for_issue() {
     local score=0
 
     # Score label matches (weight 3 each)
+    # Identity JSON schema (identity.sh): label counts are in .specializationLabelCounts{}
+    # NOT in .specialization.issueLabels{} — that path was incorrect (issue #1102 fix)
     if [ -n "$issue_labels" ]; then
         IFS=',' read -ra label_arr <<< "$issue_labels"
         for label in "${label_arr[@]}"; do
@@ -1060,7 +1062,7 @@ score_agent_for_issue() {
             local label_count
             label_count=$(echo "$identity_json" | jq -r \
                 --arg lbl "$label" \
-                '(.specialization.issueLabels[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
+                '(.specializationLabelCounts[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
             if [ "$label_count" -gt 0 ]; then
                 score=$((score + 3))
             fi
@@ -1068,15 +1070,17 @@ score_agent_for_issue() {
     fi
 
     # Score keyword matches against codeAreas (weight 2 each)
+    # Identity JSON schema (identity.sh): code areas are in .specializationDetail.codeAreas{}
+    # NOT in .specialization.codeAreas{} — that path was incorrect (issue #1102 fix)
     if [ -n "$issue_keywords" ]; then
         local code_areas
         code_areas=$(echo "$identity_json" | jq -r \
-            '.specialization.codeAreas // {} | keys | .[]' 2>/dev/null || echo "")
+            '.specializationDetail.codeAreas // {} | keys | .[]' 2>/dev/null || echo "")
         for area in $code_areas; do
             local area_count
             area_count=$(echo "$identity_json" | jq -r \
                 --arg a "$area" \
-                '.specialization.codeAreas[$a] // 0 | tonumber' 2>/dev/null || echo "0")
+                '.specializationDetail.codeAreas[$a] // 0 | tonumber' 2>/dev/null || echo "0")
             if [ "$area_count" -gt 0 ]; then
                 # Check if any keyword matches this code area
                 for kw in $issue_keywords; do
