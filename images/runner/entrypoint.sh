@@ -3051,6 +3051,17 @@ push_metric "SelfImprovementScore" "$SI_SCORE" "None"
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
+# Track issues and PRs in agent identity for reputation/routing (issue #1139)
+# These stats power identity-based task routing (#1113) and reputation display (#1112).
+if [ "$ISSUES_CREATED" -gt 0 ] && type update_identity_stats &>/dev/null; then
+  update_identity_stats "issuesFiled" "$ISSUES_CREATED" 2>/dev/null || true
+  log "Identity: recorded $ISSUES_CREATED issue(s) filed this session"
+fi
+if [ "$PRS_OPENED" -gt 0 ] && type update_identity_stats &>/dev/null; then
+  update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
+  log "Identity: recorded $PRS_OPENED PR(s) opened this session"
+fi
+
 log "Self-improvement audit complete: score=$SI_SCORE/10"
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
