@@ -392,6 +392,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v05CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # activeSwarms (issue #1775, v0.6 Swarm Intelligence): comma-separated list of active swarm names
+  # with their goals. Format: "swarm-name:goal-summary|swarm-name2:goal-summary2|..."
+  # Updated by track_active_swarms() every 5 iterations (~2.5 min) in the main loop.
+  # civilization_status() reads this field for swarm health observability.
+  # Empty string means no active swarms (normal state before v0.6 swarm automation).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("activeSwarms")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing activeSwarms (was absent, issue #1775)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -1113,6 +1124,48 @@ cleanup_orphaned_pods() {
 
     echo "[$(date -u +%H:%M:%S)] Deleted $deleted_count orphaned pods"
     push_metric "OrphanedPodsDeleted" "$deleted_count" "Count" "Component=Coordinator"
+}
+
+# track_active_swarms — Count and summarize non-Disbanded swarms (issue #1775, v0.6)
+# Scans ConfigMaps with label agentex/swarm that are in Forming or Active phase.
+# Writes activeSwarms field to coordinator-state as pipe-separated "name:goal" entries.
+# Called every 5 iterations (~2.5 min) in the main loop.
+# This establishes observability (Success Criterion 4) before automation features are added.
+track_active_swarms() {
+    # Find swarm state ConfigMaps: they have the agentex/swarm label and a phase field
+    # that is either "Forming" or "Active" (not "Disbanded")
+    local swarm_summary=""
+    local active_count=0
+
+    # Get all ConfigMaps with a goal field (swarm state CMs have goal + phase)
+    while IFS=$'\t' read -r name phase goal; do
+        [ -z "$name" ] && continue
+        [ -z "$phase" ] && continue
+        # Only include non-disbanded swarms
+        if [ "$phase" != "Disbanded" ]; then
+            active_count=$((active_count + 1))
+            # Truncate goal to 60 chars for readability
+            local short_goal
+            short_goal=$(printf '%s' "${goal:-unknown}" | cut -c1-60)
+            if [ -z "$swarm_summary" ]; then
+                swarm_summary="${name}:${short_goal}"
+            else
+                swarm_summary="${swarm_summary}|${name}:${short_goal}"
+            fi
+        fi
+    done < <(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
+        -l "agentex/swarm" -o json 2>/dev/null | \
+        jq -r '.items[] | select(.data.goal != null) | [.metadata.name, (.data.phase // ""), (.data.goal // "")] | @tsv' \
+        2>/dev/null || true)
+
+    update_state "activeSwarms" "$swarm_summary"
+
+    if [ "$active_count" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] track_active_swarms: $active_count active swarm(s): $swarm_summary"
+        push_metric "ActiveSwarms" "$active_count" "Count" "Component=Coordinator"
+    else
+        push_metric "ActiveSwarms" 0 "Count" "Component=Coordinator"
+    fi
 }
 
 # cleanup_old_cluster_resources — Periodically delete stale Thought and Message CRs (issue #1617)
@@ -3987,6 +4040,13 @@ while true; do
     # are deleted without cascade-deleting their pods (historical behavior pre-TTL governance).
     if [ $((iteration % 10)) -eq 0 ]; then
         cleanup_orphaned_pods
+    fi
+
+    # Every 5 iterations (~2.5 min): update activeSwarms in coordinator-state (issue #1775, v0.6)
+    # Tracks non-Disbanded Swarm state ConfigMaps for swarm health observability.
+    # This is the foundational observability step before coordinator-driven swarm automation.
+    if [ $((iteration % 5)) -eq 0 ]; then
+        track_active_swarms
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.

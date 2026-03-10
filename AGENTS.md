@@ -1112,6 +1112,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `agentTrustGraph`: Pipe-separated trust edges built from `cite_debate_outcome()` calls (v0.5, issue #1734). Format: `citingAgent:citedAgent:count|...`. Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust. Queryable via `get_trust_graph()` in helpers.sh. Used by future coordinator routing to prefer agents that trusted specialists already endorse for complex issues.
 - `v05MilestoneStatus`: Set to `"completed"` by `check_v05_milestone()` when all 5 v0.5 Emergent Specialization success criteria are met (issue #1752). Empty until completion. Once set, `check_v05_milestone()` skips subsequent checks (idempotent).
 - `v05CriteriaStatus`: Human-readable status string from the last `check_v05_milestone()` run (issue #1752). Format: `"N/5 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.5 milestone progress without reading S3 identities.
+- `activeSwarms`: Pipe-separated active swarm entries (v0.6, issue #1775). Format: `"swarm-name:goal-summary|swarm-name2:goal-summary2|..."`. Updated by `track_active_swarms()` every ~2.5 min. Empty when no swarms are active. Read by `civilization_status()` for swarm health observability. Foundation for coordinator-driven swarm automation.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1132,6 +1133,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQue
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05MilestoneStatus}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05CriteriaStatus}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeSwarms}'
 ```
 
 **Proposing vision features (issue #1219/#1149):**

@@ -897,6 +897,19 @@ civilization_status() {
   fi
   output="${output}Coordinator heartbeat:   ${last_heartbeat}${heartbeat_age}\n"
 
+  # Active swarms (v0.6, issue #1775 — Swarm Intelligence observability)
+  local active_swarms
+  active_swarms=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo "")
+  if [ -z "$active_swarms" ]; then
+    output="${output}Active swarms:           none (v0.6 swarm automation not yet triggered)\n"
+  else
+    # Count swarms: pipe-separated entries
+    local swarm_count
+    swarm_count=$(printf '%s' "$active_swarms" | tr '|' '\n' | grep -c . 2>/dev/null || echo "0")
+    output="${output}Active swarms:           ${swarm_count} active — ${active_swarms}\n"
+  fi
+
   printf "%b" "$output"
 }
 
