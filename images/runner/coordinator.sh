@@ -147,6 +147,47 @@ ensure_state_fields_initialized() {
     [ "$silent" = "false" ] && echo "  Initializing enactedDecisions (was empty/null)"
     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
       -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
+  else
+    # Issue #1427: Migrate old-format enactedDecisions entries to new enacted_topic_<topic> format.
+    # PR #1420 (fixes #1398) changed decision_key from "topic_kv_pairs" to "enacted_topic_topic".
+    # Old entries without "enacted_topic_" prefix won't be matched by the new dedup check,
+    # potentially causing re-enactment of already-decided governance topics.
+    # This migration adds enacted_topic_<topic> entries for any topic missing them.
+    local new_entries=""
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      # Extract the decision_key field (second word after timestamp)
+      local entry_key
+      entry_key=$(echo "$entry" | awk '{print $2}')
+      [ -z "$entry_key" ] && continue
+      # Skip if already in new format (starts with "enacted_topic_")
+      [[ "$entry_key" == enacted_topic_* ]] && continue
+      # Extract topic from old format: "topic_kv_key=value_..." → "topic"
+      # Topics use only hyphens (e.g. "circuit-breaker", "release-v0.1"),
+      # while kv_pairs use underscores as separators. So splitting on the FIRST "_"
+      # reliably extracts the topic from old-format decision keys.
+      local old_topic
+      old_topic=$(echo "$entry_key" | cut -d'_' -f1)
+      [ -z "$old_topic" ] && continue
+      local new_key="enacted_topic_${old_topic}"
+      # Only add if not already present in enacted decisions
+      if ! echo "$enacted" | grep -qF "$new_key"; then
+        local ts
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        local new_entry="${ts} ${new_key} approvals=0 migrated-from-legacy-format"
+        [ -z "$new_entries" ] && new_entries="$new_entry" || new_entries="${new_entries} | ${new_entry}"
+        [ "$silent" = "false" ] && echo "  Migrated enactedDecisions entry: ${old_topic} → ${new_key} (issue #1427)"
+      fi
+    done <<< "$(echo "$enacted" | tr '|' '\n')"
+    if [ -n "$new_entries" ]; then
+      local migrated_enacted="${enacted} | ${new_entries}"
+      # Sanitize for JSON: escape double quotes, remove newlines
+      local safe_migrated
+      safe_migrated=$(echo "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+      kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"enactedDecisions\":\"$safe_migrated\"}}" 2>/dev/null || true
+      [ "$silent" = "false" ] && echo "  enactedDecisions migration complete (issue #1427)"
+    fi
   fi
 
   # Initialize identity-based routing fields (issue #1113)
