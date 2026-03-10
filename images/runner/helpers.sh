@@ -86,13 +86,17 @@ EOF
 
 # ── record_debate_outcome ─────────────────────────────────────────────────────
 # Store debate resolution in S3 for future agent queries.
-# Usage: record_debate_outcome <thread_id> <outcome> <resolution> [topic]
+# Usage: record_debate_outcome <thread_id> <outcome> <resolution> [topic] [component]
 # Outcomes: synthesized | consensus-agree | consensus-disagree | unresolved
+# component: optional file/component name (e.g. "coordinator.sh", "entrypoint.sh")
+#   When provided, also writes to the component knowledge graph index:
+#   s3://bucket/knowledge-graph/components/<component>.json
 record_debate_outcome() {
   local thread_id="$1"
   local outcome="$2"
   local resolution="$3"
   local topic="${4:-}"
+  local component="${5:-}"
 
   if [ -z "$thread_id" ] || [ -z "$outcome" ] || [ -z "$resolution" ]; then
     log "ERROR: record_debate_outcome requires thread_id, outcome, and resolution"
@@ -129,6 +133,7 @@ record_debate_outcome() {
 {
   "threadId": "${thread_id}",
   "topic": "${topic}",
+  "component": "${component}",
   "outcome": "${outcome}",
   "resolution": ${escaped_resolution},
   "participants": ${participants},
@@ -145,8 +150,81 @@ EOF
     return 1
   fi
 
-  log "Recorded debate outcome: thread=${thread_id} outcome=${outcome} topic=${topic}"
+  log "Recorded debate outcome: thread=${thread_id} outcome=${outcome} topic=${topic} component=${component}"
+
+  # Issue #1609: Update component knowledge graph index if component is specified
+  # This enables query_debate_outcomes_by_component() to find relevant debates quickly
+  if [ -n "$component" ]; then
+    _update_component_knowledge_graph "$component" "$thread_id" "$topic" "$outcome" "$timestamp" "$resolution"
+  fi
+
   return 0
+}
+
+# ── _update_component_knowledge_graph ────────────────────────────────────────
+# Internal: Update the knowledge graph index for a specific component (file).
+# Maintains a rolling window of the 10 most recent debate outcomes per component.
+# Path: s3://bucket/knowledge-graph/components/<component-slug>.json
+# Called by record_debate_outcome() when component field is non-empty.
+# Issue #1609: Phase 2 — coordinator index building.
+_update_component_knowledge_graph() {
+  local component="$1"
+  local thread_id="$2"
+  local topic="$3"
+  local outcome="$4"
+  local timestamp="$5"
+  local resolution="$6"
+
+  # Sanitize component name for S3 key: replace / and spaces with -
+  local component_slug
+  component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+  [ -z "$component_slug" ] && return 0
+
+  local index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+  local escaped_resolution
+  escaped_resolution=$(echo "$resolution" | jq -Rs '.')
+
+  # New entry to prepend
+  local new_entry
+  new_entry=$(cat <<EOF
+{
+  "threadId": "${thread_id}",
+  "topic": "${topic}",
+  "outcome": "${outcome}",
+  "resolution": ${escaped_resolution},
+  "timestamp": "${timestamp}"
+}
+EOF
+)
+
+  # Read existing index (if present) and prepend new entry, keeping last 10
+  local existing_index="[]"
+  if aws s3 ls "$index_path" >/dev/null 2>&1; then
+    existing_index=$(aws s3 cp "$index_path" - 2>/dev/null || echo "[]")
+    [ -z "$existing_index" ] && existing_index="[]"
+  fi
+
+  local updated_index
+  updated_index=$(echo "$existing_index" | jq \
+    --argjson entry "$new_entry" \
+    '[$entry] + . | unique_by(.threadId) | .[0:10]' 2>/dev/null || echo "[$new_entry]")
+
+  local index_json
+  index_json=$(cat <<EOF
+{
+  "component": "${component}",
+  "updatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "debateCount": $(echo "$updated_index" | jq 'length' 2>/dev/null || echo 1),
+  "debates": ${updated_index}
+}
+EOF
+)
+
+  if echo "$index_json" | aws s3 cp - "$index_path" --content-type application/json >/dev/null 2>&1; then
+    log "Updated component knowledge graph: component=${component} thread=${thread_id}"
+  else
+    log "WARNING: Failed to update component knowledge graph for ${component} (non-fatal)"
+  fi
 }
 
 # ── post_debate_response ──────────────────────────────────────────────────────
@@ -241,6 +319,52 @@ query_debate_outcomes() {
   echo "$results"
 }
 
+# ── query_debate_outcomes_by_component ───────────────────────────────────────
+# Query past debate resolutions from the component knowledge graph index.
+# Much faster than query_debate_outcomes() — reads a single pre-built index file
+# instead of listing and reading all debate files.
+# Issue #1609: Phase 2 — component knowledge graph index.
+#
+# Usage: query_debate_outcomes_by_component <component>
+# Returns: JSON array of up to 10 recent debate outcomes for that component
+#
+# Example:
+#   # Before modifying coordinator.sh, check what past debates say about it:
+#   past=$(query_debate_outcomes_by_component "coordinator.sh")
+#   echo "$past" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution[0:100])"'
+query_debate_outcomes_by_component() {
+  local component="${1:-}"
+
+  if [ -z "$component" ]; then
+    log "WARNING: query_debate_outcomes_by_component requires component argument"
+    echo "[]"
+    return 0
+  fi
+
+  # Sanitize component name for S3 key (same as _update_component_knowledge_graph)
+  local component_slug
+  component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+
+  local index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+
+  if ! aws s3 ls "$index_path" >/dev/null 2>&1; then
+    # No index yet for this component — fall back to empty
+    log "No knowledge graph index found for component: ${component}"
+    echo "[]"
+    return 0
+  fi
+
+  local index_json
+  index_json=$(aws s3 cp "$index_path" - 2>/dev/null || echo "{}")
+  if [ -z "$index_json" ] || [ "$index_json" = "{}" ]; then
+    echo "[]"
+    return 0
+  fi
+
+  # Return the debates array from the index
+  echo "$index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]"
+}
+
 # ── push_metric stub ─────────────────────────────────────────────────────────
 # Stub for CloudWatch metric push — no-op in helpers.sh context since we don't
 # have the full entrypoint.sh environment (no aws cloudwatch put-metric-data call).
@@ -258,8 +382,13 @@ fi
 # specialization tracking can find it even after coordinator cleanup removes the
 # activeAssignments entry (fix for issue #1252: WORKED_ISSUE=0 race condition).
 #
+# Issue #1672: Also checks for existing open PRs before claiming. The coordinator's
+# task queue (refresh_task_queue) already skips issues with open PRs, but agents that
+# self-select via claim_task() directly bypass that check. This pre-claim PR check
+# prevents duplicate implementations when multiple agents race for the same issue.
+#
 # Usage: claim_task <issue_number>
-# Returns: 0 if claim succeeded, 1 if already claimed by another agent or on error
+# Returns: 0 if claim succeeded, 1 if already claimed, has open PR, or on error
 #
 # IMPORTANT: In OpenCode bash tool context, this function runs in a fresh subprocess.
 # COORDINATOR_ISSUE cannot be set in the parent entrypoint.sh process from here.
@@ -276,6 +405,32 @@ fi
 claim_task() {
   local issue="$1"
   [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
+
+  # Issue #1669: Planners should spawn workers for issues, not claim them directly.
+  # Planner assignments become ghost entries that block workers from claiming the same issues,
+  # because planners exit after spawning workers (not after implementing the issue).
+  local calling_role="${AGENT_ROLE:-}"
+  if [ "$calling_role" = "planner" ]; then
+    log "Coordinator: planners should not claim issues — spawn a worker for issue #$issue instead (role=$calling_role)"
+    return 1
+  fi
+
+  # Issue #1672: Check if an open PR already exists for this issue before claiming.
+  # The coordinator's task queue refresh (refresh_task_queue) already skips issues
+  # with open PRs, but agents that self-select via direct claim_task() bypass that check.
+  # This pre-claim PR check prevents duplicate PR implementations when multiple agents
+  # see the same open issue and race to claim it after a stale assignment is released.
+  local github_repo="${REPO:-pnz1990/agentex}"
+  local open_pr_url
+  open_pr_url=$(gh api "/repos/${github_repo}/pulls?state=open&per_page=100" 2>/dev/null | \
+    jq -r --arg n "$issue" \
+    '.[] | select(.body // "" | test("(C|c)loses? #\($n)\\b|(F|f)ixes? #\($n)\\b|(R|r)esolves? #\($n)\\b")) | .html_url' \
+    2>/dev/null | head -1)
+  if [ -n "$open_pr_url" ]; then
+    log "Coordinator: issue #$issue already has open PR — skipping to prevent duplicate implementation (PR: $open_pr_url)"
+    push_metric "TaskClaimBlockedByPR" 1
+    return 1
+  fi
 
   local max_attempts=5
   local attempt=0
@@ -332,6 +487,9 @@ claim_task() {
         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         _cache_issue_labels "$issue"
+        # Issue #1593: Record claim timestamp so cleanup_stale_assignments() preserves this
+        # assignment during the 120s grace window (worker pod may not have started yet).
+        _record_claim_timestamp "$issue"
         return 0
       fi
     else
@@ -346,6 +504,9 @@ claim_task() {
         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         _cache_issue_labels "$issue"
+        # Issue #1593: Record claim timestamp so cleanup_stale_assignments() preserves this
+        # assignment during the 120s grace window (worker pod may not have started yet).
+        _record_claim_timestamp "$issue"
         return 0
       fi
     fi
@@ -406,6 +567,42 @@ _cache_issue_labels() {
     --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" \
     2>/dev/null && log "Issue #$issue labels cached in coordinator-state.issueLabels" || \
     log "WARNING: Failed to cache labels for issue #$issue (non-fatal)"
+}
+
+# ── _record_claim_timestamp (internal) ───────────────────────────────────────
+# Record a claim timestamp to preClaimTimestamps so cleanup_stale_assignments()
+# preserves this assignment during the 120s grace window after claim_task() succeeds.
+# Called internally by claim_task() — not intended for direct use.
+# Issue #1593: Without this, worker self-claims via claim_task() are NOT written to
+# preClaimTimestamps, so cleanup_stale_assignments() removes the assignment when the
+# worker Job hasn't started yet (kro + EKS latency can take 60-120s). This causes
+# a second worker to claim the same issue → duplicate PRs.
+# Format: coordinator-state.preClaimTimestamps = "agent:issue:epoch_seconds;..."
+_record_claim_timestamp() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  local ts_epoch
+  ts_epoch=$(date +%s)
+  local ts_entry="${AGENT_NAME}:${issue}:${ts_epoch}"
+
+  # Read current timestamps
+  local cur_ts
+  cur_ts=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.preClaimTimestamps}' 2>/dev/null || echo "")
+
+  local new_ts
+  if [ -z "$cur_ts" ]; then
+    new_ts="$ts_entry"
+  else
+    new_ts="${cur_ts};${ts_entry}"
+  fi
+
+  # Best-effort write — non-fatal if it fails (worst case: duplicate PR race remains)
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"preClaimTimestamps\":\"${new_ts}\"}}" \
+    2>/dev/null && log "Issue #$issue claim timestamp recorded in preClaimTimestamps (ts=${ts_epoch})" || \
+    log "WARNING: Failed to record claim timestamp for issue #$issue in preClaimTimestamps (non-fatal)"
 }
 
 # ── civilization_status ───────────────────────────────────────────────────────
@@ -813,11 +1010,11 @@ query_thoughts() {
 
 # ── cleanup_old_thoughts ─────────────────────────────────────────────────────
 # Delete thoughts older than 24 hours (or 2h for low-signal types like
-# blockers and observations) to prevent cluster clutter and kubectl performance
-# degradation. Planners should call this periodically.
+# blockers, observations, decisions, and planning thoughts) to prevent cluster
+# clutter and kubectl performance degradation. Planners should call this periodically.
 #
-# Low-signal types (blocker, observation): 2h TTL
-# High-signal types (insight, decision, debate, proposal, vote): 24h TTL
+# Low-signal types (blocker, observation, decision, plan, planning): 2h TTL
+# High-signal types (insight, debate, proposal, vote): 24h TTL
 #
 # Usage: cleanup_old_thoughts
 cleanup_old_thoughts() {
@@ -840,14 +1037,15 @@ cleanup_old_thoughts() {
     return 0
   fi
 
-  # Tiered TTL: low-signal types (blocker, observation) expire after 2h
-  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  # Tiered TTL: low-signal types (blocker, observation, decision, plan, planning) expire after 2h
+  # Issue #1614: decision/plan/planning are auto-generated system metadata thoughts (~10/agent/run)
+  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
     --arg cutoff_24h "$cutoff_24h" \
     --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
       then $cutoff_2h
       else $cutoff_24h
       end) as $cutoff |
@@ -865,8 +1063,8 @@ cleanup_old_thoughts() {
   log "Deleting $count old thoughts in batches of 50..."
   echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
 
-  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
-  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance" 2>/dev/null || true
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decisions/plan: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: low-signal 2h, high-signal 24h)" "observation" 7 "maintenance" 2>/dev/null || true
 }
 
 # ── cleanup_old_messages ─────────────────────────────────────────────────────
@@ -967,51 +1165,70 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-# ── query_debate_outcomes_by_component ───────────────────────────────────────
-# Query past debate resolutions from the component knowledge graph index.
-# Much faster than query_debate_outcomes() — reads a single pre-built index file
-# instead of listing and reading all debate files.
-# Issue #1609/#1645: Phase 3 — component knowledge graph context injection.
+# ── post_chronicle_candidate ─────────────────────────────────────────────────
+# Post a chronicle-candidate Thought CR to propose an insight for the civilization
+# chronicle. Part of the v0.4 Collective Memory milestone (issue #1605).
 #
-# Usage: query_debate_outcomes_by_component <component>
-# Returns: JSON array of up to 10 recent debate outcomes for that component.
-#          Returns empty array "[]" if no index found (non-fatal).
+# The chronicle is currently entirely god-curated, creating a bottleneck as agent
+# count grows. This function enables agents to surface high-value insights for
+# god review, distributing memory curation while maintaining quality control.
+#
+# How it works:
+#   1. Agent calls post_chronicle_candidate() with a high-value insight
+#   2. Coordinator aggregates top 3 chronicle-candidate thoughts by confidence
+#      in coordinator-state.chronicleCandidates (updated every ~3 min)
+#   3. God-delegate reads chronicleCandidates when writing the next chronicle entry
+#
+# Usage: post_chronicle_candidate <era_description> <summary> <lesson_learned> [milestone]
+#   era_description  — short tag (e.g. "Generation 4 — Debate Quality Tracking")
+#   summary          — what happened (2-3 sentences)
+#   lesson_learned   — what future agents should know from this
+#   milestone        — optional: PR/issue/feature that enabled this
 #
 # Example:
-#   # Before modifying coordinator.sh, check what past debates say about it:
-#   past=$(query_debate_outcomes_by_component "coordinator.sh")
-#   echo "$past" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution[0:100])"'
-query_debate_outcomes_by_component() {
-  local component="${1:-}"
+#   post_chronicle_candidate \
+#     "Generation 4 — Debate Quality Tracking" \
+#     "Agents now track synthesis citation counts to distinguish high-signal debates." \
+#     "High-quality debates produce insights that persist in future routing decisions." \
+#     "v0.4 debate quality scoring implemented (PR #XXXX)"
+#
+# IMPORTANT: Only use for genuinely generation-level insights — milestones, paradigm
+# shifts, or hard-won lessons. Trivial observations dilute signal quality.
+# Confidence is fixed at 9 to enforce quality filtering.
+#
+# Returns: 0 on success, 1 on missing required arguments
+post_chronicle_candidate() {
+  local era="${1:-}"
+  local summary="${2:-}"
+  local lesson="${3:-}"
+  local milestone="${4:-}"
 
-  if [ -z "$component" ]; then
-    log "WARNING: query_debate_outcomes_by_component requires component argument"
-    echo "[]"
-    return 0
+  if [ -z "$era" ] || [ -z "$summary" ] || [ -z "$lesson" ]; then
+    log "ERROR: post_chronicle_candidate requires era, summary, and lesson arguments"
+    return 1
   fi
 
-  # Sanitize component name for S3 key: replace / and spaces with -
-  local component_slug
-  component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+  # Chronicle candidates must have high confidence (fixed at 9) to filter noise
+  local confidence=9
 
-  local index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+  local content="ERA: ${era}
+Summary: ${summary}
+Lesson: ${lesson}"
 
-  if ! aws s3 ls "$index_path" >/dev/null 2>&1; then
-    # No index yet for this component — return empty (non-fatal, knowledge graph is optional)
-    echo "[]"
-    return 0
+  if [ -n "$milestone" ]; then
+    content="${content}
+Milestone: ${milestone}"
   fi
 
-  local index_json
-  index_json=$(aws s3 cp "$index_path" - 2>/dev/null || echo "{}")
-  if [ -z "$index_json" ] || [ "$index_json" = "{}" ]; then
-    echo "[]"
-    return 0
-  fi
+  content="${content}
+Proposed by: ${AGENT_NAME}"
 
-  # Return the debates array from the index
-  echo "$index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]"
+  post_thought "$content" "chronicle-candidate" "$confidence" "chronicle" "" ""
+
+  log "Posted chronicle-candidate: era='$era' (confidence=$confidence)"
+  log "  Coordinator will surface top-3 candidates in coordinator-state.chronicleCandidates"
+  return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

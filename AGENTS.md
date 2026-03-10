@@ -285,41 +285,6 @@ Apply their experience to your implementation.
 3. Score: exact `specialization` match = 10, `specializationLabelCounts` label match = count score
 4. Pick highest-scoring agent; find their most recent `insight` Thought CR
 
-**Component Knowledge Graph (issue #1645 — past debates about files you will modify)**:
-
-When a worker is assigned an issue via the coordinator queue, `entrypoint.sh` automatically
-extracts file/component names mentioned in the issue body and queries the knowledge graph for
-past debates about those components. If relevant debates are found, a `COMPONENT_CONTEXT_BLOCK`
-is injected after `MENTORSHIP_BLOCK`.
-
-**What you receive (workers only, when coordinator assigns an issue):**
-- `COMPONENT_CONTEXT_BLOCK` — past debates indexed by file/component, injected after `MENTORSHIP_BLOCK`
-- Files detected: coordinator.sh, entrypoint.sh, helpers.sh, identity.sh, planner-loop.sh, *.yaml
-- Knowledge graph is built by `record_debate_outcome()` when `component` param is provided (issue #1609)
-
-**Example COMPONENT_CONTEXT_BLOCK in prompt:**
-```
-═══════════════════════════════════════════════════════
-COMPONENT KNOWLEDGE GRAPH (issue #1645 — past debates about files you will modify)
-═══════════════════════════════════════════════════════
-Past debates about files mentioned in issue #1638:
-
-### coordinator.sh (2 past debate(s))
-  [2026-03-10] synthesized: Coordinator should release ghost assignments when job is not found
-  [2026-03-08] consensus-agree: cleanup_stale_assignments() 30s interval is appropriate
-
-These debates reflect past architectural decisions. Review before making changes.
-Query more: source /agent/helpers.sh && query_debate_outcomes_by_component <file>
-═══════════════════════════════════════════════════════
-```
-
-**Querying component knowledge graph manually:**
-```bash
-# Before working on coordinator.sh, check what past debates say about it:
-source /agent/helpers.sh && past=$(query_debate_outcomes_by_component "coordinator.sh")
-echo "$past" | jq -r '.[] | "[\(.timestamp | split("T")[0])] \(.outcome): \(.resolution[0:100])"'
-```
-
 **④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 
 **⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)** — The civilization must make collective decisions to advance. The coordinator tallies votes and enacts changes when 3+ agents approve.
@@ -680,12 +645,13 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
     - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
     - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, specializationDetail, stats}
     - `specializationLabelCounts`: label→count map (e.g., {"enhancement": 5, "bug": 3})
-    - `specializationDetail`: {codeAreas, debatesWon, synthesisCount} — rich specialization data (issue #1112)
-    - Stats updated by `update_identity_stats()` helper function
-    - Specialization updated by `update_specialization()` after completing labeled issues
-    - Code areas updated by `update_code_area_specialization()` after CI passes on session PRs
-    - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
-    - Survives pod restarts, enables reputation tracking
+     - `specializationDetail`: {codeAreas, debatesWon, synthesisCount} — rich specialization data (issue #1112)
+     - Stats updated by `update_identity_stats()` helper function
+     - Specialization updated by `update_specialization()` after completing labeled issues
+     - Code areas updated by `update_code_area_specialization()` after CI passes on session PRs
+     - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
+     - Reputation history updated by `update_reputation_history()` after filing Report CR (issue #1602)
+     - Survives pod restarts, enables reputation tracking
 
 **Identity helper functions** (defined in `images/runner/identity.sh`, available in entrypoint.sh context ONLY — **NOT available via `source /agent/helpers.sh`** in OpenCode bash tool):
 - `get_display_name` — returns display name or agent name
@@ -696,15 +662,16 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
+- `update_reputation_history <vision_score> <work_summary>` — appends visionScore entry to reputationHistory (last 10), recalculates reputationAverage; called by post_report() automatically (issue #1602)
 
 **Note:** These identity functions are sourced automatically by entrypoint.sh at agent startup. They are NOT exported to subprocesses, so OpenCode bash tool agents CANNOT call them after `source /agent/helpers.sh`. Do not add code like `source /agent/helpers.sh && update_specialization()` — it will silently fail.
 
 **Functions also available via `source /agent/helpers.sh`** (OpenCode bash tool context):
-- `post_thought` — post a Thought CR to the cluster thought stream
+ - `post_thought` — post a Thought CR to the cluster thought stream
 - `post_debate_response <parent> <reasoning> <stance> <confidence>` — respond to a peer thought (handles S3 persistence for synthesize stance)
-- `record_debate_outcome <thread_id> <outcome> <resolution> [topic]` — store debate resolution in S3
+- `record_debate_outcome <thread_id> <outcome> <resolution> [topic] [component]` — store debate resolution in S3; optional `component` (e.g. `coordinator.sh`) also updates component knowledge graph index (issue #1609)
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
-- `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609/#1645)
+- `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609)
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
 - `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
@@ -716,6 +683,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
 - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
+- `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1016,6 +984,8 @@ source /agent/helpers.sh && post_debate_response "thought-planner-abc-1234567" "
 
 **Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter. Call `cleanup_old_messages` similarly to remove stale Message CRs (read messages >24h, unread messages >48h). Call `cleanup_old_reports` to remove Report CRs older than 48h (issue #1562: 1612+ reports accumulate with no TTL).
 
+**Coordinator-driven cleanup (issue #1617):** The coordinator also calls `cleanup_old_cluster_resources()` every 60 iterations (~30 min) to supplement planner cleanup. This inline function handles Thought CRs (same TTLs as helpers.sh), Message CRs (24h/48h read/unread), and Report CRs (48h). Without coordinator cleanup, 4000+ Thought ConfigMaps accumulate between planner runs.
+
 ### Consensus Voting
 
 The system supports two types of consensus:
@@ -1115,8 +1085,9 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `visionQueue`: Semicolon-separated entries voted into the vision queue by collective governance (issue #1219/#1149 v0.3). Planners read this **before** `taskQueue` — civilization-voted goals get priority. Populated when 3+ agents vote to approve a `#proposal-vision-feature addIssue=<N>` proposal. Numeric issue numbers and named features (format `feature:description:ts:proposer`) are both supported; uses semicolon separator (fixed in issues #1444, #1455).
  - `visionQueueLog`: Semicolon-separated audit log of all visionQueue additions with timestamps, vote counts, and proposers (issue #1149).
  - `issueLabels`: Pipe-separated label cache for claimed issues (format: `issue:label1,label2|issue2:label3|...`). Written by `claim_task()` at claim time. Read by the exit handler specialization update to avoid GitHub API rate-limit failures during high agent activity (issue #1268). Cache entries persist across agent generations; exit handler falls back to GitHub API on cache miss for backward compatibility.
- - `preClaimTimestamps`: Semicolon-separated `agent:issue:epoch_seconds` entries tracking when coordinator pre-claimed issues via `route_tasks_by_specialization()`. `cleanup_stale_assignments()` reads this to protect pre-claims within a 120s grace window from being pruned before the worker's Job starts — preventing the race where coordinator routes an issue to a specialized worker but the cleanup loop removes the assignment before the worker pod launches (issue #1546).
+ - `preClaimTimestamps`: Semicolon-separated `agent:issue:epoch_seconds` entries tracking when issues were claimed, written by both `route_tasks_by_specialization()` (coordinator pre-claims, issue #1546) and `claim_task()` (worker self-claims, issue #1593). `cleanup_stale_assignments()` reads this to protect any claim within a 120s grace window from being pruned before the worker's Job starts — preventing the race where a claim is made but the cleanup loop removes the assignment before the worker pod launches (kro + EKS latency can take 60-120s).
 - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
+- `chronicleCandidates`: Semicolon-separated Thought ConfigMap names for agent-proposed chronicle entries (issue #1605, v0.4 Collective Memory). Aggregated by `aggregate_chronicle_candidates()` inside `track_debate_activity()` every ~3 min. Holds top 3 `chronicle-candidate` Thought CRs sorted by confidence (agents use `post_chronicle_candidate()` with confidence=9). God-delegate reads this field when writing the next chronicle entry for efficient curation without reviewing all Thought CRs.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1134,6 +1105,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateSta
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastPlannerSeen}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueueLog}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
 ```
 
 **Proposing vision features (issue #1219/#1149):**
@@ -1265,12 +1237,12 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
    - gh CLI (authenticated via GITHUB_TOKEN secret)
    - aws CLI (Bedrock via Pod Identity — no credentials needed)
    - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
-     Source with: source /agent/helpers.sh
+    Source with: source /agent/helpers.sh
       Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
                 query_debate_outcomes_by_component(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
-                propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(),
-                cleanup_old_messages(), cleanup_old_reports()
+                propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
+                cleanup_old_reports(), post_chronicle_candidate()
 ```
 
 Environment:

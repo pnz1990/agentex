@@ -343,16 +343,46 @@ ensure_state_fields_initialized() {
   fi
 
   # routingCyclesWithZeroSpec (issue #1568): counter tracking consecutive routing cycles where
-  # specializedAssignments=0. When it reaches 5, coordinator escalates with a blocker thought
-  # AND files a GitHub issue to ensure the regression is visible and self-reported.
-  # Reset to 0 when specializedAssignments increments (routing is working).
+   # specializedAssignments=0. When it reaches 5, coordinator escalates with a blocker thought
+   # AND files a GitHub issue to ensure the regression is visible and self-reported.
+   # Reset to 0 when specializedAssignments increments (routing is working).
   if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("routingCyclesWithZeroSpec")' >/dev/null 2>&1; then
     [ "$silent" = "false" ] && echo "  Initializing routingCyclesWithZeroSpec (was absent)"
     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
       -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
   fi
 
+  # chronicleCandidates (issue #1605): semicolon-separated Thought ConfigMap names for
+  # agent-proposed chronicle entries. Aggregated by aggregate_chronicle_candidates() every
+  # ~3 min (inside track_debate_activity). God-delegate reads this when writing the chronicle.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
+
+  # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
+  # voteRegistry_* keys accumulate indefinitely (47+ observed) since the previous implementation
+  # never deleted them after enaction. Going forward, keys are removed after each verdict.
+  # This one-time sweep cleans up keys that accumulated before this fix was deployed.
+  local enacted_decisions
+  enacted_decisions=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null || echo "")
+  if [ -n "$enacted_decisions" ]; then
+    local stale_count=0
+    # Get all voteRegistry_* key names
+    while IFS= read -r vote_key; do
+      [ -z "$vote_key" ] && continue
+      local topic="${vote_key#voteRegistry_}"
+      # Check if this topic appears in enactedDecisions (topic in decision key format)
+      if echo "$enacted_decisions" | grep -q "${topic}"; then
+        remove_state "$vote_key" 2>/dev/null && stale_count=$((stale_count + 1)) || true
+      fi
+    done < <(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | \
+      jq -r '.data | keys[] | select(startswith("voteRegistry_"))' 2>/dev/null || true)
+    [ "$stale_count" -gt 0 ] && [ "$silent" = "false" ] && echo "  Issue #1650: Cleaned $stale_count stale voteRegistry keys (enacted topics)"
+  fi
 }
 
 # Run at startup
@@ -412,6 +442,14 @@ get_state() {
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
         -o jsonpath="{.data.$field}" 2>/dev/null || echo ""
+}
+
+remove_state() {
+    # Issue #1650: Remove a key from coordinator-state ConfigMap to prevent unbounded growth.
+    # Uses JSON Patch 'remove' operation — safer than merge-patch null (which leaves a null key).
+    local field="$1"
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+        --type=json -p "[{\"op\":\"remove\",\"path\":\"/data/${field}\"}]" 2>/dev/null || true
 }
 
 heartbeat() {
@@ -825,6 +863,16 @@ cleanup_stale_assignments() {
         local issue
         issue=$(echo "${pair##*:}" | tr -d '[:space:]')
 
+        # Issue #1669: Immediately release any assignment made by a planner.
+        # Planners spawn workers for issues — they should never hold implementation claims.
+        # Ghost planner assignments block workers from claiming the same issues.
+        # Detect planner agents by name prefix (planner-* naming convention).
+        if echo "$agent_name" | grep -q "^planner"; then
+            echo "[$(date -u +%H:%M:%S)] Ghost planner: $agent_name → issue #$issue claimed by planner, releasing immediately (planners should spawn workers, not claim)"
+            stale_count=$((stale_count + 1))
+            continue
+        fi
+
         local job_active
         # Issue #1170: Suppress jq parse errors from kubectl non-JSON output.
         # Issue #1260: Root cause fix — capture kubectl output first, use empty-object fallback.
@@ -1034,6 +1082,147 @@ cleanup_orphaned_pods() {
 
     echo "[$(date -u +%H:%M:%S)] Deleted $deleted_count orphaned pods"
     push_metric "OrphanedPodsDeleted" "$deleted_count" "Count" "Component=Coordinator"
+}
+
+# cleanup_old_cluster_resources — Periodically delete stale Thought and Message CRs (issue #1617)
+# The cluster accumulates 4000+ Thought ConfigMaps and 1600+ Report CRs when planner cleanup
+# doesn't run frequently enough. The coordinator runs continuously every ~30s and is better
+# positioned for periodic cleanup to supplement planner-initiated cleanup.
+#
+# TTLs match helpers.sh cleanup_old_thoughts / cleanup_old_messages:
+#   Thought low-signal (blocker, observation, decision, plan, planning): 2h TTL
+#   Thought high-signal (insight, debate, proposal, vote): 24h TTL
+# Issue #1662: align with PR #1627 fix — decision/plan/planning now use 2h TTL (was 24h)
+#   Messages (read): 24h TTL
+#   Messages (unread): 48h TTL
+#   Reports: 48h TTL
+#
+# Runs every 60 iterations (~30 min) to bound coordinator blocking time.
+cleanup_old_cluster_resources() {
+    local cutoff_2h cutoff_24h cutoff_48h
+    cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+    if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ] || [ -z "$cutoff_48h" ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: Cannot calculate cleanup cutoffs — skipping (date command issue)"
+        return 0
+    fi
+
+    local total_deleted=0
+
+    # --- Thought ConfigMap cleanup ---
+    # Use 60s timeout: 4000+ CRs takes 10-15s to list
+    local all_thoughts_json
+    all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$all_thoughts_json" ] && [ "$all_thoughts_json" != "null" ]; then
+        local old_thoughts
+        old_thoughts=$(echo "$all_thoughts_json" | jq -r \
+            --arg cutoff_24h "$cutoff_24h" \
+            --arg cutoff_2h "$cutoff_2h" \
+            '.items[] |
+             (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
+              then $cutoff_2h
+              else $cutoff_24h
+              end) as $cutoff |
+             select(.metadata.creationTimestamp < $cutoff) |
+             .metadata.name' 2>/dev/null || true)
+        if [ -n "$old_thoughts" ]; then
+            local thought_count
+            thought_count=$(echo "$old_thoughts" | wc -w)
+            echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $thought_count old thoughts..."
+            echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            total_deleted=$((total_deleted + thought_count))
+        fi
+    fi
+
+    # --- Message CR cleanup ---
+    local all_messages_json
+    all_messages_json=$(kubectl_with_timeout 30 get messages -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$all_messages_json" ] && [ "$all_messages_json" != "null" ]; then
+        local old_messages
+        old_messages=$(echo "$all_messages_json" | jq -r \
+            --arg cutoff_24h "$cutoff_24h" \
+            --arg cutoff_48h "$cutoff_48h" \
+            '.items[] |
+             (if (.status.read // "false") == "true"
+              then $cutoff_24h
+              else $cutoff_48h
+              end) as $cutoff |
+             select(.metadata.creationTimestamp < $cutoff) |
+             .metadata.name' 2>/dev/null || true)
+        if [ -n "$old_messages" ]; then
+            local msg_count
+            msg_count=$(echo "$old_messages" | wc -w)
+            echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $msg_count old messages..."
+            echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            total_deleted=$((total_deleted + msg_count))
+        fi
+    fi
+
+    # --- Report CR cleanup (48h TTL) ---
+    local all_reports_json
+    all_reports_json=$(kubectl_with_timeout 60 get reports -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$all_reports_json" ] && [ "$all_reports_json" != "null" ]; then
+        local old_reports
+        old_reports=$(echo "$all_reports_json" | jq -r \
+            --arg cutoff_48h "$cutoff_48h" \
+            '.items[] | select(.metadata.creationTimestamp < $cutoff_48h) | .metadata.name' 2>/dev/null || true)
+        if [ -n "$old_reports" ]; then
+            local report_count
+            report_count=$(echo "$old_reports" | wc -w)
+            echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $report_count old reports (48h TTL)..."
+            echo "$old_reports" | xargs -n 50 kubectl delete reports -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            total_deleted=$((total_deleted + report_count))
+        fi
+    fi
+
+    if [ "$total_deleted" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: removed $total_deleted stale CRs (thoughts+messages+reports)"
+        push_metric "ClusterResourcesDeleted" "$total_deleted" "Count" "Component=Coordinator"
+    fi
+
+    # Issue #1667: Prune orphaned entries from unresolvedDebates (parent CM was deleted)
+    prune_orphaned_unresolved_debates
+}
+
+# prune_orphaned_unresolved_debates — remove entries from unresolvedDebates that reference
+# deleted thought ConfigMaps (issue #1667). Called from cleanup_old_cluster_resources() every 30 min.
+#
+# When cleanup_old_thoughts() deletes old thought CMs, any debate thread ID stored in
+# unresolvedDebates whose parent CM is now gone becomes orphaned. This function filters them out.
+prune_orphaned_unresolved_debates() {
+    local current_unresolved
+    current_unresolved=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || true)
+    [ -z "$current_unresolved" ] && return 0
+
+    # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
+    # N individual kubectl get calls (one per unresolved entry). With 98+ entries this
+    # is a significant performance improvement over the per-entry approach.
+    local existing_thought_names
+    existing_thought_names=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+        -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+
+    local pruned_count=0
+    local valid_entries=""
+    while IFS= read -r thread_id; do
+        [ -z "$thread_id" ] && continue
+        if echo " $existing_thought_names " | grep -qF " $thread_id "; then
+            [ -n "$valid_entries" ] \
+                && valid_entries="${valid_entries},${thread_id}" \
+                || valid_entries="$thread_id"
+        else
+            echo "[$(date -u +%H:%M:%S)] Pruning orphaned unresolvedDebate entry: $thread_id"
+            pruned_count=$((pruned_count + 1))
+        fi
+    done < <(echo "$current_unresolved" | tr ',' '\n')
+
+    if [ "$pruned_count" -gt 0 ]; then
+        update_state "unresolvedDebates" "$valid_entries"
+        echo "[$(date -u +%H:%M:%S)] Pruned $pruned_count orphaned entries from unresolvedDebates"
+        push_metric "OrphanedDebatesPruned" "$pruned_count" "Count" "Component=Coordinator"
+    fi
 }
 
 # Reconcile spawnSlots against actual running job count (leak recovery)
@@ -1559,12 +1748,16 @@ tally_and_enact_votes() {
 
         # ISSUE #1248: Vision-feature proposals require DELIBERATION — not just votes.
         # Civilization goal-changes must be debated before they can be enacted.
-        # Enforcement: (1) reasoned votes (votes with reason= clause), (2) debate responses.
+        # Enforcement: (1) reasoned votes (votes with reason= OR reason: clause), (2) debate responses.
         if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
-            # Count votes that include a reason= clause
+            # Count votes that include a reason= or reason: clause.
+            # Issue #1649: AGENTS.md instructs agents to use "reason: ..." format (colon),
+            # but the original check used grep -c "reason=" (equals only). This caused ALL
+            # reasoned votes to count as 0, permanently blocking vision proposals.
+            # Fix: use "reason[=:]" to accept both formats.
             local reasoned_votes
             reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .content" \
-                "$thoughts_file" 2>/dev/null | grep -c "reason=" || true)
+                "$thoughts_file" 2>/dev/null | grep -c "reason[=:]" || true)
             [ -z "$reasoned_votes" ] && reasoned_votes=0
 
             # Count debate responses (thoughts of type "debate") that mention this topic or vision
@@ -1578,7 +1771,7 @@ tally_and_enact_votes() {
 
             if [ "$reasoned_votes" -lt 2 ]; then
                 vision_threshold_met=false
-                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= clause), found $reasoned_votes"
+                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= or reason: clause), found $reasoned_votes"
             elif [ "$debate_responses" -lt 1 ]; then
                 vision_threshold_met=false
                 vision_block_reason="vision-feature requires at least 1 debate response, found $debate_responses"
@@ -1970,9 +2163,65 @@ Vision score: 9/10 — prioritize implementation."
             post_coordinator_thought "$verdict_text" "verdict"
             log_decision "$topic: $kv_pairs" "consensus vote: ${approve_votes} approve ${reject_votes} reject ${abstain_votes} abstain"
 
+            # Issue #1650: Remove the voteRegistry_<topic> key after enaction.
+            # Vote tallies are persisted in enactedDecisions and verdict Thought CRs.
+            # Keeping stale voteRegistry keys causes coordinator-state to grow indefinitely
+            # (47+ entries observed, growing with each governance proposal).
+            remove_state "voteRegistry_${topic}"
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned up voteRegistry_${topic} after enaction"
+
             echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Consensus enacted for $topic"
+
+        # Issue #1696: Cleanup definitively REJECTED proposals (reject >= threshold).
+        # Once reject_votes reach the threshold, the proposal can never be enacted.
+        # Remove the voteRegistry key to prevent coordinator-state growing indefinitely.
+        elif [ "${reject_votes:-0}" -ge "$VOTE_THRESHOLD" ]; then
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: $topic definitively REJECTED (reject=$reject_votes >= threshold=$VOTE_THRESHOLD). Cleaning up."
+            post_coordinator_thought "GOVERNANCE: Proposal #proposal-${topic} definitively rejected (reject_votes=${reject_votes} >= threshold=${VOTE_THRESHOLD}). voteRegistry key removed. A new proposal can re-open this topic." "verdict"
+            remove_state "voteRegistry_${topic}"
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned up voteRegistry_${topic} after rejection"
         fi
     done <<< "$topics"
+
+    # Issue #1696: Cleanup zombie voteRegistry_* keys — proposals that had voteRegistry entries
+    # created but whose proposal Thought CRs have since been deleted by the 24h cleanup TTL.
+    # These keys accumulate with 0 votes and no chance of being enacted (no active proposal).
+    #
+    # Strategy: for each voteRegistry_* key in coordinator-state, check if a proposal Thought CR
+    # still exists for that topic. If no active proposal Thought CR exists, the entry is a zombie.
+    # Vision-feature/vision-queue topics are excluded (per-issue entries use suffix keys).
+    local all_vote_keys
+    all_vote_keys=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq -r '.data | keys[] | select(startswith("voteRegistry_"))' 2>/dev/null || true)
+
+    if [ -n "$all_vote_keys" ]; then
+        # Get all active proposal topics from current in-cluster Thought CRs
+        local active_proposal_topics
+        active_proposal_topics=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+            -l agentex/thought -o json 2>/dev/null \
+            | jq -r '[.items[] | select(.data.thoughtType == "proposal") | .data.content] | .[] ' \
+            | grep -oE '#proposal-[a-zA-Z0-9_-]+' | sed 's/#proposal-//' | sort -u 2>/dev/null || true)
+
+        local zombie_count=0
+        while IFS= read -r vote_key; do
+            [ -z "$vote_key" ] && continue
+            local vote_topic="${vote_key#voteRegistry_}"
+            # Skip vision-feature/vision-queue keys (per-issue suffix keys handled separately)
+            if [[ "$vote_topic" == *"vision-feature"* || "$vote_topic" == *"vision-queue"* ]]; then
+                continue
+            fi
+            # If no active proposal Thought CR exists for this topic, it's a zombie
+            if ! echo "$active_proposal_topics" | grep -qxF "$vote_topic"; then
+                # Check if it's already enacted — enacted topics were cleaned up on enaction.
+                # A zombie is an entry with no active proposal AND not enacted.
+                if ! echo "$loop_enacted" | grep -qF "enacted_topic_${vote_topic}"; then
+                    remove_state "$vote_key" 2>/dev/null && zombie_count=$((zombie_count + 1)) || true
+                    echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Removed zombie voteRegistry_${vote_topic} (no active proposal Thought CR found)"
+                fi
+            fi
+        done <<< "$all_vote_keys"
+        [ "$zombie_count" -gt 0 ] && echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned $zombie_count zombie voteRegistry keys (issue #1696)"
+    fi
 }
 
 # record_synthesis_debates_to_s3: Write synthesis debate thoughts to S3 for collective memory
@@ -2103,6 +2352,55 @@ EOF
     echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes, $skipped_existing already-persisted skipped, 1 prefix LIST call (${synth_count} total synthesis debates)"
 }
 
+# ── aggregate_chronicle_candidates (issue #1605) ──────────────────────────────
+#
+# Aggregate Thought CRs with thoughtType=chronicle-candidate and surface the
+# top 3 (by confidence score) in coordinator-state.chronicleCandidates.
+#
+# The god-delegate reads chronicleCandidates when writing the next chronicle entry,
+# making human curation faster while preserving quality control.
+#
+# v0.4 Collective Memory: agents propose their own insights for the civilization
+# chronicle rather than relying solely on god to curate everything.
+#
+# Implementation:
+#   1. Read all Thought CRs with thoughtType=chronicle-candidate
+#   2. Sort by confidence (highest first), tie-break by recency
+#   3. Take top 3 ConfigMap names
+#   4. Patch coordinator-state.chronicleCandidates (semicolon-separated names)
+aggregate_chronicle_candidates() {
+    # Fetch chronicle-candidate thoughts using label selector to avoid OOM
+    local candidates_json
+    candidates_json=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+        -l agentex/thought -o json 2>/dev/null | \
+        jq '[.items[] | select(.data.thoughtType == "chronicle-candidate") | {
+            name: .metadata.name,
+            confidence: ((.data.confidence // "7") | tonumber),
+            agent: (.data.agentRef // ""),
+            content: ((.data.content // "") | .[0:200]),
+            createdAt: .metadata.creationTimestamp
+        }] | sort_by(-.confidence, .createdAt) | .[0:3]' 2>/dev/null || echo "[]")
+
+    if [ -z "$candidates_json" ] || [ "$candidates_json" = "[]" ] || [ "$candidates_json" = "null" ]; then
+        # No candidates found — keep existing chronicleCandidates field as-is
+        return 0
+    fi
+
+    # Extract top candidate names (semicolon-separated)
+    local top_candidates
+    top_candidates=$(echo "$candidates_json" | jq -r '.[].name' 2>/dev/null | tr '\n' ';' | sed 's/;$//')
+
+    if [ -z "$top_candidates" ]; then
+        return 0
+    fi
+
+    local candidate_count
+    candidate_count=$(echo "$candidates_json" | jq 'length' 2>/dev/null || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] Chronicle candidates: $candidate_count found, top 3 surfaced in chronicleCandidates (issue #1605)"
+    update_state "chronicleCandidates" "$top_candidates"
+}
+
 # Track debate activity — count debate threads, surface unresolved disagreements
 track_debate_activity() {
     local all_cm
@@ -2176,11 +2474,23 @@ track_debate_activity() {
             [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i")) | .parent]
             | unique | .[]' 2>/dev/null || true)
 
+        # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
+        # N individual kubectl get calls (one per disagree thread) for orphan detection.
+        local existing_thought_names_tda
+        existing_thought_names_tda=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+            -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+
         # Build list of unresolved thread IDs (in disagree but not in resolved)
         while IFS= read -r thread_id; do
             [ -z "$thread_id" ] && continue
             # Skip empty/null parentRefs
             [ "$thread_id" = "null" ] && continue
+            # Issue #1667: Skip orphaned entries where the parent CM was already deleted.
+            # Uses pre-fetched batch list to avoid N individual kubectl get calls.
+            if ! echo " $existing_thought_names_tda " | grep -qF " $thread_id "; then
+                echo "[$(date -u +%H:%M:%S)] Skipping orphaned debate thread: $thread_id (parent CM deleted)"
+                continue
+            fi
             # Check if this thread has a synthesis response
             if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
                 [ -n "$unresolved_threads" ] \
@@ -2276,8 +2586,16 @@ DEBATE_EOF
     fi
     # ── End Issue #1161 ───────────────────────────────────────────────────────
 
-    # If there are unresolved disagreements and no synthesis attempts, post a nudge
-    if [ "$disagree_count" -gt 0 ] && [ "$synthesize_count" -eq 0 ]; then
+    # ── Issue #1605: Aggregate chronicle-candidate thoughts ──────────────────
+    # After processing debate activity, also aggregate chronicle candidates so
+    # god-delegate can find agent-proposed chronicle entries efficiently.
+    aggregate_chronicle_candidates
+
+    # Issue #1704: Fix debate nudge condition — nudge when unresolved_count > 5 (not synthesize_count == 0).
+    # The original condition (synthesize_count == 0) permanently silenced the nudge once any synthesis
+    # was ever posted. Using unresolved_count allows nudging to continue across all generations as long
+    # as significant unresolved threads accumulate, regardless of historical synthesis activity.
+    if [ "$unresolved_count" -gt 5 ]; then
         local existing_nudge
         existing_nudge=$(get_state "lastDebateNudge")
         local now_epoch
@@ -2289,7 +2607,7 @@ DEBATE_EOF
         # Nudge at most once per 10 minutes
         if [ "$age" -gt 600 ]; then
             post_coordinator_thought \
-"DEBATE NUDGE: There are $disagree_count unresolved disagreements and $unresolved_count unresolved threads in Thought CRs (0 synthesis attempts).
+"DEBATE NUDGE: There are $unresolved_count unresolved debate threads needing synthesis (disagree_count=$disagree_count, synthesize_count=$synthesize_count).
 Planners: check coordinator-state.unresolvedDebates for thread IDs needing synthesis.
 A third agent should read the debate chain and post a synthesis thought.
 Use: post_debate_response <parent_thought_name> \"Synthesis: ...\" synthesize 9
@@ -2348,7 +2666,9 @@ The civilization needs mediators, not just voters." \
 #       },
 #       "debatesWon": 0,
 #       "synthesisCount": 2
-#     }
+#     },
+#     "reputationAverage": 7,                  # issue #1602: rolling average visionScore (last 10 runs)
+#     "reputationHistory": [...]               # issue #1602: last 10 {timestamp, visionScore, workSummary}
 #   }
 #
 # IMPORTANT: If identity.sh changes these field names, update the jq paths in
@@ -2492,6 +2812,19 @@ score_agent_for_issue() {
         done
     fi
 
+    # Issue #1602: Factor in reputationAverage for enhancement-labeled issues.
+    # Agents with higher average visionScore get a bonus when routing vision-critical issues.
+    # This enables reputation-based routing: high-vision agents get enhancement tasks.
+    # Bonus: +2 if reputationAverage >= 7 AND issue has "enhancement" label.
+    local rep_average
+    rep_average=$(echo "$identity_json" | jq -r '.reputationAverage // 0' 2>/dev/null || echo "0")
+    local rep_average_int
+    rep_average_int=$(echo "$rep_average" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
+    if echo "$issue_labels" | grep -qi "enhancement" && [ "$rep_average_int" -ge 7 ]; then
+        score=$((score + 2))
+        echo "[$(date -u +%H:%M:%S)] Routing: reputation bonus +2 for $agent_name (reputationAverage=$rep_average, enhancement issue)" >&2
+    fi
+
     echo "$score"
 }
 
@@ -2616,6 +2949,13 @@ route_tasks_by_specialization() {
     local specialized_count=0
     local generic_count=0
     local routing_log=""
+    # Issue #1675: track unassigned issues seen — routing should only trigger
+    # routingCyclesWithZeroSpec escalation when there WERE unassigned issues
+    # to route (but no specialized agent was found). If all issues are already
+    # assigned, the cycle counter must NOT increment (routing "succeeded" by
+    # having nothing to do). Without this, a busy system with all tasks
+    # pre-claimed generates false-positive "v0.2 routing regression" issues.
+    local unassigned_count=0
 
     # Issue #1430: Pre-fetch issueLabels cache to avoid per-issue GitHub API calls
     # Cache format: "issue:label1,label2|issue2:label3|..."
@@ -2641,6 +2981,9 @@ route_tasks_by_specialization() {
            echo "$normalized_active_assignments" | grep -q ":${issue_num},"; then
             continue
         fi
+
+        # Count unassigned issues seen this cycle (issue #1675: needed for false-positive prevention)
+        unassigned_count=$((unassigned_count + 1))
 
         # Get issue labels for scoring — use cache first (issue #1430: rate-limit resilient)
         local issue_labels=""
@@ -2739,11 +3082,22 @@ route_tasks_by_specialization() {
     # diagnose WHY and post a blocker thought for visibility. This surfaces
     # the v0.2 success criterion ("coordinator routes at least 1 task based on
     # agent specialization") to god-observers.
+    #
+    # Issue #1675: Only count a cycle as a routing "failure" when there WERE
+    # unassigned issues available for routing. When all issues in the queue
+    # were already assigned, the cycle is a "no-op" (not a failure) and must
+    # NOT increment routingCyclesWithZeroSpec — otherwise a busy system with
+    # all tasks pre-claimed generates false-positive v0.2 regression issues.
     local total_specialized
     total_specialized=$(get_state "specializedAssignments")
     [[ "$total_specialized" =~ ^[0-9]+$ ]] || total_specialized=0
 
     if [ "$total_specialized" -eq 0 ]; then
+        # Issue #1675: skip escalation if there were no unassigned issues to route
+        if [ "$unassigned_count" -eq 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION: all queue issues already assigned — routing was a no-op (skipping zero-cycle increment)"
+            return 0
+        fi
         # Diagnose root cause: check active agents for specialization data
         local active_agents_list
         active_agents_list=$(get_state "activeAgents")
@@ -2966,6 +3320,15 @@ touch /tmp/coordinator-alive
 touch /tmp/coordinator-ready
 echo "[$(date -u +%H:%M:%S)] Health check files initialized"
 
+# Run immediate cleanup at startup to clear accumulated stale CRs (issue #1679)
+# After a coordinator restart (e.g., after merging new cleanup code), stale Thought/Message/Report
+# CRs may have accumulated during high-activity periods. Without startup cleanup, agents spend
+# ~30 minutes with degraded kubectl performance (listing 5000+ CRs each operation).
+# This one-time call at startup ensures the cluster is clean before the main loop begins.
+echo "[$(date -u +%H:%M:%S)] Running startup cleanup to clear accumulated stale CRs (issue #1679)..."
+cleanup_old_cluster_resources
+echo "[$(date -u +%H:%M:%S)] Startup cleanup complete — entering main loop"
+
 iteration=0
 while true; do
     iteration=$((iteration + 1))
@@ -3064,6 +3427,14 @@ while true; do
     # NOTE (issue #867): Planner-chain liveness check removed.
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime
     # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
+
+    # Every 60 iterations (~30 min): cleanup old Thought/Message/Report CRs (issue #1617)
+    # Supplements planner-initiated cleanup. The cluster accumulates 4000+ Thoughts and
+    # 1600+ Reports when planner cleanup alone isn't frequent enough.
+    # 30-min cadence bounds coordinator blocking time (listing 4000 CRs takes ~10s each).
+    if [ $((iteration % 60)) -eq 0 ]; then
+        cleanup_old_cluster_resources
+    fi
 
     # Every 20 iterations (~10 min): verify gh CLI is still authenticated (issue #1447)
     # GitHub GraphQL rate limits can expire and cause auth failures mid-run.

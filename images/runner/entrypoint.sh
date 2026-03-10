@@ -852,6 +852,7 @@ query_thoughts() {
 # to prevent cluster clutter and kubectl performance degradation.
 # Issue #1020: increased list timeout from 10s to 60s (6000+ CRs take 10+ seconds to list)
 # Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
+# Issue #1614: extend 2h TTL to decision/plan/planning (auto-generated metadata, ~10/agent/run)
 # Issue #1044: batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
 # Should be called periodically by planners
 cleanup_old_thoughts() {
@@ -873,13 +874,15 @@ cleanup_old_thoughts() {
   fi
 
   # Issue #1016: tiered TTL — low-signal types (blocker, observation) expire after 2h
-  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  # Issue #1614: extend 2h TTL to decision, plan, planning types — these are auto-generated
+  # system metadata messages (not agent reasoning) that accumulate rapidly (~10/agent/run).
+  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
     --arg cutoff_24h "$cutoff_24h" \
     --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
       then $cutoff_2h
       else $cutoff_24h
       end) as $cutoff |
@@ -898,8 +901,8 @@ cleanup_old_thoughts() {
   log "Deleting $count old thoughts in batches of 50..."
   echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
   
-  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
-  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decisions/plan: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: low-signal 2h, high-signal 24h)" "observation" 7 "maintenance"
 }
 
 # cleanup_old_messages() - Delete read messages older than 24h, unread messages older than 48h
@@ -1262,6 +1265,15 @@ EOF
   if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
     update_identity_stats "tasksCompleted" 1
   fi
+
+  # Issue #1602: Update reputation history with this session's visionScore
+  # Called after filing Report CR so visionScore is final.
+  # work_done is used as the summary (truncated to ~80 chars for storage efficiency)
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_reputation_history &>/dev/null; then
+    local work_summary
+    work_summary=$(echo "$work_done" | head -1 | cut -c1-80 | tr -d '"'"'" 2>/dev/null || echo "work completed")
+    update_reputation_history "$vision_score" "$work_summary" || true
+  fi
 }
 
 # append_to_chronicle() - Append entry to civilization chronicle (Prime Directive step ⑥)
@@ -1412,6 +1424,9 @@ claim_task() {
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         # (GitHub API may be rate-limited at exit time during high agent activity)
         cache_issue_labels_on_claim "$issue"
+        # Issue #1593: Record claim timestamp so cleanup_stale_assignments() preserves this
+        # assignment during the 120s grace window (worker pod may not have started yet).
+        record_claim_timestamp_on_claim "$issue"
         return 0
       fi
     else
@@ -1429,6 +1444,9 @@ claim_task() {
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         # (GitHub API may be rate-limited at exit time during high agent activity)
         cache_issue_labels_on_claim "$issue"
+        # Issue #1593: Record claim timestamp so cleanup_stale_assignments() preserves this
+        # assignment during the 120s grace window (worker pod may not have started yet).
+        record_claim_timestamp_on_claim "$issue"
         return 0
       fi
     fi
@@ -1493,6 +1511,45 @@ cache_issue_labels_on_claim() {
     --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" \
     2>/dev/null && log "Issue #$issue labels cached in coordinator-state.issueLabels" || \
     log "WARNING: Failed to cache labels for issue #$issue in coordinator-state (non-fatal)"
+}
+
+# record_claim_timestamp_on_claim() - Record claim timestamp to extend grace window to
+# ALL worker self-claims (issue #1593). Writes agent:issue:epoch entry to
+# coordinator-state.preClaimTimestamps so cleanup_stale_assignments() treats worker
+# self-claims the same as coordinator pre-claims — preserving assignments for 120s
+# after claim even if the worker Job hasn't started yet (kro + EKS latency).
+#
+# Without this, claim_task() claims succeed but the 30s cleanup loop removes the
+# assignment before the worker pod starts, allowing a second worker to claim the same
+# issue and open a duplicate PR.
+#
+# Usage: record_claim_timestamp_on_claim <issue_number>
+# Returns: 0 always (best-effort — write failure is non-fatal)
+record_claim_timestamp_on_claim() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  local ts_epoch
+  ts_epoch=$(date +%s)
+  local ts_entry="${AGENT_NAME}:${issue}:${ts_epoch}"
+
+  # Read current timestamps
+  local cur_ts
+  cur_ts=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.preClaimTimestamps}' 2>/dev/null || echo "")
+
+  local new_ts
+  if [ -z "$cur_ts" ]; then
+    new_ts="$ts_entry"
+  else
+    new_ts="${cur_ts};${ts_entry}"
+  fi
+
+  # Best-effort write — non-fatal if it fails (worst case: duplicate PR race remains)
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"preClaimTimestamps\":\"${new_ts}\"}}" \
+    2>/dev/null && log "Issue #$issue claim timestamp recorded in preClaimTimestamps (ts=${ts_epoch}, issue #1593)" || \
+    log "WARNING: Failed to record claim timestamp for issue #$issue in preClaimTimestamps (non-fatal)"
 }
 
 # propose_vision_feature() - Propose a civilization goal for governance vote (issue #1219)
@@ -1690,6 +1747,7 @@ request_coordinator_task() {
     # If this agent has a specialization, try to find a matching issue in the queue first.
     local claimed_issue=""
     local my_specialization="${AGENT_SPECIALIZATION:-}"
+    local used_specialization_routing=false  # Issue #1098: track whether spec-matched selection was used
     
     if [ -n "$my_specialization" ]; then
       # Map specialization back to label keywords for matching
@@ -1722,6 +1780,7 @@ request_coordinator_task() {
         fi
         if echo "$issue_labels" | grep -qi "$spec_label"; then
           claimed_issue="$candidate"
+          used_specialization_routing=true  # Issue #1098: record that specialization was used
           log "Coordinator: specialization-matched issue #$claimed_issue (spec=$my_specialization, labels=$issue_labels)"
           break
         fi
@@ -1792,6 +1851,26 @@ request_coordinator_task() {
 
     log "Coordinator: claimed issue #$claimed_issue from queue"
     push_metric "CoordinatorTaskClaimed" 1
+
+    # Issue #1098: Track agent-side specialization routing in coordinator-state.specializedAssignments
+    # When an agent uses its own specialization to select a matching issue, this proves
+    # emergent specialization is working (v0.2 success criterion). The coordinator's
+    # route_tasks_by_specialization() only counts coordinator-side pre-claims; this
+    # ensures agent-side selection (which is the primary routing path in practice) is
+    # also counted. Both paths prove the v0.2 success criterion.
+    if [ "$used_specialization_routing" = "true" ]; then
+      local prev_specialized
+      prev_specialized=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+      [[ "$prev_specialized" =~ ^[0-9]+$ ]] || prev_specialized=0
+      local new_specialized=$((prev_specialized + 1))
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"specializedAssignments\":\"${new_specialized}\"}}" 2>/dev/null || true
+      log "v0.2: Specialization routing fired! specializedAssignments: $prev_specialized → $new_specialized (agent=$AGENT_NAME spec=$my_specialization issue=#$claimed_issue)"
+      push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${claimed_issue}"
+    fi
+
     COORDINATOR_ISSUE="$claimed_issue"
     return 0
   done
@@ -2436,8 +2515,11 @@ spec:
           value: "${BEDROCK_MODEL}"
         - name: SWARM_REF
           value: "${SWARM_REF}"
-        - name: GITHUB_TOKEN_FILE
-          value: "/var/secrets/github/token"
+        - name: GITHUB_TOKEN  # secretKeyRef matches agent-graph.yaml live cluster config (issue #1657)
+          valueFrom:
+            secretKeyRef:
+              name: agentex-github-token
+              key: token
         resources:
           requests:
             memory: "512Mi"
@@ -2448,17 +2530,10 @@ spec:
         volumeMounts:
         - name: workspace
           mountPath: /workspace
-        - name: github-token
-          mountPath: /var/secrets/github
-          readOnly: true
       volumes:
       - name: workspace
         emptyDir:
           sizeLimit: 2Gi
-      - name: github-token
-        secret:
-          secretName: agentex-github-token
-          defaultMode: 0400
 EOF
 ) || {
       log "CRITICAL: Fallback Job creation also failed for $name: $fallback_err"
@@ -4223,6 +4298,42 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
     --json number,createdAt \
     --jq --arg start "$AGENT_START_ISO" \
     '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null || echo "")
+
+  # ── Issue #939: Auto-enforce "Closes #N" in PR bodies ──────────────────────
+  # When OpenCode agents create PRs, they sometimes omit "Closes #N" or "Fixes #N".
+  # Without closing keywords, GitHub won't auto-close the issue on merge, causing
+  # future agents to re-implement the same work and create duplicate PRs.
+  # This block checks each session PR and patches the body if the keyword is missing.
+  # Issue #939: Resolve the issue number for this session (before WORKED_ISSUE is set at step 11.4).
+  # Priority: COORDINATOR_ISSUE (set by request_coordinator_task()) → /tmp/agentex-worked-issue
+  PR939_ISSUE="${COORDINATOR_ISSUE:-0}"
+  if [ "$PR939_ISSUE" = "0" ] || [ -z "$PR939_ISSUE" ]; then
+    PR939_ISSUE=$(cat /tmp/agentex-worked-issue 2>/dev/null | tr -d '[:space:]' || echo "0")
+  fi
+  if [ -n "$PR939_ISSUE" ] && [ "$PR939_ISSUE" != "0" ] && [ -n "$SESSION_PRS" ]; then
+    for pr_num in $SESSION_PRS; do
+      [ -z "$pr_num" ] && continue
+      # Check if the PR body already contains a closing keyword
+      PR939_BODY=$(gh pr view "$pr_num" --repo "$REPO" --json body --jq '.body // ""' \
+        2>/dev/null || echo "")
+      if [ -n "$PR939_BODY" ]; then
+        if ! echo "$PR939_BODY" | grep -qiE "(closes|fixes|resolves)\s+#${PR939_ISSUE}"; then
+          log "Issue #939: PR #$pr_num missing 'Closes #${PR939_ISSUE}' — patching PR body"
+          # Append closing keyword to PR body
+          PR939_NEW_BODY="${PR939_BODY}
+
+Closes #${PR939_ISSUE}"
+          gh pr edit "$pr_num" --repo "$REPO" --body "$PR939_NEW_BODY" 2>/dev/null && \
+            log "Issue #939: Added 'Closes #${PR939_ISSUE}' to PR #$pr_num body" || \
+            log "Issue #939: WARNING: Failed to patch PR #$pr_num body (non-fatal)"
+          push_metric "PRBodyAutoClose" 1 "Count" "PRNumber=${pr_num}"
+        else
+          log "Issue #939: PR #$pr_num already has closing keyword for issue #${PR939_ISSUE} ✓"
+        fi
+      fi
+    done
+  fi
+  # ── End issue #939 ──────────────────────────────────────────────────────────
 
   CI_FAILED=0
   for pr_num in $SESSION_PRS; do

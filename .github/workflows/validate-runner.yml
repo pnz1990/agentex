@@ -9,6 +9,7 @@ on:
       - main
     paths:
       - 'images/runner/**'
+      - '.github/workflows/validate-runner.yml'
 
 jobs:
   validate-entrypoint:
@@ -56,6 +57,42 @@ jobs:
           else
             echo "identity.sh not found, skipping"
           fi
+
+      - name: Validate coordinator.sh
+        run: |
+          # Issue #1703: coordinator.sh runs as a long-lived Deployment — a syntax error
+          # would silently crash the coordinator pod after merge with no CI warning.
+          # coordinator.sh is ~3400 lines and frequently modified by agents.
+          if [ -f images/runner/coordinator.sh ]; then
+            echo "Running bash syntax check on coordinator.sh..."
+            bash -n images/runner/coordinator.sh
+            echo "✓ coordinator.sh syntax check passed"
+
+            echo "Running shellcheck on coordinator.sh..."
+            # Same suppression set as entrypoint.sh: intentional style choices
+            # SC2295: patterns with variables in ${var#pattern} (intentional)
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317,SC2295 --severity=error images/runner/coordinator.sh
+            echo "✓ coordinator.sh shellcheck passed"
+          else
+            echo "coordinator.sh not found, skipping"
+          fi
+
+      - name: Validate helpers.sh
+        run: |
+          # Issue #1703: helpers.sh is sourced by all agents at runtime — a syntax error
+          # would silently break claim_task, post_thought, and all other helpers.
+          # helpers.sh is ~1230 lines and the primary OpenCode-accessible API.
+          if [ -f images/runner/helpers.sh ]; then
+            echo "Running bash syntax check on helpers.sh..."
+            bash -n images/runner/helpers.sh
+            echo "✓ helpers.sh syntax check passed"
+
+            echo "Running shellcheck on helpers.sh..."
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317 --severity=error images/runner/helpers.sh
+            echo "✓ helpers.sh shellcheck passed"
+          else
+            echo "helpers.sh not found, skipping"
+          fi
           
       - name: Check for common bash pitfalls
         run: |
@@ -84,5 +121,12 @@ jobs:
           echo "✓ All runner script validations passed"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
-          echo "This validation prevents bugs like issue #738 where"
-          echo "function calls before definitions cause agent cascade failures."
+          echo "Scripts validated (issue #1703):"
+          echo "  - entrypoint.sh  (bash -n + shellcheck)"
+          echo "  - identity.sh    (bash -n + shellcheck)"
+          echo "  - coordinator.sh (bash -n + shellcheck)"
+          echo "  - helpers.sh     (bash -n + shellcheck)"
+          echo ""
+          echo "This validation prevents silent failures like issue #738 (function"
+          echo "calls before definitions) and guards the coordinator Deployment and"
+          echo "helpers.sh API that all agents depend on at runtime."
