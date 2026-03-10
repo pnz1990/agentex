@@ -1983,6 +1983,9 @@ The civilization needs mediators, not just voters." \
 # 5th argument and looks up S3 by displayName first. This fixes the root cause
 # where specializedAssignments=0 because ephemeral agent_name has no history —
 # history accumulates under displayName (e.g., worker-deep-cipher) across generations.
+# IMPORTANT (issue #1484): coordinator uses identities/canonical/<displayName>.json
+# path (written by identity.sh save_identity after PR #1489). Backward compat fallback
+# to identities/<displayName>.json for agents running prior image versions.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Read S3 bucket for identities from constitution at runtime
@@ -2019,10 +2022,19 @@ score_agent_for_issue() {
     # then fall back to agent_name (current session, may be empty for new agents).
     # Issue #1475: identity history accumulates under displayName (e.g., worker-deep-cipher),
     # not under ephemeral agent_name (e.g., worker-1773115086).
+    # Issue #1484: use canonical/ prefix path (written by PR #1489 identity.sh save_identity).
+    # Canonical path: identities/canonical/<display_name>.json
+    # Legacy path:    identities/<display_name>.json (backward compat fallback)
     local identity_json=""
     if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
-        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${display_name}.json" - \
+        # Try canonical path first (PR #1489 path — persistent cross-generation history)
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        # Fall back to legacy displayName path (backward compat for older agents)
+        if [ -z "$identity_json" ]; then
+            identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${display_name}.json" - \
+                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        fi
     fi
     # Fall back to agent_name if displayName lookup found nothing
     if [ -z "$identity_json" ]; then
@@ -2322,12 +2334,19 @@ route_tasks_by_specialization() {
             agents_checked=$((agents_checked + 1))
 
             local spec_data=""
-            # Try displayName first (persistent across generations)
+            # Try canonical displayName path first (PR #1489: persistent cross-generation history)
             if [ -n "$adisplay" ] && [ "$adisplay" != "$aname" ]; then
-                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${adisplay}.json" - \
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${adisplay}.json" - \
                     --region "$BEDROCK_REGION" 2>/dev/null | \
                     jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
                     2>/dev/null || echo "")
+                # Fall back to legacy displayName path (backward compat)
+                if [ -z "$spec_data" ]; then
+                    spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${adisplay}.json" - \
+                        --region "$BEDROCK_REGION" 2>/dev/null | \
+                        jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                        2>/dev/null || echo "")
+                fi
             fi
             # Fall back to agent_name if displayName found nothing
             if [ -z "$spec_data" ]; then
