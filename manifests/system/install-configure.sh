@@ -59,6 +59,8 @@ while [[ $# -gt 0 ]]; do
       echo "  - manifests/system/constitution.yaml (ConfigMap data fields)"
       echo "  - manifests/bootstrap/seed-agent.yaml (image URL)"
       echo "  - manifests/system/constitution-validator.yaml (image URL)"
+      echo "  - manifests/system/kro-install.sh (CLUSTER and REGION defaults)"
+      echo "  - manifests/bootstrap/seed-prompt.sh (read-only: uses constitution at runtime)"
       echo ""
       echo "Run this BEFORE applying manifests to your cluster."
       exit 0
@@ -109,6 +111,13 @@ echo "Updating manifests/system/constitution-validator.yaml..."
 sed -i.bak \
   "s|image: .*\.dkr\.ecr\..*\.amazonaws\.com/agentex/runner:latest|image: $ECR_REGISTRY/agentex/runner:latest|" \
   "$REPO_ROOT/manifests/system/constitution-validator.yaml"
+
+# Update kro-install.sh default CLUSTER and REGION values
+echo "Updating manifests/system/kro-install.sh..."
+sed -i.bak \
+  -e "s|^CLUSTER=\".*\"|CLUSTER=\"${CLUSTER_NAME}\"|" \
+  -e "s|^REGION=\".*\"|REGION=\"${AWS_REGION}\"|" \
+  "$REPO_ROOT/manifests/system/kro-install.sh"
 
 echo ""
 echo "✓ Configuration complete!"
