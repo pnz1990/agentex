@@ -98,6 +98,36 @@ kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimesta
   tail -6 | tail -5 | awk '{printf "   %s [%s] %s\n", $1, $3, $4}' 2>/dev/null || echo "   (none)"
 echo ""
 
+# 5a. MILESTONE PROGRESS
+echo -e "${BLUE}🏆 Milestone Progress${NC}"
+V05_STATUS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v05MilestoneStatus}' 2>/dev/null || echo "")
+V05_CRITERIA=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v05CriteriaStatus}' 2>/dev/null || echo "")
+V06_STATUS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v06MilestoneStatus}' 2>/dev/null || echo "")
+V06_CRITERIA=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v06CriteriaStatus}' 2>/dev/null || echo "")
+
+if [ "$V05_STATUS" = "completed" ]; then
+  echo -e "   v0.5 Emergent Specialization: ${GREEN}COMPLETE${NC}"
+elif [ -n "$V05_CRITERIA" ]; then
+  echo -e "   v0.5 Emergent Specialization: ${YELLOW}IN PROGRESS${NC}"
+  echo "   Progress: $V05_CRITERIA"
+else
+  echo -e "   v0.5 Emergent Specialization: ${YELLOW}not yet initialized${NC}"
+fi
+
+if [ "$V06_STATUS" = "completed" ]; then
+  echo -e "   v0.6 Collective Action:       ${GREEN}COMPLETE${NC}"
+elif [ -n "$V06_CRITERIA" ]; then
+  echo -e "   v0.6 Collective Action:       ${YELLOW}IN PROGRESS${NC}"
+  echo "   Progress: $V06_CRITERIA"
+else
+  echo -e "   v0.6 Collective Action:       ${YELLOW}not yet initialized${NC}"
+fi
+echo ""
+
 # 6. OPEN GITHUB ISSUES/PRS
 echo -e "${BLUE}🔧 GitHub Status${NC}"
 if command -v gh &> /dev/null; then
@@ -120,7 +150,40 @@ echo "   Vision: ${VISION}..."
 echo "   Generation: $GENERATION"
 echo ""
 
-# 8. HEALTH SUMMARY
+# 8. MILESTONE PROGRESS (v0.5 Emergent Specialization / v0.6 Collective Action)
+echo -e "${BLUE}🏆 Civilization Milestones${NC}"
+
+# v0.5 Emergent Specialization
+V05_STATUS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v05MilestoneStatus}' 2>/dev/null || echo "")
+V05_CRITERIA=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v05CriteriaStatus}' 2>/dev/null || echo "")
+if [ "$V05_STATUS" = "completed" ]; then
+  echo -e "   v0.5 Emergent Specialization: ${GREEN}COMPLETE${NC}"
+elif [ -n "$V05_CRITERIA" ]; then
+  # Show first 100 chars of criteria to avoid excessive scrolling
+  SHORT_CRITERIA=$(echo "$V05_CRITERIA" | cut -c1-100)
+  echo -e "   v0.5 Emergent Specialization: ${YELLOW}in progress${NC} — ${SHORT_CRITERIA}..."
+else
+  echo -e "   v0.5 Emergent Specialization: ${YELLOW}not yet checked${NC} (coordinator initializing)"
+fi
+
+# v0.6 Collective Action
+V06_STATUS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v06MilestoneStatus}' 2>/dev/null || echo "")
+V06_CRITERIA=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.v06CriteriaStatus}' 2>/dev/null || echo "")
+if [ "$V06_STATUS" = "completed" ]; then
+  echo -e "   v0.6 Collective Action:       ${GREEN}COMPLETE${NC}"
+elif [ -n "$V06_CRITERIA" ]; then
+  SHORT_V06_CRITERIA=$(echo "$V06_CRITERIA" | cut -c1-100)
+  echo -e "   v0.6 Collective Action:       ${YELLOW}in progress${NC} — ${SHORT_V06_CRITERIA}..."
+else
+  echo -e "   v0.6 Collective Action:       ${YELLOW}not yet initialized${NC} (coordinator v0.6 not deployed)"
+fi
+echo ""
+
+# 9. HEALTH SUMMARY
 echo -e "${BLUE}📊 Health Summary${NC}"
 HEALTH_OK=0
 HEALTH_WARN=0
