@@ -374,11 +374,23 @@ update_identity_stats() {
     --argjson inc "$increment" \
     '.stats[$stat] = (.stats[$stat] // 0) + $inc')
   
-  # Save back to S3
+  # Save back to S3 (per-session file)
   if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
     echo "[identity] Updated stat: $stat_name += $increment"
   else
     echo "[identity] WARNING: Could not save updated stats to S3"
+  fi
+
+  # Issue #1523: Also update canonical file so stats persist across agent restarts.
+  # The canonical file (identities/canonical/<displayName>.json) is what new agents
+  # inherit via claim_identity(). Without this, all stats are lost on next session.
+  if [[ -n "$AGENT_DISPLAY_NAME" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical stats: $canonical_path"
+    else
+      echo "[identity] WARNING: Could not save stats to canonical path (non-fatal)"
+    fi
   fi
 }
 
@@ -452,11 +464,24 @@ update_specialization() {
     updated_json=$(echo "$updated_json" | jq --arg spec "$specialization" '.specialization = $spec')
   fi
   
-  # Save updated identity
+  # Save updated identity (per-session file)
   if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
     echo "[identity] Updated specialization tracking: labels=$issue_labels"
   else
     echo "[identity] WARNING: Could not save specialization update to S3"
+  fi
+
+  # Issue #1523: Also update canonical file so specialization persists across agent restarts.
+  # The canonical file (identities/canonical/<displayName>.json) is loaded by claim_identity()
+  # when the next agent inherits this display name. Without this update, specialization data
+  # (specializationLabelCounts) is lost — the root cause of specializedAssignments=0.
+  if [[ -n "$AGENT_DISPLAY_NAME" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical specialization: $canonical_path (spec=$AGENT_SPECIALIZATION)"
+    else
+      echo "[identity] WARNING: Could not save specialization to canonical path (non-fatal)"
+    fi
   fi
 }
 
