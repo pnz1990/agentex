@@ -1609,8 +1609,11 @@ request_coordinator_task() {
 
        # Issue #1362: Validate the issue is still OPEN before claiming
        # (mirrors the closed-issue check in the regular queue path at issue #1015)
+       # Issue #1586: Use REST API instead of GraphQL to avoid rate-limit failures
+       # Fail-open: if API unavailable, assume OPEN to preserve queue integrity
        local vq_issue_state
-       vq_issue_state=$(gh issue view "$vq_feature" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+       vq_issue_state=$(gh api "repos/${REPO}/issues/${vq_feature}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "")
+       [ -z "$vq_issue_state" ] && vq_issue_state="OPEN"  # fail-open: assume open if API unavailable
        if [ "$vq_issue_state" != "OPEN" ]; then
          log "Coordinator: vision-queue issue #$vq_feature is $vq_issue_state — removing from visionQueue"
          # Remove this closed item from visionQueue to prevent future agents from hitting it
@@ -1758,8 +1761,11 @@ request_coordinator_task() {
     # The coordinator queue may be stale and contain closed issues.
     # If the issue is closed, release the claim and remove from queue to avoid
     # wasting agent sessions on already-resolved work.
+    # Issue #1586: Use REST API instead of GraphQL to avoid rate-limit failures.
+    # Fail-open: if API unavailable, assume OPEN to preserve task queue integrity.
     local issue_state
-    issue_state=$(gh issue view "$claimed_issue" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")  # issue #1066: was GITHUB_REPO (undefined), correct var is REPO
+    issue_state=$(gh api "repos/${REPO}/issues/${claimed_issue}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "")  # issue #1066 fix, #1586: REST API, fail-open
+    [ -z "$issue_state" ] && issue_state="OPEN"  # fail-open: assume open if REST API unavailable
     if [ "$issue_state" != "OPEN" ]; then
       log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and removing from queue"
       # Release the claim atomically
@@ -2476,8 +2482,16 @@ spawn_task_and_agent() {
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
   # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
+  # Issue #1586: Use REST API instead of GraphQL to avoid rate-limit failures.
+  # Fail-open for API errors: assume OPEN to avoid blocking spawns during rate-limit storms.
   if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
-    local issue_state=$(gh issue view "$issue" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+    local issue_state
+    issue_state=$(gh api "repos/${REPO}/issues/${issue}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "")
+    
+    if [ -z "$issue_state" ]; then
+      log "WARNING: Could not verify issue #${issue} state via REST API — assuming OPEN (fail-open)"
+      issue_state="OPEN"
+    fi
     
     if [ "$issue_state" = "NOT_FOUND" ]; then
       log "ERROR: GitHub issue #${issue} does not exist. Skipping spawn."
