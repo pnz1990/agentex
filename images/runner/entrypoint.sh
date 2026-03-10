@@ -29,7 +29,7 @@ MY_GENERATION=""  # Set after kubectl config (issue #566)
 log() { 
   local gen_suffix=""
   [ -n "${MY_GENERATION:-}" ] && gen_suffix="/gen-${MY_GENERATION}"
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}${gen_suffix}] $*"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}${gen_suffix}] $*" >&2
 }
 
 # ── kubectl timeout wrapper (issue #441) ───────────────────────────────────
