@@ -882,7 +882,6 @@ cleanup_stale_assignments() {
                     pre_claim_timestamps="$updated_ts"
                 fi
             fi
-            fi
 
             # Issue #1556: Job completed, but check if issue is closed before releasing claim.
             # Race condition: Worker opens PR → Job completes → Coordinator releases claim
