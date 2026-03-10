@@ -1657,12 +1657,16 @@ tally_and_enact_votes() {
 
         # ISSUE #1248: Vision-feature proposals require DELIBERATION — not just votes.
         # Civilization goal-changes must be debated before they can be enacted.
-        # Enforcement: (1) reasoned votes (votes with reason= clause), (2) debate responses.
+        # Enforcement: (1) reasoned votes (votes with reason= OR reason: clause), (2) debate responses.
         if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
-            # Count votes that include a reason= clause
+            # Count votes that include a reason= or reason: clause.
+            # Issue #1649: AGENTS.md instructs agents to use "reason: ..." format (colon),
+            # but the original check used grep -c "reason=" (equals only). This caused ALL
+            # reasoned votes to count as 0, permanently blocking vision proposals.
+            # Fix: use "reason[=:]" to accept both formats.
             local reasoned_votes
             reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .content" \
-                "$thoughts_file" 2>/dev/null | grep -c "reason=" || true)
+                "$thoughts_file" 2>/dev/null | grep -c "reason[=:]" || true)
             [ -z "$reasoned_votes" ] && reasoned_votes=0
 
             # Count debate responses (thoughts of type "debate") that mention this topic or vision
@@ -1676,7 +1680,7 @@ tally_and_enact_votes() {
 
             if [ "$reasoned_votes" -lt 2 ]; then
                 vision_threshold_met=false
-                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= clause), found $reasoned_votes"
+                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= or reason: clause), found $reasoned_votes"
             elif [ "$debate_responses" -lt 1 ]; then
                 vision_threshold_met=false
                 vision_block_reason="vision-feature requires at least 1 debate response, found $debate_responses"
