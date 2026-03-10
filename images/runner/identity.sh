@@ -452,11 +452,26 @@ update_specialization() {
     updated_json=$(echo "$updated_json" | jq --arg spec "$specialization" '.specialization = $spec')
   fi
   
-  # Save updated identity
+  # Save updated identity to per-session file
   if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
     echo "[identity] Updated specialization tracking: labels=$issue_labels"
   else
     echo "[identity] WARNING: Could not save specialization update to S3"
+  fi
+
+  # Issue #1523: Also update canonical file so specialization persists across restarts.
+  # update_specialization() runs at session END (exit hook). Without this write, the canonical
+  # file (read at session START for cross-generation inheritance) never gets the updated counts,
+  # causing specialization data to be silently lost every time an agent restarts.
+  # Only update canonical when AGENT_DISPLAY_NAME is set and different from AGENT_NAME
+  # (i.e., agent claimed a registry name, not a generated fallback).
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]] && [[ "$AGENT_DISPLAY_NAME" != "${AGENT_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical history for '$AGENT_DISPLAY_NAME': labels=$issue_labels"
+    else
+      echo "[identity] WARNING: Could not update canonical history (non-fatal — next save_identity will refresh it)"
+    fi
   fi
 }
 
