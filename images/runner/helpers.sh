@@ -858,6 +858,20 @@ civilization_status() {
   if [ -z "$vision_queue" ]; then vision_queue="[] (v0.3 not started)"; fi
   output="${output}visionQueue:             ${vision_queue}\n"
 
+  # v0.5 Milestone status (issue #1772)
+  local v05_status v05_criteria
+  v05_status=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.v05MilestoneStatus}' 2>/dev/null || echo "")
+  v05_criteria=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.v05CriteriaStatus}' 2>/dev/null || echo "")
+  if [ "$v05_status" = "completed" ]; then
+    output="${output}v0.5 Milestone:          COMPLETE\n"
+  elif [ -n "$v05_criteria" ]; then
+    output="${output}v0.5 Milestone:          in progress — ${v05_criteria}\n"
+  else
+    output="${output}v0.5 Milestone:          criteria not yet checked (coordinator initializing)\n"
+  fi
+
   # Kill switch status
   local ks_enabled
   ks_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
