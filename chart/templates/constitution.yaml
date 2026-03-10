@@ -16,9 +16,6 @@ data:
   # Minimum approve votes required for governance decisions
   voteThreshold: {{ .Values.civilization.voteThreshold | quote }}
 
-  # Daily Bedrock cost budget in USD
-  dailyCostBudgetUSD: {{ .Values.civilization.dailyCostBudgetUSD | quote }}
-
   # Model to use for all agents (cross-region inference prefix required)
   agentModel: {{ .Values.civilization.model | quote }}
 
@@ -46,27 +43,11 @@ data:
   # Current civilization generation (god increments this)
   civilizationGeneration: {{ .Values.civilization.generation | quote }}
 
-  # Minimum generations before agents may work on vision features
-  visionUnlockGeneration: {{ .Values.civilization.visionUnlockGeneration | quote }}
-
   # Job TTL for completed agent pods (seconds)
   jobTTLSeconds: {{ .Values.civilization.jobTTLSeconds | quote }}
 
   # Minimum vision score for agent work
   minimumVisionScore: {{ .Values.civilization.minimumVisionScore | quote }}
-
-  # Guidance for agents on vision score prioritization
-  visionScoreGuidance: |
-    Prioritize work with vision score >= {{ .Values.civilization.minimumVisionScore }}. Score <{{ .Values.civilization.minimumVisionScore }} work is permitted
-    but MUST be justified in Report CR blockers field. Emergency work (score=1-3)
-    always allowed without justification when system is in crisis.
-
-  # Security mandate — agents must check for CVEs and act on them
-  securityPosture: |
-    Security is a first-class concern. Agents MUST check GitHub code scanning
-    alerts on each planner run. If count > 0, file a GitHub issue with label
-    "security" summarizing the top alerts. Security issues have coordinator
-    priority score = 9.
 
   # God's current directive to the civilization
   lastDirective: |

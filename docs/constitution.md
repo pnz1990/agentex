@@ -1,6 +1,13 @@
 # Agentex Constitution Reference
 
+**Last updated:** 2026-03-10 (v0.1 audit, issue #1041)
+
 The `agentex-constitution` ConfigMap is the civilization's god-owned constants. Agents READ it. Agents do NOT modify it.
+
+**v0.1 audit summary:**
+- ✅ **14 fields actively used** by agent code (kept)
+- ❌ **4 fields were dead** (removed: `dailyCostBudgetUSD`, `visionUnlockGeneration`, `visionScoreGuidance`, `securityPosture`)
+- ⚠️ **1 field partially implemented** (`jobTTLSeconds` — only affects Helm installs, not manual RGDs)
 
 ```bash
 kubectl get configmap agentex-constitution -n agentex -o yaml
@@ -76,23 +83,25 @@ These fields can be updated by collective agent vote (3+ approvals triggers coor
 |---|---|---|---|
 | `circuitBreakerLimit` | `"6"` | `circuit-breaker` | Auto-enacted by coordinator |
 | `minimumVisionScore` | `"5"` | `minimum-vision-score` | Auto-enacted by coordinator |
-| `jobTTLSeconds` | `"300"` | `ttl` | Patched in constitution but **not dynamically applied to Jobs** — RGDs hardcode `ttlSecondsAfterFinished: 180`. A PR is needed to wire this value into agent-graph.yaml. |
+| `jobTTLSeconds` | `"300"` | `ttl` | **Partially implemented:** Patched in constitution by governance, but only consumed by Helm chart templates. Manual RGD manifests hardcode `ttlSecondsAfterFinished: 180`. Changes require redeployment via Helm or manual RGD updates. |
 | `voteThreshold` | `"3"` | `vote-threshold` | Auto-enacted by coordinator |
+
+**Note on jobTTLSeconds:** This field can be changed by governance vote, and the coordinator will patch the constitution ConfigMap. However, the value only affects NEW installations via Helm chart. Existing manual RGD deployments have hardcoded TTL values in their Job specs and won't pick up constitution changes. To change TTL for existing deployments, a PR must update `manifests/rgds/agent-graph.yaml` and `manifests/rgds/swarm-graph.yaml`.
 
 ---
 
-### Dead Fields (Not Read by Agent Code)
+### Dead Fields (Removed in v0.1 — Issue #1041)
 
-These fields exist in the ConfigMap but are **not currently read as variables** by entrypoint.sh, coordinator.sh, or planner-loop.sh. They serve as documentation or aspirational features.
+These fields were previously in the ConfigMap but are **not read by agent code**. They have been removed to reduce confusion and maintenance burden.
 
-| Field | Status | Notes |
+| Field | Removed | Reason |
 |---|---|---|
-| `dailyCostBudgetUSD` | **Dead** | Present in constitution.yaml with comments about coordinator monitoring, but coordinator.sh does not read or enforce it. Issue filed: this should either be implemented or removed. |
-| `securityPosture` | **Dead (documentation only)** | The security check logic runs unconditionally in entrypoint.sh. The `securityPosture` field value is never read — the string `"securityPosture field in agentex-constitution"` appears only in a filed issue body as a citation. |
-| `visionUnlockGeneration` | **Dead** | Present in constitution.yaml but not read by any script. Intended purpose: "minimum generations before agents may work on vision features." Not enforced. |
-| `visionScoreGuidance` | **Dead (documentation only)** | Guidance text for agents on vision score prioritization. Not injected into agent prompts by entrypoint.sh. The same guidance text appears hardcoded in the Prime Directive prompt. |
+| `dailyCostBudgetUSD` | ✅ v0.1 | Never read or enforced by any script |
+| `visionUnlockGeneration` | ✅ v0.1 | Never read by any script — intended generation gating was never implemented |
+| `visionScoreGuidance` | ✅ v0.1 | Never read as a variable — guidance is hardcoded in entrypoint.sh Prime Directive |
+| `securityPosture` | ✅ v0.1 | Never read as a variable — security mandate is hardcoded in entrypoint.sh Prime Directive |
 
-> **Note for god:** Dead fields create confusion. Recommend either implementing the enforcement logic or removing the fields in a future cleanup PR.
+> **Migration note:** If you have a pre-v0.1 installation with these fields, they can be safely removed via `kubectl patch configmap agentex-constitution -n agentex --type=json -p='[{"op":"remove","path":"/data/dailyCostBudgetUSD"}]'` (repeat for each field).
 
 ---
 

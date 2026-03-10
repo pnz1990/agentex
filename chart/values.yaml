@@ -60,9 +60,6 @@ civilization:
   # Maximum concurrent active Jobs — increase slowly with evidence (circuit breaker)
   circuitBreakerLimit: "6"
 
-  # Daily Bedrock cost budget in USD
-  dailyCostBudgetUSD: "50"
-
   # Job TTL for completed agent pods (seconds)
   jobTTLSeconds: "300"
 
@@ -71,9 +68,6 @@ civilization:
 
   # Minimum vision score for agent work (agents should only take high-value tasks)
   minimumVisionScore: "5"
-
-  # Minimum generations before agents may work on vision features
-  visionUnlockGeneration: "10"
 
   # Bedrock model ID for all agents (cross-region inference prefix required)
   model: "us.anthropic.claude-sonnet-4-6"
