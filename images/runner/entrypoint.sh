@@ -3361,15 +3361,76 @@ if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n 
     local_issue_title=$(echo "$issue_api_response" | jq -r '.title // ""' 2>/dev/null || echo "")
   fi
 
-  # Extract *.sh and *.yaml file mentions from the issue content
+  # Issue #1684: Dynamic component detection — use broad pattern instead of hardcoded filenames.
+  # Strategy: detect any *.sh, *.yaml, *.yml, *.json, *.py filenames in issue text (primary),
+  # then supplement with actual PR diff files if a branch already exists (secondary/hybrid).
   local_components_raw=""
+
+  # Phase A: Extract file mentions from issue body/title using dynamic broad pattern.
+  # This replaces the hardcoded list with a grep that matches ANY platform file by extension.
   if [ -n "$local_issue_body" ] || [ -n "$local_issue_title" ]; then
     combined_text="${local_issue_title} ${local_issue_body}"
-    # Extract common agentex file names (.sh, .yaml, .yml, .json patterns)
-    # Also capture bare component names like "coordinator", "entrypoint", "helpers"
+    # Match any filename with .sh, .yaml, .yml, .json, or .py extension (dynamic — no hardcoded list)
     local_components_raw=$(echo "$combined_text" | \
-      grep -oE '\b(coordinator\.sh|entrypoint\.sh|helpers\.sh|identity\.sh|planner-loop\.sh|agent-graph\.yaml|task-graph\.yaml|message-graph\.yaml|thought-graph\.yaml|report-graph\.yaml|swarm-graph\.yaml|coordinator-graph\.yaml|planner-loop-graph\.yaml)\b' | \
-      sort -u | head -5 || true)
+      grep -oE '\b[a-zA-Z0-9_.-]+(\.sh|\.yaml|\.yml|\.json|\.py)\b' | \
+      sort -u | head -10 || true)
+    if [ -n "$local_components_raw" ]; then
+      log "Issue #1684: Phase A component detection found: $(echo "$local_components_raw" | tr '\n' ' ')"
+    fi
+  fi
+
+  # Phase B: Supplement with PR diff files if a branch for this issue already exists.
+  # This catches files the agent actually modifies — more accurate than issue body text.
+  # Best-effort: silently skip if git or gh CLI fails.
+  local_diff_components=""
+  # Check for a local repo clone or the default /workspace/repo location
+  local_repo_dir=""
+  if [ -d "${WORKSPACE_DIR:-}/.git" ] 2>/dev/null; then
+    local_repo_dir="${WORKSPACE_DIR}"
+  elif [ -d "/workspace/repo/.git" ] 2>/dev/null; then
+    local_repo_dir="/workspace/repo"
+  fi
+
+  if [ -n "$local_repo_dir" ]; then
+    # Find branches for this issue number (pattern: issue-N-* or fix-N-* or feat-N-*)
+    local_branch=$(git -C "$local_repo_dir" branch -r 2>/dev/null | \
+      grep -E "issue-${COORDINATOR_ISSUE}-|fix-${COORDINATOR_ISSUE}-|feat-${COORDINATOR_ISSUE}-" | \
+      head -1 | tr -d ' ' || true)
+    if [ -n "$local_branch" ]; then
+      log "Issue #1684: Phase B — found PR branch ${local_branch}, scanning diff for changed files..."
+      local_diff_components=$(git -C "$local_repo_dir" diff --name-only "origin/main..${local_branch}" 2>/dev/null | \
+        grep -E '\.(sh|yaml|yml|json|py)$' | \
+        xargs -I{} basename {} 2>/dev/null | \
+        sort -u | head -10 || true)
+      if [ -n "$local_diff_components" ]; then
+        log "Issue #1684: Phase B diff detection found: $(echo "$local_diff_components" | tr '\n' ' ')"
+      fi
+    fi
+  fi
+
+  # If no local branch found, fallback: query GitHub API for open PRs linked to this issue
+  if [ -z "$local_diff_components" ]; then
+    linked_pr_number=$(gh api "repos/${REPO}/issues/${COORDINATOR_ISSUE}/timeline" \
+      --jq '.[] | select(.event == "cross-referenced") | .source.issue.number' \
+      2>/dev/null | head -1 || true)
+    if [ -n "$linked_pr_number" ]; then
+      log "Issue #1684: Phase B — found linked PR #${linked_pr_number} via GitHub timeline API"
+      local_diff_components=$(gh api "repos/${REPO}/pulls/${linked_pr_number}/files" \
+        --jq '.[].filename' 2>/dev/null | \
+        grep -E '\.(sh|yaml|yml|json|py)$' | \
+        xargs -I{} basename {} 2>/dev/null | \
+        sort -u | head -10 || true)
+      if [ -n "$local_diff_components" ]; then
+        log "Issue #1684: Phase B GitHub API diff found: $(echo "$local_diff_components" | tr '\n' ' ')"
+      fi
+    fi
+  fi
+
+  # Merge Phase A + Phase B results, deduplicate, limit to 10 total
+  if [ -n "$local_diff_components" ]; then
+    local_components_raw=$(printf "%s\n%s" "$local_components_raw" "$local_diff_components" | \
+      grep -v '^$' | sort -u | head -10 || true)
+    log "Issue #1684: Combined component list (A+B): $(echo "$local_components_raw" | tr '\n' ' ')"
   fi
 
   # Build context from knowledge graph if we found relevant components
