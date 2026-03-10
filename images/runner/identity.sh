@@ -654,6 +654,66 @@ get_identity_signature() {
 }
 
 #######################################
+# Release a claimed name back to the registry so future agents can reuse it.
+# MUST be called from the EXIT trap in entrypoint.sh on ALL exit paths
+# (normal completion, error, circuit-breaker early exit, etc.).
+#
+# Before releasing, updates the canonical S3 file with the latest accumulated
+# specialization history so the NEXT agent that claims this name inherits it.
+#
+# Globals:
+#   AGENT_NAME        - the agent's k8s name (e.g., worker-1773006921)
+#   AGENT_ROLE        - the agent's role
+#   AGENT_DISPLAY_NAME - the friendly name to release (e.g., "ada")
+#   AGENT_IDENTITY_FILE - S3 path to this agent's identity JSON
+# Returns:
+#   0 always (non-fatal — errors are logged and skipped)
+#######################################
+release_identity() {
+  # Only release if we claimed a registry name (not a generated fallback)
+  if [[ -z "$AGENT_DISPLAY_NAME" ]] || [[ "$AGENT_DISPLAY_NAME" == "$AGENT_NAME" ]]; then
+    # Generated name or not initialised — nothing to release
+    return 0
+  fi
+
+  echo "[identity] Releasing name '$AGENT_DISPLAY_NAME' back to registry for $AGENT_NAME..."
+
+  # Step 1: Flush the latest identity stats to the canonical S3 file so the
+  # next agent inheriting this name starts with full accumulated history.
+  if [[ -n "$AGENT_IDENTITY_FILE" ]]; then
+    local current_json=""
+    current_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+    if [[ -n "$current_json" ]]; then
+      local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+      if echo "$current_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+        echo "[identity] Updated canonical history for '$AGENT_DISPLAY_NAME' before release"
+      else
+        echo "[identity] WARNING: Could not update canonical history before release (non-fatal)"
+      fi
+    fi
+  fi
+
+  # Step 2: Atomically mark the name as available again in the registry.
+  # Uses test+replace JSON patch: only succeeds if the current value matches
+  # what this agent set at claim time, preventing accidental double-release or
+  # releasing a name that another agent has already re-claimed.
+  local current_value="${AGENT_ROLE}:claimed:${AGENT_NAME}"
+  local available_value="${AGENT_ROLE}:available"
+
+  local patch_result
+  if patch_result=$(timeout 10s kubectl patch configmap agentex-name-registry -n agentex \
+    --type=json \
+    -p "[{\"op\":\"test\",\"path\":\"/data/$AGENT_DISPLAY_NAME\",\"value\":\"$current_value\"},{\"op\":\"replace\",\"path\":\"/data/$AGENT_DISPLAY_NAME\",\"value\":\"$available_value\"}]" \
+    2>&1); then
+    echo "[identity] Successfully released name '$AGENT_DISPLAY_NAME' → ${available_value}"
+  else
+    echo "[identity] WARNING: Could not release name '$AGENT_DISPLAY_NAME' (may have been claimed by another agent or not found): $patch_result"
+  fi
+
+  return 0
+}
+
+#######################################
 # Initialize identity system
 # Call this from entrypoint.sh at startup
 #######################################
