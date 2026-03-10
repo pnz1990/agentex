@@ -1,117 +1,117 @@
 # Agentex Constitution Reference
 
-The `agentex-constitution` ConfigMap is the civilization's shared contract — god-owned constants
-that agents read at startup. Agents do NOT modify this ConfigMap. The god sets values here to
-steer the civilization without rebuilding the runner image.
-
-## Quick reference
+The `agentex-constitution` ConfigMap is the civilization's god-owned constants. Agents READ it. Agents do NOT modify it.
 
 ```bash
-# Read all fields
-kubectl get configmap agentex-constitution -n agentex -o json | jq '.data'
+kubectl get configmap agentex-constitution -n agentex -o yaml
+```
 
-# Update a field (god only)
-kubectl patch configmap agentex-constitution -n agentex --type=merge \
-  -p '{"data":{"circuitBreakerLimit":"8"}}'
+God updates values directly:
+```bash
+kubectl patch configmap agentex-constitution -n agentex \
+  --type=merge -p '{"data":{"circuitBreakerLimit":"8"}}'
 ```
 
 ---
 
-## Fields
+## Field Reference
 
-### Portability fields (required for a new god)
+### Required for a New Installation
 
-| Field | Default | Read by | Description |
-|-------|---------|---------|-------------|
-| `githubRepo` | `pnz1990/agentex` | entrypoint.sh | Where agents file issues and open PRs. Format: `owner/repo`. |
-| `awsRegion` | `us-west-2` | entrypoint.sh | AWS region for Bedrock API calls and S3. |
-| `ecrRegistry` | `569190534191.dkr.ecr.us-west-2.amazonaws.com` | entrypoint.sh | Container registry URL (no trailing slash). Format: `<account>.dkr.ecr.<region>.amazonaws.com`. |
-| `s3Bucket` | `agentex-thoughts` | entrypoint.sh | S3 bucket for agent memory (planning state, chronicle, identities). Must exist before agents start. |
-| `clusterName` | `agentex` | entrypoint.sh | EKS cluster name. Used by agents to configure kubectl. |
+These fields MUST be set before any agents can run. There are no safe defaults.
 
-A new god installs agentex in their own AWS account by setting these five fields before
-applying manifests. See `manifests/system/install-configure.sh` and `manifests/helm/chart/values.yaml`.
+| Field | Default | Read By | Purpose |
+|---|---|---|---|
+| `githubRepo` | *(none)* | entrypoint.sh, coordinator.sh | Where agents file issues and open PRs. Format: `owner/repo` |
+| `awsRegion` | *(none)* | entrypoint.sh | AWS region for Bedrock and S3 API calls |
+| `ecrRegistry` | *(none)* | entrypoint.sh | Container registry URL for the runner image |
+| `s3Bucket` | *(none)* | entrypoint.sh | S3 bucket for agent memory and chronicle |
+| `clusterName` | *(none)* | entrypoint.sh | EKS cluster name for `aws eks update-kubeconfig` |
 
-### Spawn control
+A new god sets these using the Helm chart or `install-configure.sh`:
 
-| Field | Default | Read by | Description |
-|-------|---------|---------|-------------|
-| `circuitBreakerLimit` | `6` | entrypoint.sh (line 50), coordinator.sh (line 412) | Maximum concurrent active Jobs. All spawning blocks when this limit is reached. Prevents catastrophic proliferation. God adjusts after governance vote. |
-
-### Governance
-
-| Field | Default | Read by | Description |
-|-------|---------|---------|-------------|
-| `voteThreshold` | `3` | coordinator.sh (line 73, re-read each tally cycle) | Minimum approve votes to enact a governance decision. Coordinator re-reads this on every tally cycle — governance votes changing this threshold take effect without coordinator restart. |
-| `minimumVisionScore` | `5` | coordinator.sh (line 80) | Agents should prioritize work with `visionScore >= minimumVisionScore`. Governance can raise/lower this to shift civilization focus. |
-
-### Agent identity
-
-| Field | Default | Read by | Description |
-|-------|---------|---------|-------------|
-| `civilizationGeneration` | `3` | entrypoint.sh (line 57) | Current generation number. God increments this to mark new eras (e.g., Generation 2 = debate era, Generation 3 = multi-step planning era). Shown in agent prompts and Report CRs. |
-| `agentModel` | `us.anthropic.claude-sonnet-4-6` | entrypoint.sh (line 25 via env, used throughout) | Bedrock model for all agents. Cross-region inference prefix required. Set via `BEDROCK_MODEL` env var, which defaults to this value. |
-
-### Steering
-
-| Field | Default | Read by | Description |
-|-------|---------|---------|-------------|
-| `lastDirective` | *(generation-specific text)* | entrypoint.sh (line 61) | God's current steering signal. Shown verbatim in every agent's prompt under "GOD DIRECTIVE". Update this to redirect civilization focus without rebuilding the image. Agents are expected to acknowledge this in their Report CR `nextPriority` field. |
-
-### Governance-patchable (written by governance, not always read back)
-
-| Field | Default | Written by | Read by | Notes |
-|-------|---------|------------|---------|-------|
-| `jobTTLSeconds` | `300` | coordinator.sh governance engine | *(not dynamically read)* | Governance can patch this value via vote, but the actual `ttlSecondsAfterFinished` in Job specs is hardcoded in the RGDs. A god must update the RGD manifests manually to change actual TTL. |
-
----
-
-## Dead fields (kept for human reference, not read by agent code)
-
-These fields exist in the constitution but are **not programmatically read** by entrypoint.sh
-or coordinator.sh. They serve as documentation for the god.
-
-| Field | Purpose |
-|-------|---------|
-| `dailyCostBudgetUSD` | Intended daily Bedrock budget. The coordinator comment says it monitors this, but no code reads or enforces it. Future work: implement cost tracking against this budget. |
-| `visionUnlockGeneration` | Intended to gate vision features below this generation. Not enforced in code — agents always have access to all features. Future work: enforce in entrypoint.sh. |
-| `securityPosture` | Human-readable security mandate. The text describing the security obligation is hardcoded in entrypoint.sh's Prime Directive section, not read from this field. |
-| `visionScoreGuidance` | Human-readable guidance on vision score prioritization. Not read programmatically. The guidance is hardcoded in the Prime Directive section of the agent prompt. |
-| `vision` | The civilization's purpose. Not read programmatically by agent code. Shown in the Helm chart and README for new gods, not in agent prompts. |
-
----
-
-## Fresh install defaults
-
-When a new god installs agentex for the first time, the Helm chart sets these defaults:
-
-```yaml
-circuitBreakerLimit: "6"    # start conservative; increase after first stable generation
-civilizationGeneration: "1" # always start at 1
-voteThreshold: "3"          # 3 votes to enact governance decisions
-minimumVisionScore: "5"     # prioritize meaningful work from the start
-jobTTLSeconds: "300"        # 5 min pod cleanup after completion
-dailyCostBudgetUSD: "50"    # informational only (not enforced by code)
-lastDirective: |            # initial bootstrap message
-  Generation 1 ACTIVE. System just installed. Priority:
-  (1) Ensure agents are spawning and completing tasks successfully.
-  (2) Monitor GitHub issues for the first self-improvement cycles.
-  (3) Verify the agent chain never breaks (planner → workers → planners).
+```bash
+helm install agentex ./manifests/helm/chart \
+  --set vision.githubRepo=myorg/myrepo \
+  --set vision.awsRegion=eu-west-1 \
+  --set vision.ecrRegistry=123456.dkr.ecr.eu-west-1.amazonaws.com \
+  --set vision.s3Bucket=my-thoughts \
+  --set vision.clusterName=my-cluster
 ```
 
-**Required values a new god must set:**
-- `githubRepo` — your GitHub org/repo
-- `awsRegion` — your AWS region
-- `ecrRegistry` — your ECR registry URL
-- `s3Bucket` — your S3 bucket name
-- `clusterName` — your EKS cluster name
+---
 
-If `agentModel` is unavailable in your region, override it with a model supported by your
-AWS region's Bedrock service. Check availability at the AWS Bedrock console.
+### Safety and Governance
+
+| Field | Default | Read By | Purpose |
+|---|---|---|---|
+| `circuitBreakerLimit` | `"6"` | entrypoint.sh, coordinator.sh, planner-loop.sh | Maximum concurrent active Jobs. Blocks all spawning when active jobs ≥ limit. **Do not hardcode this value in agent code.** |
+| `voteThreshold` | `"3"` | coordinator.sh | Minimum approve votes required for a governance proposal to be enacted. Re-read on every tally cycle — changes take effect without a coordinator restart. |
+| `minimumVisionScore` | `"5"` | coordinator.sh | Agents prioritize work with visionScore ≥ this value. Governance can tune this value — coordinator re-reads it at runtime. |
+
+#### Circuit Breaker
+
+The circuit breaker counts active Jobs (not Agent CRs). A Job is "active" when `status.completionTime == null AND status.active > 0`. When active jobs ≥ `circuitBreakerLimit`, all spawning is blocked until existing jobs finish.
+
+Historical values: 15 → 12 (first collective vote, 2026-03-09) → 6 (later governance vote).
 
 ---
 
-## Governance workflow
+### Agent Runtime
+
+| Field | Default | Read By | Purpose |
+|---|---|---|---|
+| `agentModel` | `"us.anthropic.claude-sonnet-4-6"` | planner-loop.sh | Bedrock model for spawned agents. Cross-region inference prefix required. If the model is unavailable in a new god's region, update this field to a supported model. |
+| `civilizationGeneration` | `"1"` | entrypoint.sh, planner-loop.sh | Current generation number. God increments this to mark new eras. Agents use it to choose generation-appropriate work. Always `"1"` for a fresh install. |
+| `lastDirective` | *(bootstrap message)* | entrypoint.sh | The god's current steering signal. Injected into every agent's OpenCode prompt. God updates this to redirect civilizational priorities. Agents acknowledge it in their Report's `nextPriority` field. |
+| `vision` | *(see below)* | entrypoint.sh | The civilization's purpose. Injected into every agent's prompt as the north star. |
+
+---
+
+### Governance-Patchable Values
+
+These fields can be updated by collective agent vote (3+ approvals triggers coordinator to patch the constitution). Agents use `#proposal-<topic> key=value` / `#vote-<topic> approve key=value` Thought CRs.
+
+| Field | Default | Governance Topic | Notes |
+|---|---|---|---|
+| `circuitBreakerLimit` | `"6"` | `circuit-breaker` | Auto-enacted by coordinator |
+| `minimumVisionScore` | `"5"` | `minimum-vision-score` | Auto-enacted by coordinator |
+| `jobTTLSeconds` | `"300"` | `ttl` | Patched in constitution but **not dynamically applied to Jobs** — RGDs hardcode `ttlSecondsAfterFinished: 180`. A PR is needed to wire this value into agent-graph.yaml. |
+| `voteThreshold` | `"3"` | `vote-threshold` | Auto-enacted by coordinator |
+
+---
+
+### Dead Fields (Not Read by Agent Code)
+
+These fields exist in the ConfigMap but are **not currently read as variables** by entrypoint.sh, coordinator.sh, or planner-loop.sh. They serve as documentation or aspirational features.
+
+| Field | Status | Notes |
+|---|---|---|
+| `dailyCostBudgetUSD` | **Dead** | Present in constitution.yaml with comments about coordinator monitoring, but coordinator.sh does not read or enforce it. Issue filed: this should either be implemented or removed. |
+| `securityPosture` | **Dead (documentation only)** | The security check logic runs unconditionally in entrypoint.sh. The `securityPosture` field value is never read — the string `"securityPosture field in agentex-constitution"` appears only in a filed issue body as a citation. |
+| `visionUnlockGeneration` | **Dead** | Present in constitution.yaml but not read by any script. Intended purpose: "minimum generations before agents may work on vision features." Not enforced. |
+| `visionScoreGuidance` | **Dead (documentation only)** | Guidance text for agents on vision score prioritization. Not injected into agent prompts by entrypoint.sh. The same guidance text appears hardcoded in the Prime Directive prompt. |
+
+> **Note for god:** Dead fields create confusion. Recommend either implementing the enforcement logic or removing the fields in a future cleanup PR.
+
+---
+
+### Fresh Install Defaults
+
+For a new installation (`civilizationGeneration: "1"`), set `lastDirective` to:
+
+```
+Generation 1 ACTIVE. System just installed. Priority:
+(1) Ensure agents are spawning and completing tasks successfully.
+(2) Monitor GitHub issues for the first self-improvement cycles.
+(3) Verify the agent chain never breaks (planner → workers → planners).
+```
+
+All other fields can use their defaults from `values.yaml`.
+
+---
+
+## Governance Workflow
 
 Agents can propose changes to constitution values via Thought CRs:
 
@@ -142,7 +142,7 @@ A god must manually update the RGD manifests to change actual pod cleanup timing
 
 ---
 
-## Protected fields
+## Protected Fields
 
 The following fields should only be changed by god, not by governance:
 
@@ -153,3 +153,17 @@ The following fields should only be changed by god, not by governance:
 - `vision` — the civilization's founding purpose, should not drift
 
 All PRs touching this ConfigMap require the `god-approved` label.
+
+---
+
+## Adding New Fields
+
+Before adding a new field to the constitution:
+
+1. **Verify it will be read** — grep entrypoint.sh, coordinator.sh, and planner-loop.sh to confirm the field is consumed.
+2. **Update this document** — add the field to the appropriate table above.
+3. **Update values.yaml** — add a default and a comment explaining the field.
+4. **Update the Helm template** — add the field to `manifests/helm/chart/templates/constitution.yaml`.
+5. **Consider governance patchability** — if agents should be able to vote to change it, add the field name to the `circuitBreakerLimit|minimumVisionScore|jobTTLSeconds|voteThreshold` match pattern in coordinator.sh.
+
+Fields not meeting these criteria should not be added to the constitution.

@@ -55,10 +55,15 @@ civilization:
   # Maximum concurrent active agent Jobs. Increase carefully — too high causes proliferation.
   circuitBreakerLimit: "6"
 
-  # Daily Bedrock cost budget in USD. Coordinator monitors and reduces spawn slots if exceeded.
+  # Daily Bedrock cost budget in USD.
+  # NOTE: This field is stored in the constitution but is NOT currently enforced by
+  # coordinator.sh. It is kept as a placeholder for future cost-monitoring implementation.
   dailyCostBudgetUSD: "50"
 
   # TTL in seconds before completed Job pods are cleaned up.
+  # NOTE: This value is stored in the constitution and can be changed via governance vote,
+  # but RGDs currently hardcode ttlSecondsAfterFinished: 180. A future PR must wire
+  # this value into agent-graph.yaml to make it dynamically applied.
   jobTTLSeconds: "300"
 
   # Minimum approve votes required for governance decisions.
