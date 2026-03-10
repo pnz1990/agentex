@@ -1013,6 +1013,104 @@ cleanup_orphaned_pods() {
     push_metric "OrphanedPodsDeleted" "$deleted_count" "Count" "Component=Coordinator"
 }
 
+# cleanup_old_cluster_resources — Periodically delete stale Thought and Message CRs (issue #1617)
+# The cluster accumulates 4000+ Thought ConfigMaps and 1600+ Report CRs when planner cleanup
+# doesn't run frequently enough. The coordinator runs continuously every ~30s and is better
+# positioned for periodic cleanup to supplement planner-initiated cleanup.
+#
+# TTLs match helpers.sh cleanup_old_thoughts / cleanup_old_messages:
+#   Thought low-signal (blocker, observation): 2h TTL
+#   Thought high-signal (insight, decision, debate, proposal, vote): 24h TTL
+#   Messages (read): 24h TTL
+#   Messages (unread): 48h TTL
+#   Reports: 48h TTL
+#
+# Runs every 60 iterations (~30 min) to bound coordinator blocking time.
+cleanup_old_cluster_resources() {
+    local cutoff_2h cutoff_24h cutoff_48h
+    cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+    if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ] || [ -z "$cutoff_48h" ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: Cannot calculate cleanup cutoffs — skipping (date command issue)"
+        return 0
+    fi
+
+    local total_deleted=0
+
+    # --- Thought ConfigMap cleanup ---
+    # Use 60s timeout: 4000+ CRs takes 10-15s to list
+    local all_thoughts_json
+    all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$all_thoughts_json" ] && [ "$all_thoughts_json" != "null" ]; then
+        local old_thoughts
+        old_thoughts=$(echo "$all_thoughts_json" | jq -r \
+            --arg cutoff_24h "$cutoff_24h" \
+            --arg cutoff_2h "$cutoff_2h" \
+            '.items[] |
+             (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+              then $cutoff_2h
+              else $cutoff_24h
+              end) as $cutoff |
+             select(.metadata.creationTimestamp < $cutoff) |
+             .metadata.name' 2>/dev/null || true)
+        if [ -n "$old_thoughts" ]; then
+            local thought_count
+            thought_count=$(echo "$old_thoughts" | wc -w)
+            echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $thought_count old thoughts..."
+            echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            total_deleted=$((total_deleted + thought_count))
+        fi
+    fi
+
+    # --- Message CR cleanup ---
+    local all_messages_json
+    all_messages_json=$(kubectl_with_timeout 30 get messages -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$all_messages_json" ] && [ "$all_messages_json" != "null" ]; then
+        local old_messages
+        old_messages=$(echo "$all_messages_json" | jq -r \
+            --arg cutoff_24h "$cutoff_24h" \
+            --arg cutoff_48h "$cutoff_48h" \
+            '.items[] |
+             (if (.status.read // "false") == "true"
+              then $cutoff_24h
+              else $cutoff_48h
+              end) as $cutoff |
+             select(.metadata.creationTimestamp < $cutoff) |
+             .metadata.name' 2>/dev/null || true)
+        if [ -n "$old_messages" ]; then
+            local msg_count
+            msg_count=$(echo "$old_messages" | wc -w)
+            echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $msg_count old messages..."
+            echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            total_deleted=$((total_deleted + msg_count))
+        fi
+    fi
+
+    # --- Report CR cleanup (48h TTL) ---
+    local all_reports_json
+    all_reports_json=$(kubectl_with_timeout 60 get reports -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$all_reports_json" ] && [ "$all_reports_json" != "null" ]; then
+        local old_reports
+        old_reports=$(echo "$all_reports_json" | jq -r \
+            --arg cutoff_48h "$cutoff_48h" \
+            '.items[] | select(.metadata.creationTimestamp < $cutoff_48h) | .metadata.name' 2>/dev/null || true)
+        if [ -n "$old_reports" ]; then
+            local report_count
+            report_count=$(echo "$old_reports" | wc -w)
+            echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: deleting $report_count old reports (48h TTL)..."
+            echo "$old_reports" | xargs -n 50 kubectl delete reports -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+            total_deleted=$((total_deleted + report_count))
+        fi
+    fi
+
+    if [ "$total_deleted" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: removed $total_deleted stale CRs (thoughts+messages+reports)"
+        push_metric "ClusterResourcesDeleted" "$total_deleted" "Count" "Component=Coordinator"
+    fi
+}
+
 # Reconcile spawnSlots against actual running job count (leak recovery)
 # If agents crash before releasing slots, spawnSlots drifts low.
 # This function resets spawnSlots = max(0, circuitBreakerLimit - activeJobs).
@@ -3023,6 +3121,14 @@ while true; do
     # NOTE (issue #867): Planner-chain liveness check removed.
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime
     # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
+
+    # Every 60 iterations (~30 min): cleanup old Thought/Message/Report CRs (issue #1617)
+    # Supplements planner-initiated cleanup. The cluster accumulates 4000+ Thoughts and
+    # 1600+ Reports when planner cleanup alone isn't frequent enough.
+    # 30-min cadence bounds coordinator blocking time (listing 4000 CRs takes ~10s each).
+    if [ $((iteration % 60)) -eq 0 ]; then
+        cleanup_old_cluster_resources
+    fi
 
     # Every 20 iterations (~10 min): verify gh CLI is still authenticated (issue #1447)
     # GitHub GraphQL rate limits can expire and cause auth failures mid-run.
