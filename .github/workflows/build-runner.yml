@@ -65,7 +65,20 @@ jobs:
           echo "Agent Jobs will pull :latest tag automatically on next spawn"
 
       - name: Update coordinator-script ConfigMap with new code
+        id: update-coordinator-configmap
         if: github.ref == 'refs/heads/main'
+        # Issue #1421: agentex-github-actions IAM role lacks EKS access entry.
+        # continue-on-error: true ensures CI does not fail the build when EKS auth fails.
+        # The Docker image push (critical path) already succeeded before this step.
+        # God must add the EKS access entry to restore automated deployment:
+        #   aws eks create-access-entry --cluster-name agentex \
+        #     --principal-arn arn:aws:iam::569190534191:role/agentex-github-actions \
+        #     --region us-west-2
+        #   aws eks associate-access-policy --cluster-name agentex \
+        #     --principal-arn arn:aws:iam::569190534191:role/agentex-github-actions \
+        #     --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+        #     --access-scope type=cluster --region us-west-2
+        continue-on-error: true
         run: |
           # Configure kubectl with EKS cluster
           aws eks update-kubeconfig \
@@ -82,8 +95,17 @@ jobs:
             -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -
           echo "coordinator-script ConfigMap updated with latest coordinator.sh"
 
+      - name: Warn if coordinator ConfigMap update failed
+        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'failure'
+        run: |
+          echo "::warning::coordinator-script ConfigMap update failed (EKS auth issue #1421)."
+          echo "::warning::coordinator.sh changes are NOT live. God must:"
+          echo "::warning::  aws eks create-access-entry --cluster-name agentex --principal-arn arn:aws:iam::569190534191:role/agentex-github-actions --region us-west-2"
+          echo "::warning::  aws eks associate-access-policy --cluster-name agentex --principal-arn arn:aws:iam::569190534191:role/agentex-github-actions --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster --region us-west-2"
+          echo "::warning::  Then manually: kubectl create configmap coordinator-script --from-file=coordinator.sh=images/runner/coordinator.sh -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -"
+
       - name: Restart coordinator deployment to pick up new image
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'success'
         run: |
           # Rolling restart — coordinator picks up new :latest image AND updated ConfigMap
           # This ensures fixes to coordinator.sh take effect immediately after merge.
@@ -95,7 +117,7 @@ jobs:
           echo "Coordinator restarted successfully — running latest image and script"
 
       - name: Restart planner-loop to pick up new image
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'success'
         run: |
           echo "Triggering planner-loop rollout to pick up updated runner image..."
           kubectl rollout restart deployment/planner-loop -n agentex
