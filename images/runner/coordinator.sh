@@ -994,8 +994,8 @@ The civilization needs mediators, not just voters." \
 #
 # Scoring formula:
 #   score = (label_matches * 3) + (keyword_matches * 2)
-#   - label_matches: count of issue labels that match agent's issueLabels specialization
-#   - keyword_matches: count of title/body keywords matching agent's codeAreas specialization
+#   - label_matches: count of issue labels that match agent's specializationLabelCounts
+#   - keyword_matches: count of title/body keywords matching agent's specializationDetail.codeAreas
 #
 # Routing decision:
 #   - score > SPECIALIZATION_ROUTING_THRESHOLD (5): route to specialized agent
@@ -1060,7 +1060,7 @@ score_agent_for_issue() {
             local label_count
             label_count=$(echo "$identity_json" | jq -r \
                 --arg lbl "$label" \
-                '(.specialization.issueLabels[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
+                '(.specializationLabelCounts[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
             if [ "$label_count" -gt 0 ]; then
                 score=$((score + 3))
             fi
@@ -1071,12 +1071,12 @@ score_agent_for_issue() {
     if [ -n "$issue_keywords" ]; then
         local code_areas
         code_areas=$(echo "$identity_json" | jq -r \
-            '.specialization.codeAreas // {} | keys | .[]' 2>/dev/null || echo "")
+            '.specializationDetail.codeAreas // {} | keys | .[]' 2>/dev/null || echo "")
         for area in $code_areas; do
             local area_count
             area_count=$(echo "$identity_json" | jq -r \
                 --arg a "$area" \
-                '.specialization.codeAreas[$a] // 0 | tonumber' 2>/dev/null || echo "0")
+                '.specializationDetail.codeAreas[$a] // 0 | tonumber' 2>/dev/null || echo "0")
             if [ "$area_count" -gt 0 ]; then
                 # Check if any keyword matches this code area
                 for kw in $issue_keywords; do
