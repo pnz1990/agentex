@@ -3046,6 +3046,14 @@ fi
 # Post audit result as a thought for peer visibility
 post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
 
+# Update identity stats for issues filed and PRs opened this session (issue #1139)
+if [ "${ISSUES_CREATED:-0}" -gt 0 ] && type update_identity_stats &>/dev/null; then
+  update_identity_stats "issuesFiled" "$ISSUES_CREATED" 2>/dev/null || true
+fi
+if [ "${PRS_OPENED:-0}" -gt 0 ] && type update_identity_stats &>/dev/null; then
+  update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
+fi
+
 # Push metrics to CloudWatch
 push_metric "SelfImprovementScore" "$SI_SCORE" "None"
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
