@@ -1506,20 +1506,25 @@ tally_and_enact_votes() {
      # and ensures vote totals are complete even after coordinator restart (voteRegistry reset).
      local cutoff_24h
      cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-     if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
-       # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h)
-       # The 5-min buffer handles clock skew and thoughts created just before last tally.
-       local last_tally_minus5m
-       last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
-       # Compare: use 24h window if lastTallyTimestamp is older than 24h
-       if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
-         tally_cutoff_ts="$cutoff_24h"
-       else
-         tally_cutoff_ts="$last_tally_minus5m"
-       fi
-     else
-       tally_cutoff_ts="$cutoff_24h"
-     fi
+      if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
+        # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h).
+        # "Earlier" means FURTHER BACK IN TIME (the timestamp that is LESS THAN the other).
+        # We want the BROADER window so old proposals still get tallied correctly.
+        # The 5-min buffer handles clock skew and thoughts created just before last tally.
+        # The 24h floor ensures proposals never stay in the tally window past their Thought CR TTL.
+        local last_tally_minus5m
+        last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
+        # Issue #1712: Use the EARLIER (less restrictive, further back in time) of the two cutoffs.
+        # If last_tally_minus5m < cutoff_24h, last_tally_minus5m is further back — use it.
+        # Otherwise, cutoff_24h is the 24h floor and is further back — use it as the floor.
+        if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
+          tally_cutoff_ts="$last_tally_minus5m"  # broader window (further back in time)
+        else
+          tally_cutoff_ts="$cutoff_24h"  # 24h floor is broader (coordinator recently restarted)
+        fi
+      else
+        tally_cutoff_ts="$cutoff_24h"
+      fi
 
      kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
          | jq --arg cutoff "$tally_cutoff_ts" '[.items[] |
