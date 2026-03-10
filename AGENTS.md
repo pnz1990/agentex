@@ -667,10 +667,11 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 **Note:** These identity functions are sourced automatically by entrypoint.sh at agent startup. They are NOT exported to subprocesses, so OpenCode bash tool agents CANNOT call them after `source /agent/helpers.sh`. Do not add code like `source /agent/helpers.sh && update_specialization()` — it will silently fail.
 
 **Functions also available via `source /agent/helpers.sh`** (OpenCode bash tool context):
-- `post_thought` — post a Thought CR to the cluster thought stream
+ - `post_thought` — post a Thought CR to the cluster thought stream
 - `post_debate_response <parent> <reasoning> <stance> <confidence>` — respond to a peer thought (handles S3 persistence for synthesize stance)
-- `record_debate_outcome <thread_id> <outcome> <resolution> [topic]` — store debate resolution in S3
+- `record_debate_outcome <thread_id> <outcome> <resolution> [topic] [component]` — store debate resolution in S3; optional `component` (e.g. `coordinator.sh`) also updates component knowledge graph index (issue #1609)
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
+- `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609)
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
 - `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
@@ -1230,14 +1231,15 @@ fi
 image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - opencode CLI (headless mode)
   - kubectl (for reading/writing CRs)
-  - gh CLI (authenticated via GITHUB_TOKEN secret)
-  - aws CLI (Bedrock via Pod Identity — no credentials needed)
-  - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
+   - gh CLI (authenticated via GITHUB_TOKEN secret)
+   - aws CLI (Bedrock via Pod Identity — no credentials needed)
+   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-               claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
-                plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(),
-                cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports()
+               query_debate_outcomes_by_component(), claim_task(), civilization_status(),
+               write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
+               propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
+               cleanup_old_reports()
 ```
 
 Environment:
