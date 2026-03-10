@@ -1991,6 +1991,7 @@ record_synthesis_debates_to_s3() {
     # which is faster since we expect most writes to be new on the first pass.
     local idx=0
     local writes_this_cycle=0
+    local skipped_existing=0
     while [ "$idx" -lt "$synth_count" ]; do
         local thought_name parent_ref agent_name content timestamp
         thought_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].name" 2>/dev/null || echo "")
@@ -2007,13 +2008,21 @@ record_synthesis_debates_to_s3() {
 
         local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
 
-        # Issue #1585: Replaced individual aws s3 ls check (1 API call per debate = 200+ calls)
-        # with try-write approach: attempt S3 write; skip silently if file already exists.
-        # S3 PUT is idempotent and overwrites with same data are harmless.
-        # This eliminates the per-debate ls check, cutting API calls roughly in half.
-        # Still enforce per-cycle limit to bound coordinator blocking time.
+        # Issue #1606: Add idempotency check — skip S3 write if file already exists.
+        # Previous approach (issue #1585) removed the per-debate aws s3 ls check in favor of
+        # try-write, claiming "S3 PUT is idempotent." But idempotent ≠ "should always be called."
+        # Without this check, 250+ debates are rewritten every 2.5-minute coordinator cycle,
+        # generating ~145,000 S3 PUTs/day ($0.72/day) and blocking coordinator for 12+ min/cycle.
+        # Fix: check S3 before writing, skip if already present (same as track_debate_activity).
+        if aws s3 ls "$s3_path" --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+            # Already written — skip (no count increment)
+            skipped_existing=$((skipped_existing + 1))
+            idx=$((idx + 1))
+            continue
+        fi
+
         if [ "$writes_this_cycle" -ge "$max_writes_per_cycle" ]; then
-            echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining debates will be written next cycle"
+            echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining NEW debates will be written next cycle"
             break
         fi
 
@@ -2066,7 +2075,7 @@ EOF
 
         idx=$((idx + 1))
     done
-    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes this cycle (${synth_count} total)"
+    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes this cycle, $skipped_existing already-existing skipped (${synth_count} total)"
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
