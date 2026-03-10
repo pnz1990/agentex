@@ -1,0 +1,528 @@
+name: Automated Merge Queue
+
+# Processes agent PRs automatically:
+# 1. Checks for duplicates (2+ PRs on same issue)
+# 2. Validates PR has Closes/Fixes #N
+# 3. Auto-rebases on main
+# 4. Merges on CI success if not touching protected files
+# 5. Labels protected-file PRs for god review
+#
+# Issue #1828 — reduces god operational tax from manual merge/rebase cycles
+
+on:
+  # Run when a PR is opened, updated, or has label changes
+  pull_request:
+    types: [opened, synchronize, labeled, reopened]
+  # Also run on schedule to catch PRs that were already open when CI passed
+  schedule:
+    - cron: '*/10 * * * *'  # every 10 minutes
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: Process a single PR (triggered by PR events)
+  # ─────────────────────────────────────────────────────────────────────────────
+  process-pr:
+    name: Validate & Queue PR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.name "agentex-bot"
+          git config --global user.email "agentex-bot@users.noreply.github.com"
+
+      # ─── Step 1: Check for protected files ──────────────────────────────────
+      - name: Check protected files
+        id: protected
+        run: |
+          git fetch origin main --quiet
+
+          PROTECTED_PATTERNS=(
+            "images/runner/entrypoint.sh"
+            "AGENTS.md"
+            "manifests/rgds/"
+          )
+
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          TOUCHES_PROTECTED="false"
+          PROTECTED_FILES_LIST=""
+
+          for pattern in "${PROTECTED_PATTERNS[@]}"; do
+            if echo "$CHANGED_FILES" | grep -q "$pattern"; then
+              TOUCHES_PROTECTED="true"
+              PROTECTED_FILES_LIST="${PROTECTED_FILES_LIST} ${pattern}"
+            fi
+          done
+
+          echo "touches_protected=${TOUCHES_PROTECTED}" >> $GITHUB_OUTPUT
+          echo "protected_files=${PROTECTED_FILES_LIST}" >> $GITHUB_OUTPUT
+          echo "Touches protected: ${TOUCHES_PROTECTED}"
+
+      # ─── Step 2: Label protected PRs for god review ──────────────────────────
+      - name: Label protected PR
+        if: steps.protected.outputs.touches_protected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+
+            // Add needs-god-review label
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: ['needs-god-review']
+              });
+            } catch (e) {
+              // Label may not exist yet — create it
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'needs-god-review',
+                  color: 'e4e669',
+                  description: 'PR touches protected files, requires god review before merge'
+                });
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: ['needs-god-review']
+                });
+              } catch (e2) {
+                console.log('Could not add label:', e2.message);
+              }
+            }
+
+            const protectedFiles = '${{ steps.protected.outputs.protected_files }}';
+            await github.rest.issues.createComment({
+              issue_number: pr.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🔒 **Protected files detected** — auto-merge skipped.\n\nThis PR touches protected files:\n\`\`\`\n${protectedFiles.trim()}\n\`\`\`\n\nThe PR has been labeled \`needs-god-review\`. God must review and approve before merge.\n\nThe branch will still be auto-rebased on \`main\` to keep it current.`
+            });
+
+      # ─── Step 3: Validate PR body has Closes/Fixes #N ───────────────────────
+      - name: Validate closing keyword
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+
+            // Check for Closes/Fixes #N pattern
+            const closingPattern = /(?:closes?|fixes?|resolves?)\s+#(\d+)/gi;
+            const matches = body.match(closingPattern);
+
+            if (!matches) {
+              core.setOutput('has_closing', 'false');
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `⚠️ **Missing closing keyword** — auto-merge requires \`Closes #N\` or \`Fixes #N\` in the PR body.\n\nPlease add the closing keyword to enable auto-merge and GitHub auto-close of the issue on merge.\n\nExample: \`Closes #1828\``
+              });
+              return;
+            }
+
+            core.setOutput('has_closing', 'true');
+            core.setOutput('issue_refs', matches.join(', '));
+            console.log('Found closing references:', matches.join(', '));
+
+      # ─── Step 4: Check for duplicate PRs on same issue ───────────────────────
+      - name: Check duplicate PRs
+        id: duplicates
+        if: steps.validate.outputs.has_closing == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+
+            // Extract issue numbers
+            const closingPattern = /(?:closes?|fixes?|resolves?)\s+#(\d+)/gi;
+            let match;
+            const issueNums = [];
+            while ((match = closingPattern.exec(body)) !== null) {
+              issueNums.push(parseInt(match[1]));
+            }
+
+            if (issueNums.length === 0) {
+              core.setOutput('is_duplicate', 'false');
+              return;
+            }
+
+            // Get all open PRs
+            const allPRs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open'
+            });
+
+            let isDuplicate = false;
+            let duplicatePRs = [];
+
+            for (const issueNum of issueNums) {
+              const dupes = allPRs.filter(p => {
+                if (p.number === pr.number) return false;
+                const pbody = p.body || '';
+                const pattern = new RegExp(`(?:closes?|fixes?|resolves?)\\s+#${issueNum}`, 'i');
+                return pattern.test(pbody);
+              });
+
+              if (dupes.length > 0) {
+                isDuplicate = true;
+                duplicatePRs = duplicatePRs.concat(dupes.map(d => `#${d.number} (${d.title})`));
+              }
+            }
+
+            if (isDuplicate) {
+              core.setOutput('is_duplicate', 'true');
+              core.setOutput('duplicate_prs', duplicatePRs.join(', '));
+
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `⚠️ **Duplicate PR detected** — the following PRs also reference the same issue(s):\n\n${duplicatePRs.join('\n')}\n\nAuto-merge is paused pending duplicate resolution. The PR with CI passing will be merged; others will be closed.`
+              });
+            } else {
+              core.setOutput('is_duplicate', 'false');
+            }
+
+      # ─── Step 5: Auto-rebase on main ────────────────────────────────────────
+      - name: Auto-rebase on main
+        id: rebase
+        if: steps.validate.outputs.has_closing == 'true'
+        run: |
+          git fetch origin main --quiet
+
+          # Check if rebase is needed
+          BEHIND=$(git rev-list --count HEAD..origin/main)
+          echo "Branch is ${BEHIND} commits behind main"
+
+          if [ "$BEHIND" -eq "0" ]; then
+            echo "Branch is up-to-date, no rebase needed"
+            echo "rebase_status=uptodate" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if branch is too far behind (>200 commits) — warn but still try
+          if [ "$BEHIND" -gt "200" ]; then
+            echo "WARNING: Branch is ${BEHIND} commits behind main — rebase may take time"
+          fi
+
+          # Attempt rebase
+          if git rebase origin/main; then
+            echo "rebase_status=success" >> $GITHUB_OUTPUT
+            echo "Rebase succeeded — branch is now up-to-date"
+            git push --force-with-lease origin ${{ github.event.pull_request.head.ref }}
+            echo "Force-pushed rebased branch"
+          else
+            echo "rebase_status=conflict" >> $GITHUB_OUTPUT
+            echo "Rebase failed with conflicts"
+            git rebase --abort || true
+          fi
+
+      - name: Comment on rebase failure
+        if: steps.rebase.outputs.rebase_status == 'conflict'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.payload.pull_request.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '⚠️ **Auto-rebase failed** due to merge conflicts.\n\nOptions:\n1. God resolves conflicts manually\n2. Close this PR and spawn a fresh worker to re-implement on current main'
+            });
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: Scheduled merge processor — merges PRs that have CI passing
+  # ─────────────────────────────────────────────────────────────────────────────
+  scheduled-merge:
+    name: Process Merge Queue
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.name "agentex-bot"
+          git config --global user.email "agentex-bot@users.noreply.github.com"
+
+      - name: Process PRs ready for merge
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const PROTECTED_PATTERNS = [
+              'images/runner/entrypoint.sh',
+              'AGENTS.md',
+              /^manifests\/rgds\//
+            ];
+
+            function touchesProtected(files) {
+              return files.some(f => PROTECTED_PATTERNS.some(p => 
+                typeof p === 'string' ? f === p : p.test(f)
+              ));
+            }
+
+            function extractIssueNums(body) {
+              const pattern = /(?:closes?|fixes?|resolves?)\s+#(\d+)/gi;
+              const nums = [];
+              let m;
+              while ((m = pattern.exec(body)) !== null) {
+                nums.push(parseInt(m[1]));
+              }
+              return nums;
+            }
+
+            // Get all open PRs
+            const allPRs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open'
+            });
+
+            console.log(`Found ${allPRs.length} open PRs`);
+
+            // Build map of issue → PRs for duplicate detection
+            const issueToProMap = {};
+            for (const pr of allPRs) {
+              const body = pr.body || '';
+              const issueNums = extractIssueNums(body);
+              for (const num of issueNums) {
+                if (!issueToProMap[num]) issueToProMap[num] = [];
+                issueToProMap[num].push(pr);
+              }
+            }
+
+            let mergedCount = 0;
+            let skippedCount = 0;
+
+            for (const pr of allPRs) {
+              const body = pr.body || '';
+              const labels = pr.labels.map(l => l.name);
+              const issueNums = extractIssueNums(body);
+
+              console.log(`\n=== PR #${pr.number}: ${pr.title} ===`);
+
+              // Skip PRs needing god review
+              if (labels.includes('needs-god-review')) {
+                console.log(`  SKIP: needs-god-review label`);
+                skippedCount++;
+                continue;
+              }
+
+              // Skip draft PRs
+              if (pr.draft) {
+                console.log(`  SKIP: draft PR`);
+                skippedCount++;
+                continue;
+              }
+
+              // Skip if no closing keyword
+              if (issueNums.length === 0) {
+                console.log(`  SKIP: no closing keyword`);
+                skippedCount++;
+                continue;
+              }
+
+              // Check for duplicates — if duplicates exist, keep the one with more changes or earliest
+              let isDuplicate = false;
+              for (const issueNum of issueNums) {
+                const duplicates = (issueToProMap[issueNum] || []).filter(p => p.number !== pr.number);
+                if (duplicates.length > 0) {
+                  console.log(`  SKIP: duplicate PR(s) for issue #${issueNum}: ${duplicates.map(d => '#' + d.number).join(', ')}`);
+                  isDuplicate = true;
+
+                  // Close duplicate PRs that are older (keep the newest one)
+                  for (const dupPR of duplicates) {
+                    if (dupPR.number < pr.number) {
+                      console.log(`  Closing older duplicate PR #${dupPR.number}`);
+                      try {
+                        await github.rest.issues.createComment({
+                          issue_number: dupPR.number,
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          body: `🔄 **Duplicate PR closed** — PR #${pr.number} is a newer PR for the same issue(s) and will be processed instead.\n\nThis PR is being closed automatically by the merge queue processor (issue #1828).`
+                        });
+                        await github.rest.pulls.update({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          pull_number: dupPR.number,
+                          state: 'closed'
+                        });
+                      } catch (e) {
+                        console.log(`  Warning: Could not close PR #${dupPR.number}: ${e.message}`);
+                      }
+                    }
+                  }
+                }
+              }
+
+              // If this PR is a duplicate of a newer one, skip it
+              let hasNewerDuplicate = false;
+              for (const issueNum of issueNums) {
+                const newer = (issueToProMap[issueNum] || []).filter(p => p.number > pr.number);
+                if (newer.length > 0) {
+                  hasNewerDuplicate = true;
+                  console.log(`  SKIP: newer PR #${newer[0].number} exists for same issue`);
+                  break;
+                }
+              }
+              if (hasNewerDuplicate) {
+                skippedCount++;
+                continue;
+              }
+
+              // Check CI status — get latest commit status
+              let ciPassed = false;
+              try {
+                // Get check runs for the PR head SHA
+                const checkRuns = await github.rest.checks.listForRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: pr.head.sha,
+                  per_page: 100
+                });
+
+                const runs = checkRuns.data.check_runs;
+
+                if (runs.length === 0) {
+                  console.log(`  SKIP: no CI check runs found`);
+                  skippedCount++;
+                  continue;
+                }
+
+                // Check if all completed check runs passed
+                const completedRuns = runs.filter(r => r.status === 'completed');
+                const failedRuns = completedRuns.filter(r => r.conclusion !== 'success' && r.conclusion !== 'neutral' && r.conclusion !== 'skipped');
+                const pendingRuns = runs.filter(r => r.status !== 'completed');
+
+                console.log(`  CI: ${completedRuns.length} completed, ${pendingRuns.length} pending, ${failedRuns.length} failed`);
+
+                if (pendingRuns.length > 0) {
+                  console.log(`  SKIP: CI still running`);
+                  skippedCount++;
+                  continue;
+                }
+
+                if (failedRuns.length > 0) {
+                  console.log(`  SKIP: CI failed (${failedRuns.map(r => r.name).join(', ')})`);
+                  skippedCount++;
+                  continue;
+                }
+
+                ciPassed = completedRuns.length > 0;
+              } catch (e) {
+                console.log(`  SKIP: Could not check CI status: ${e.message}`);
+                skippedCount++;
+                continue;
+              }
+
+              if (!ciPassed) {
+                console.log(`  SKIP: CI not passed`);
+                skippedCount++;
+                continue;
+              }
+
+              // Check if PR touches protected files
+              let files = [];
+              try {
+                const filesResp = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number
+                });
+                files = filesResp.map(f => f.filename);
+              } catch (e) {
+                console.log(`  Warning: Could not list PR files: ${e.message}`);
+              }
+
+              if (touchesProtected(files)) {
+                console.log(`  SKIP: touches protected files — flagging for god review`);
+                // Add label if not already present
+                if (!labels.includes('needs-god-review')) {
+                  try {
+                    await github.rest.issues.addLabels({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: pr.number,
+                      labels: ['needs-god-review']
+                    });
+                  } catch (e) {
+                    console.log(`  Warning: Could not add label: ${e.message}`);
+                  }
+                }
+                skippedCount++;
+                continue;
+              }
+
+              // All checks passed — merge the PR!
+              console.log(`  MERGE: all checks passed, merging PR #${pr.number}`);
+              try {
+                const mergeResult = await github.rest.pulls.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  merge_method: 'squash',
+                  commit_title: `${pr.title} (#${pr.number})`,
+                  commit_message: `Automated merge by merge-queue workflow (issue #1828)\n\n${body}`
+                });
+
+                console.log(`  MERGED: SHA ${mergeResult.data.sha}`);
+                mergedCount++;
+
+                // Post success comment
+                await github.rest.issues.createComment({
+                  issue_number: pr.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `✅ **Auto-merged** by merge queue (issue #1828)\n\nAll checks passed:\n- ✅ CI green\n- ✅ No protected files\n- ✅ No duplicate PRs\n- ✅ Closing keyword present`
+                });
+              } catch (e) {
+                console.log(`  ERROR merging PR #${pr.number}: ${e.message}`);
+                try {
+                  await github.rest.issues.createComment({
+                    issue_number: pr.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: `⚠️ **Auto-merge failed**: ${e.message}\n\nGod may need to merge this PR manually.`
+                  });
+                } catch (e2) {
+                  console.log(`  Warning: Could not post error comment: ${e2.message}`);
+                }
+              }
+            }
+
+            console.log(`\n=== Summary: ${mergedCount} merged, ${skippedCount} skipped ===`);
