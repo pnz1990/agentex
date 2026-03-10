@@ -934,10 +934,23 @@ tally_and_enact_votes() {
         enacted=$(get_state "enactedDecisions")
         # Issue #940: null guard - treat empty/null as empty string
         [ -z "$enacted" ] && enacted=""
-        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
-        
+        # Issue #1398: Normalize decision_key to handle embedded newlines in kv_pairs.
+        # kv_pairs may contain newlines (from done <<< loops), and "// /_" only replaces spaces.
+        # Embedded newlines cause grep -qF to fail, so the key never matches → re-enacted every cycle.
+        local decision_key
+        decision_key="${topic}_$(echo "$kv_pairs" | tr '[:space:]' '_' | tr -s '_')"
+
         if echo "$enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
+            continue
+        fi
+
+        # Issue #1398: Secondary check — also skip if this exact topic was enacted recently
+        # (within this coordinator cycle), regardless of the specific kv_pairs value.
+        # This prevents re-enactment when vote values shift (e.g., 12 vs 10) but topic is same.
+        # Use a shorter topic-only key for backward compatibility with manual recorded entries.
+        if echo "$enacted" | grep -qE "(^| )${topic}_"; then
+            echo "[$(date -u +%H:%M:%S)] $topic already enacted (topic-only check), skipping re-enactment with changed value"
             continue
         fi
 
