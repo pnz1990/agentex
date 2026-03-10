@@ -891,8 +891,17 @@ cleanup_old_messages() {
 # Returns: JSON planning state from most recent agent in that role (or empty JSON)
 read_planning_state() {
   local role="$1"
-  
-  # List all plans for this role, sorted by timestamp (most recent first)
+
+  # Preferred path: canonical latest.json written by write_planning_state (issue #1193)
+  # This covers all agents that use plan_for_n_plus_2() or write_planning_state()
+  local canonical_plan
+  canonical_plan=$(aws s3 cp "s3://${S3_BUCKET}/planning/${role}/latest.json" - 2>/dev/null || echo "")
+  if [ -n "$canonical_plan" ] && [ "$canonical_plan" != "{}" ]; then
+    echo "$canonical_plan"
+    return 0
+  fi
+
+  # Fallback: legacy ${role}-plan-${agent}.json files (backward compat)
   local latest_plan
   latest_plan=$(aws s3 ls "s3://${S3_BUCKET}/planning/${role}-plan-" 2>/dev/null | \
     sort -r | head -1 | awk '{print $NF}' || echo "")
@@ -931,15 +940,22 @@ write_planning_state() {
     --arg blockers "$blockers" \
     '{role: $role, agent: $agent, generation: $generation, timestamp: $timestamp, myWork: $myWork, n1Priority: $n1Priority, n2Priority: $n2Priority, blockers: $blockers}')
   
-  # Write to S3 with agent-specific filename
+  # Write to S3 with agent-specific filename (backward compat)
   local s3_output
   if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}-plan-${agent}.json" \
     --content-type application/json 2>&1); then
     log "WARNING: Failed to write planning state to S3: $s3_output"
     return 0  # Best-effort, don't fail agent if S3 unavailable
   fi
-  
-  log "✓ Wrote planning state to S3: ${role}-plan-${agent}.json"
+
+  # Also write to canonical path for reliable cross-generation reads (issue #1193)
+  # read_planning_state() reads from here first, ensuring successors always find the plan
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}/latest.json" \
+    --content-type application/json 2>&1); then
+    log "WARNING: Failed to write canonical planning state to S3: $s3_output"
+  fi
+
+  log "✓ Wrote planning state to S3: ${role}-plan-${agent}.json + ${role}/latest.json"
   push_metric "PlanningStateWritten" 1
 }
 
