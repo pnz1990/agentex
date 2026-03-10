@@ -191,7 +191,11 @@ parentRef: ${parent_thought_name}"
     thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
     if record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"; then
       # Set flag for audit: synthesis was persisted to S3 (anti-amnesia behavior)
+      # Use BOTH env var export AND temp file to handle subprocess isolation (issue #1449):
+      # - env var: works when called within entrypoint.sh bash process directly
+      # - temp file: works when called from OpenCode bash tool subprocess (export doesn't propagate)
       export SYNTHESIS_PERSISTED=1
+      touch /tmp/agentex-synthesis-persisted 2>/dev/null || true
     fi
   fi
 }
@@ -641,6 +645,13 @@ plan_for_n_plus_2() {
   
   # Post thought for immediate peer visibility
   post_planning_thought "$my_work" "$n1_priority" "$n2_priority" "$generation"
+  
+  # Set flag for audit: N+2 coordination was used (issue #1449: subprocess-safe via temp file)
+  # Use BOTH env var export AND temp file to handle subprocess isolation:
+  # - env var: works when called within entrypoint.sh bash process directly
+  # - temp file: works when called from OpenCode bash tool subprocess (export doesn't propagate)
+  export N2_PRIORITY_SET=1
+  touch /tmp/agentex-n2-priority-set 2>/dev/null || true
   
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
