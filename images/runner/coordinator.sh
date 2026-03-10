@@ -3161,8 +3161,17 @@ route_tasks_by_specialization() {
         done
 
         local blocker_reason
+        # Issue #1716: Skip escalation when agents_checked=0 (transient startup condition).
+        # When no agents have registered yet, this is NOT a routing failure — it's normal
+        # system startup. Incrementing zero_cycles for this case causes false-positive
+        # escalations and issue filing during cold starts. Only count cycles where agents
+        # exist but routing still fails (agents_with_spec=0 or low match scores).
         if [ "$agents_checked" -eq 0 ]; then
             blocker_reason="No active agents registered in coordinator. Routing cannot fire."
+            echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION: specializedAssignments=0 — $blocker_reason (TRANSIENT — not incrementing zero_cycles counter)"
+            push_metric "V02RoutingBlocker" 1 "Count" "Component=Coordinator" "Reason=no-agents"
+            # Skip counter increment and escalation — this is a normal startup condition
+            return 0
         elif [ "$agents_with_spec" -eq 0 ]; then
             blocker_reason="No active agent has specializationLabelCounts data. Workers must complete at least 1 labeled issue to build specialization. Current agents: $agents_checked checked, 0 with spec data."
         else
@@ -3175,6 +3184,7 @@ route_tasks_by_specialization() {
         # Issue #1568: Track consecutive routing cycles with zero specialization.
         # Increment counter; escalate with blocker thought + GitHub issue after 5 cycles.
         # This ensures routing regressions are self-reported within ~35 minutes.
+        # Issue #1716: Counter only increments when agents exist but routing still fails.
         local zero_cycles
         zero_cycles=$(get_state "routingCyclesWithZeroSpec")
         [[ "$zero_cycles" =~ ^[0-9]+$ ]] || zero_cycles=0
