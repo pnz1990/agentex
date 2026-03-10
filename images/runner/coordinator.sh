@@ -1605,6 +1605,19 @@ tally_and_enact_votes() {
             "$thoughts_file" 2>/dev/null \
             | grep "^#proposal-${topic}" | head -1 || true)
 
+        # Issue #1711: If no proposal found in the time-window filtered thoughts_file,
+        # do a full-history scan for this specific topic's proposal. This handles the case
+        # where a proposal was posted before the tally cutoff but is still receiving new votes.
+        # Without this fallback, any proposal older than ~lastTallyTimestamp is silently skipped
+        # even with 18+ approve votes — breaking governance enactment for older proposals.
+        if [ -z "$any_proposal" ]; then
+            any_proposal=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought \
+                -o json 2>/dev/null \
+                | jq -r ".items[] | select(.data.thoughtType == \"proposal\") | .data.content" \
+                | grep "^#proposal-${topic}" | head -1 || true)
+            [ -n "$any_proposal" ] && echo "[$(date -u +%H:%M:%S)] $topic: proposal not in time window — found via full-history scan (issue #1711)"
+        fi
+
         [ -z "$any_proposal" ] && continue
 
         # Count unique approve/reject/abstain votes for this topic (must be done before kv_pairs
