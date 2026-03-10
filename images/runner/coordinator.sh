@@ -1605,6 +1605,21 @@ tally_and_enact_votes() {
         tally_cutoff_ts="$cutoff_24h"
       fi
 
+     # Issue #1798: Tight window for "no new votes" early skip check (separate from tally_cutoff_ts).
+     # tally_cutoff_ts can be up to 24h (needed to rebuild vote counts on restart), but
+     # the early skip check only needs votes since the LAST TALLY RUN to determine if a topic
+     # needs re-processing. Using the full 24h window causes all enacted topics to be re-processed
+     # (because old votes exist in the 24h window), preventing the early skip from firing.
+     # Fix: compute a tight cutoff based on last_tally_ts (or 10min ago as fallback).
+     local recent_tally_cutoff_ts
+     if [ -n "$last_tally_ts" ]; then
+       # Use last_tally_ts with 2-min buffer for clock skew — any vote after last tally is "new"
+       recent_tally_cutoff_ts=$(date -u -d "${last_tally_ts} -2 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$last_tally_ts")
+     else
+       # On first run after restart, use 10-min window to catch genuine recent activity
+       recent_tally_cutoff_ts=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+     fi
+
      kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
          | jq --arg cutoff "$tally_cutoff_ts" '[.items[] |
              select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") |
@@ -1674,14 +1689,23 @@ tally_and_enact_votes() {
             is_vision_topic=true
         fi
         if [ "$is_vision_topic" = false ] && echo "$loop_enacted" | grep -qF "enacted_topic_${topic}"; then
-            # Topic has prior enactments. Check if there are ANY new proposal/vote thoughts for it.
-            # (If no new thoughts exist for this topic in the time window, the tally outcome
-            # cannot change — skip the full tally to save time.)
+            # Topic has prior enactments. Check if there are ANY new votes since the LAST TALLY RUN.
+            # Issue #1798: Use recent_tally_cutoff_ts (tight window since last tally) instead of
+            # the full thoughts_file window (up to 24h). The 24h window contains old votes for
+            # enacted topics, causing the early skip to never fire and processing 125+ topics × 5s
+            # per tally cycle (10+ min/cycle). The tight window ensures only genuinely new activity
+            # triggers re-processing.
             local new_votes_for_topic
-            new_votes_for_topic=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | .ts" \
-                "$thoughts_file" 2>/dev/null | wc -l | tr -d ' ')
+            if [ -n "$recent_tally_cutoff_ts" ]; then
+                new_votes_for_topic=$(jq -r --arg cutoff "$recent_tally_cutoff_ts" \
+                    ".[] | select(.type == \"vote\" and .ts >= \$cutoff and (.content | contains(\"#vote-$topic\"))) | .ts" \
+                    "$thoughts_file" 2>/dev/null | wc -l | tr -d ' ')
+            else
+                new_votes_for_topic=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | .ts" \
+                    "$thoughts_file" 2>/dev/null | wc -l | tr -d ' ')
+            fi
             if [ "$new_votes_for_topic" -eq 0 ]; then
-                echo "[$(date -u +%H:%M:%S)] $topic already enacted and no new votes — skipping"
+                echo "[$(date -u +%H:%M:%S)] $topic already enacted and no new votes since last tally — skipping"
                 continue
             fi
         fi
