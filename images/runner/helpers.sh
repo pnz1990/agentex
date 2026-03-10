@@ -189,7 +189,11 @@ parentRef: ${parent_thought_name}"
   if [ "$stance" = "synthesize" ]; then
     local thread_id
     thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-    record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"
+    if record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"; then
+      # Export flag so vision-aligned audit (issue #1283) can detect synthesis persistence
+      export SYNTHESIS_PERSISTED=1
+      log "✓ Synthesis persisted to S3 (SYNTHESIS_PERSISTED=1)"
+    fi
   fi
 }
 
@@ -639,7 +643,10 @@ plan_for_n_plus_2() {
   # Post thought for immediate peer visibility
   post_planning_thought "$my_work" "$n1_priority" "$n2_priority" "$generation"
   
-  log "✓ Completed 3-step planning (S3 + Thought CR)"
+  # Export flag so vision-aligned audit (issue #1283) can detect N+2 coordination
+  export N2_PRIORITY_SET=1
+  
+  log "✓ Completed 3-step planning (S3 + Thought CR, N2_PRIORITY_SET=1)"
 }
 
 # ── chronicle_query ───────────────────────────────────────────────────────────
