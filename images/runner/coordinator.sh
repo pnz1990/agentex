@@ -31,6 +31,8 @@ STATE_CM="coordinator-state"
 HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
+IDENTITY_BUCKET="${S3_BUCKET:-agentex-thoughts}"  # S3 bucket for agent identities (issue #1113)
+SPECIALIZATION_ROUTING_THRESHOLD=5  # min score to trigger specialization-based routing (issue #1113)
 
 # Read GitHub repo from constitution for portability (issue #819, #1006)
 # This must be set early — before kubectl is configured — because it is used
@@ -126,6 +128,22 @@ if [ -z "$enacted" ]; then
   kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
     -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
 fi
+
+# Initialize identity-based routing fields (issue #1113)
+for field in specializedAssignments genericAssignments lastSpecializedRouting lastRoutingDecisions; do
+  val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+  if [ -z "$val" ]; then
+    echo "  Initializing $field (was empty/null)"
+    case "$field" in
+      specializedAssignments|genericAssignments)
+        kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+          -p "{\"data\":{\"$field\":\"0\"}}" 2>/dev/null || true ;;
+      *)
+        kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+          -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true ;;
+    esac
+  fi
+done
 echo "Coordinator-state initialization complete"
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
@@ -914,6 +932,284 @@ The civilization needs mediators, not just voters." \
 # was added — the function referenced undefined $PLANNER_LIVENESS_TIMEOUT which would
 # have caused a bash unbound variable error under set -u if ever called.
 
+# ── Identity-Based Task Routing (issue #1113) ────────────────────────────────
+#
+# Routes tasks to agents whose S3 identity shows relevant prior work,
+# enabling emergent specialization. When an agent has a specialization score
+# above SPECIALIZATION_ROUTING_THRESHOLD for a task, the coordinator prefers
+# that agent over a generic assignment.
+#
+# Scoring formula:
+#   score = (label_matches * 3) + (keyword_matches * 2)
+#   - label_matches: count of issue labels that match agent's issueLabels specialization
+#   - keyword_matches: count of title/body keywords matching agent's codeAreas specialization
+#
+# Routing decision:
+#   - score > SPECIALIZATION_ROUTING_THRESHOLD (5): route to specialized agent
+#   - score <= threshold: fall back to normal assignment
+#
+# Metrics tracked:
+#   - specializedAssignments: count of specialized task assignments
+#   - genericAssignments: count of generic (fallback) task assignments
+#   - lastSpecializedRouting: timestamp of most recent specialized routing
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Read S3 bucket for identities from constitution at runtime
+# Override the default set at script top with the live value if available
+update_identity_bucket_from_constitution() {
+    local s3_bucket
+    s3_bucket=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "")
+    if [ -n "$s3_bucket" ]; then
+        IDENTITY_BUCKET="$s3_bucket"
+    fi
+}
+
+# Score an agent's identity against a GitHub issue
+# Arguments:
+#   $1 - agent_name (Kubernetes agent CR name, e.g., worker-1773115086)
+#   $2 - issue_number
+#   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
+#   $4 - issue_keywords (space-separated keywords from title/body)
+# Returns: integer score via stdout (0 if agent has no specialization data)
+score_agent_for_issue() {
+    local agent_name="$1"
+    local issue_number="$2"
+    local issue_labels="$3"
+    local issue_keywords="$4"
+
+    # Read agent identity from S3
+    local identity_json
+    identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+        --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+
+    if [ -z "$identity_json" ]; then
+        echo "0"
+        return 0
+    fi
+
+    # Check if identity has specialization data
+    local has_spec
+    has_spec=$(echo "$identity_json" | jq -r '.specialization // empty' 2>/dev/null || echo "")
+    if [ -z "$has_spec" ]; then
+        echo "0"
+        return 0
+    fi
+
+    local score=0
+
+    # Score label matches (weight 3 each)
+    if [ -n "$issue_labels" ]; then
+        IFS=',' read -ra label_arr <<< "$issue_labels"
+        for label in "${label_arr[@]}"; do
+            label=$(echo "$label" | tr -d ' ')
+            [ -z "$label" ] && continue
+            local label_count
+            label_count=$(echo "$identity_json" | jq -r \
+                --arg lbl "$label" \
+                '(.specialization.issueLabels[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
+            if [ "$label_count" -gt 0 ]; then
+                score=$((score + 3))
+            fi
+        done
+    fi
+
+    # Score keyword matches against codeAreas (weight 2 each)
+    if [ -n "$issue_keywords" ]; then
+        local code_areas
+        code_areas=$(echo "$identity_json" | jq -r \
+            '.specialization.codeAreas // {} | keys | .[]' 2>/dev/null || echo "")
+        for area in $code_areas; do
+            local area_count
+            area_count=$(echo "$identity_json" | jq -r \
+                --arg a "$area" \
+                '.specialization.codeAreas[$a] // 0 | tonumber' 2>/dev/null || echo "0")
+            if [ "$area_count" -gt 0 ]; then
+                # Check if any keyword matches this code area
+                for kw in $issue_keywords; do
+                    if echo "$area" | grep -qi "$kw" || echo "$kw" | grep -qi "$area"; then
+                        score=$((score + 2))
+                        break  # each area contributes at most 2 points
+                    fi
+                done
+            fi
+        done
+    fi
+
+    echo "$score"
+}
+
+# Extract keywords from an issue for specialization matching
+# Arguments:
+#   $1 - issue_number
+# Returns: space-separated keyword list via stdout
+extract_issue_keywords() {
+    local issue_number="$1"
+    local issue_json
+    issue_json=$(gh issue view "$issue_number" --repo "${GITHUB_REPO}" \
+        --json title,body 2>/dev/null || echo "")
+    [ -z "$issue_json" ] && echo "" && return 0
+
+    # Extract title + body, normalize to lowercase tokens
+    local title body combined
+    title=$(echo "$issue_json" | jq -r '.title // ""' 2>/dev/null || echo "")
+    body=$(echo "$issue_json" | jq -r '.body // ""' 2>/dev/null | head -5 || echo "")
+    combined="$title $body"
+
+    # Extract meaningful keywords (words 4+ chars, avoid common stopwords)
+    echo "$combined" | tr '[:upper:]' '[:lower:]' | \
+        grep -oE '[a-z][a-z0-9_/-]{3,}' | \
+        grep -vE '^(this|that|with|from|have|will|when|then|also|each|they|them|been|were|the|for|and|are|but|not|you|all|can|her|was|one|our|out|day|get|has|him|his|how|its|may|new|now|old|see|two|way|who|any|its|use|into|than|more|some|such|what|like|your|just|into|over|after|where|must|first|their|about|these|those|which|would|could|should|there)$' | \
+        sort -u | head -20 | tr '\n' ' '
+}
+
+# Find the best specialized agent for a given issue from among active agents
+# Arguments:
+#   $1 - issue_number
+#   $2 - issue_labels (comma-separated)
+# Returns: best agent name if score > threshold, empty string otherwise
+find_best_agent_for_issue() {
+    local issue_number="$1"
+    local issue_labels="$2"
+
+    # Get active agents
+    local active_agents
+    active_agents=$(get_state "activeAgents")
+    if [ -z "$active_agents" ]; then
+        echo ""
+        return 0
+    fi
+
+    # Extract issue keywords (limit API calls by calling once)
+    local issue_keywords
+    issue_keywords=$(extract_issue_keywords "$issue_number")
+
+    local best_agent=""
+    local best_score=0
+
+    IFS=',' read -ra agent_pairs <<< "$active_agents"
+    for pair in "${agent_pairs[@]}"; do
+        [ -z "$pair" ] && continue
+        local agent_name="${pair%%:*}"
+        local agent_role="${pair##*:}"
+
+        # Only consider worker agents for specialization routing
+        [ "$agent_role" != "worker" ] && continue
+
+        # Don't route to agents that already have assignments
+        local assignments
+        assignments=$(get_state "activeAssignments")
+        if echo "$assignments" | grep -q "${agent_name}:"; then
+            continue
+        fi
+
+        local agent_score
+        agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
+            "$issue_labels" "$issue_keywords")
+
+        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score"
+
+        if [ "$agent_score" -gt "$best_score" ]; then
+            best_score="$agent_score"
+            best_agent="$agent_name"
+        fi
+    done
+
+    # Only return if score exceeds threshold
+    if [ "$best_score" -gt "$SPECIALIZATION_ROUTING_THRESHOLD" ]; then
+        echo "[$(date -u +%H:%M:%S)] Specialized routing: $best_agent (score=$best_score) → issue #$issue_number"
+        echo "$best_agent"
+    else
+        echo ""
+    fi
+}
+
+# Perform identity-based task routing cycle:
+# For each issue in the task queue that is NOT yet assigned, attempt to find
+# a specialized agent. Record routing decisions and emit metrics.
+route_tasks_by_specialization() {
+    echo "[$(date -u +%H:%M:%S)] Running identity-based task routing (issue #1113)..."
+
+    # Update S3 bucket from constitution (runtime portability)
+    update_identity_bucket_from_constitution
+
+    local task_queue
+    task_queue=$(get_state "taskQueue")
+    if [ -z "$task_queue" ]; then
+        echo "[$(date -u +%H:%M:%S)] Task queue empty, skipping specialization routing"
+        return 0
+    fi
+
+    local active_assignments
+    active_assignments=$(get_state "activeAssignments")
+
+    local specialized_count=0
+    local generic_count=0
+    local routing_log=""
+
+    IFS=',' read -ra queue_issues <<< "$task_queue"
+    for issue_num in "${queue_issues[@]}"; do
+        [ -z "$issue_num" ] && continue
+        # Only handle numeric issue numbers
+        [[ "$issue_num" =~ ^[0-9]+$ ]] || continue
+
+        # Skip if already assigned
+        if echo "$active_assignments" | grep -q ":${issue_num}$" || \
+           echo "$active_assignments" | grep -q ":${issue_num},"; then
+            continue
+        fi
+
+        # Get issue labels for scoring
+        local issue_labels
+        issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+            --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+        # Find best specialized agent
+        local best_agent
+        best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels")
+
+        if [ -n "$best_agent" ]; then
+            # Record specialized routing decision in coordinator state
+            local routing_entry="${issue_num}:${best_agent}"
+            routing_log="${routing_log}${routing_entry};"
+            specialized_count=$((specialized_count + 1))
+            push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
+            echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num → $best_agent"
+        else
+            generic_count=$((generic_count + 1))
+        fi
+    done
+
+    # Update routing metrics in coordinator state
+    if [ "$specialized_count" -gt 0 ] || [ "$generic_count" -gt 0 ]; then
+        # Track cumulative specialized assignments
+        local prev_specialized
+        prev_specialized=$(get_state "specializedAssignments")
+        [[ "$prev_specialized" =~ ^[0-9]+$ ]] || prev_specialized=0
+        local new_specialized=$((prev_specialized + specialized_count))
+        update_state "specializedAssignments" "$new_specialized"
+
+        # Track cumulative generic assignments
+        local prev_generic
+        prev_generic=$(get_state "genericAssignments")
+        [[ "$prev_generic" =~ ^[0-9]+$ ]] || prev_generic=0
+        local new_generic=$((prev_generic + generic_count))
+        update_state "genericAssignments" "$new_generic"
+
+        # Record routing log for observability
+        if [ -n "$routing_log" ]; then
+            local ts
+            ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            update_state "lastSpecializedRouting" "$ts"
+            update_state "lastRoutingDecisions" "$routing_log"
+        fi
+
+        push_metric "SpecializedRoutingCycle" "$specialized_count" "Count" "Component=Coordinator"
+        push_metric "GenericRoutingCycle" "$generic_count" "Count" "Component=Coordinator"
+        echo "[$(date -u +%H:%M:%S)] Routing cycle complete: specialized=$specialized_count generic=$generic_count total_specialized_all_time=$new_specialized"
+    fi
+}
+
 
 echo "Coordinator entering main loop..."
 update_state "phase" "Active"
@@ -1051,6 +1347,13 @@ while true; do
     # Every 6 iterations (~3 min): track debate activity and nudge if needed
     if [ $((iteration % 6)) -eq 0 ]; then
         track_debate_activity
+    fi
+
+    # Every 7 iterations (~3.5 min): run identity-based task routing (issue #1113)
+    # Scores active agents' specializations against pending tasks and surfaces
+    # routing recommendations for the planner/god-delegate to act on.
+    if [ $((iteration % 7)) -eq 0 ]; then
+        route_tasks_by_specialization
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.

@@ -848,6 +848,10 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `enactedDecisions`: Pipe-separated list of enacted governance decisions
 - `lastHeartbeat`: ISO 8601 timestamp of coordinator's last heartbeat
 - `phase`: Coordinator lifecycle phase (Active/Paused)
+- `specializedAssignments`: Cumulative count of tasks routed to specialized agents (issue #1113)
+- `genericAssignments`: Cumulative count of tasks assigned generically (issue #1113)
+- `lastSpecializedRouting`: ISO 8601 timestamp of most recent specialized routing decision (issue #1113)
+- `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
