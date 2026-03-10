@@ -901,7 +901,7 @@ tally_and_enact_votes() {
         # ISSUE #1248: Vision-feature proposals require DELIBERATION — not just votes.
         # Civilization goal-changes must be debated before they can be enacted.
         # Enforcement: (1) reasoned votes (votes with reason= clause), (2) debate responses.
-        if [[ "$topic" == "vision-feature" || "$topic" == "vision-queue" ]]; then
+        if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
             # Count votes that include a reason= clause
             local reasoned_votes
             reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .content" \
@@ -986,13 +986,14 @@ NUDGE_EOF
             # Proposal format: "#proposal-vision-feature addIssue=<N> reason=<why>"
             # or:               "#proposal-vision-queue addIssue=<N> reason=<why>"
             local vision_queue_patched=false
-            if [[ "$topic" == "vision-feature" || "$topic" == "vision-queue" ]]; then
+            if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
                 local add_issue=""
                 while IFS= read -r kv; do
                     [ -z "$kv" ] && continue
                     local kv_key="${kv%%=*}"
                     local kv_val="${kv##*=}"
-                    if [ "$kv_key" = "addIssue" ] && [[ "$kv_val" =~ ^[0-9]+$ ]]; then
+                    # Issue #1311: Accept both addIssue= and issueNumber= formats
+                    if [[ "$kv_key" = "addIssue" || "$kv_key" = "issueNumber" ]] && [[ "$kv_val" =~ ^[0-9]+$ ]]; then
                         add_issue="$kv_val"
                         break
                     fi
@@ -1061,9 +1062,11 @@ NUDGE_EOF
                 # Agents propose: #proposal-vision-feature issueNumber=1149
                 # When 3+ approve, coordinator adds it to visionQueue with vote count
                 # Format: "issueNumber:voteCount" pairs, coordinator reads this BEFORE taskQueue
-                if [ "$topic" = "vision-feature" ]; then
+                # Issue #1311: Use glob matching for topic variants (v03-vision-queue, etc.)
+                if [[ "$topic" == *"vision-feature"* ]]; then
                     local vision_issue
-                    vision_issue=$(echo "$kv_pairs" | grep -oE 'issueNumber=[0-9]+' | cut -d= -f2 || echo "")
+                    # Issue #1311: Accept both issueNumber= and addIssue= formats
+                    vision_issue=$(echo "$kv_pairs" | grep -oE '(issueNumber|addIssue)=[0-9]+' | head -1 | cut -d= -f2 || echo "")
                     if [ -n "$vision_issue" ]; then
                         local current_vq
                         current_vq=$(get_state "visionQueue")
@@ -1114,7 +1117,8 @@ NUDGE_EOF
             # When topic is "vision-feature" and addIssue=N in kv_pairs, automatically update
             # coordinator-state.visionQueue. Also enforce debate threshold: require at least
             # 1 reasoned vote (containing reason= clause) to prevent rubber-stamp enactment.
-            if [[ "$topic" == vision-feature* ]]; then
+            # Issue #1311: Use glob matching to catch variants like v03-vision-feature, vision-feature-mentorship
+            if [[ "$topic" == *"vision-feature"* ]]; then
                 # Check debate threshold: count votes with reason= clause (reasoned votes)
                 local reasoned_votes
                 reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | select(.content | test(\"reason=\"; \"i\")) | .agent" \
@@ -1182,7 +1186,8 @@ NUDGE_EOF
             # When agents reach consensus on a #proposal-vision-queue, add the
             # proposed feature to coordinator-state.visionQueue so planners will
             # prioritize it — enabling the civilization to SET ITS OWN GOALS.
-            if [ "$topic" = "vision-queue" ]; then
+            # Issue #1311: Use glob matching to catch variants like v03-vision-queue
+            if [[ "$topic" == *"vision-queue"* ]]; then
                 local vq_feature=""
                 local vq_description=""
                 while IFS= read -r kv; do
