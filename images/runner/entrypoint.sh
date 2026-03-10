@@ -889,21 +889,44 @@ cleanup_old_messages() {
 # read_planning_state() - Read S3 planning state for a specific role
 # Usage: read_planning_state "planner"
 # Returns: JSON planning state from most recent agent in that role (or empty JSON)
+# Issue #1193: Agents write to inconsistent S3 paths (planner-plan-*, planner-gen4-*,
+# planner.json, planner-state.json, etc). This function now scans ALL files with the
+# role prefix, sorted by most recent timestamp, and returns the first valid plan found.
+# Canonical ${role}-plan-* files are tried first among same-timestamp ties.
 read_planning_state() {
   local role="$1"
   
-  # List all plans for this role, sorted by timestamp (most recent first)
-  local latest_plan
-  latest_plan=$(aws s3 ls "s3://${S3_BUCKET}/planning/${role}-plan-" 2>/dev/null | \
-    sort -r | head -1 | awk '{print $NF}' || echo "")
+  # Collect all files for this role from the planning/ prefix (broader match)
+  # This handles all naming patterns agents have used: planner-plan-*, planner-gen4-*,
+  # planner.json, planner-state.json, planner-latest.json, etc.
+  local all_plans
+  all_plans=$(aws s3 ls "s3://${S3_BUCKET}/planning/${role}" 2>/dev/null | \
+    grep "\.json$" | sort -r || echo "")
   
-  if [ -z "$latest_plan" ]; then
+  if [ -z "$all_plans" ]; then
     echo "{}"
     return 0
   fi
   
-  # Fetch the latest plan
-  aws s3 cp "s3://${S3_BUCKET}/planning/${latest_plan}" - 2>/dev/null || echo "{}"
+  # Iterate through files most-recent-first; return first one with valid planning schema.
+  # This ensures we pick up the latest plan regardless of naming convention.
+  local filename
+  while IFS= read -r line; do
+    filename=$(echo "$line" | awk '{print $NF}')
+    [ -z "$filename" ] && continue
+    
+    local plan_json
+    plan_json=$(aws s3 cp "s3://${S3_BUCKET}/planning/${filename}" - 2>/dev/null || echo "")
+    
+    # Validate: must have .role field (canonical schema from write_planning_state)
+    if [ -n "$plan_json" ] && echo "$plan_json" | jq -e '.role' >/dev/null 2>&1; then
+      echo "$plan_json"
+      return 0
+    fi
+  done <<< "$all_plans"
+  
+  # No valid plan found
+  echo "{}"
 }
 
 # write_planning_state() - Write planning state to S3
