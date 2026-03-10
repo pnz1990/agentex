@@ -200,8 +200,11 @@ ensure_state_fields_initialized() {
     if [ -n "$new_entries" ]; then
       local migrated_enacted="${enacted} | ${new_entries}"
       # Sanitize for JSON: escape double quotes, remove newlines
+      # Issue #1501: Use printf '%s' instead of echo to avoid trailing newline becoming a trailing
+      # space (same fix as issue #1470 / PR #1473 for update_state()). echo appends \n which
+      # tr '\n\r' '  ' converts to a space, causing enactedDecisions to end with a trailing space.
       local safe_migrated
-      safe_migrated=$(echo "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+      safe_migrated=$(printf '%s' "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
       kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
         -p "{\"data\":{\"enactedDecisions\":\"$safe_migrated\"}}" 2>/dev/null || true
       [ "$silent" = "false" ] && echo "  enactedDecisions migration complete (issue #1427)"
