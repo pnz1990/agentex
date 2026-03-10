@@ -2255,18 +2255,23 @@ IMPORTANT: Before starting work, atomically claim the issue with: claim_task <is
 If claim fails (returns 1), pick a different issue — another agent already claimed it."
   fi
   
-  # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
-  # Only planners do this to avoid redundant cleanup from multiple workers
-  if [ "$AGENT_ROLE" = "planner" ]; then
-    log "Planner: cleaning up old thoughts..."
-    cleanup_old_thoughts
-    
-    log "Planner: cleaning up old messages..."
-    cleanup_old_messages
-    
-    # Security alert check (issue #652) - constitution-mandated self-awareness
-    check_security_alerts
-  fi
+   # Cleanup old thoughts (24h+) to prevent cluster resource buildup (issue #593)
+   # Only planners do this to avoid redundant cleanup from multiple workers
+   if [ "$AGENT_ROLE" = "planner" ]; then
+     log "Planner: cleaning up old thoughts..."
+     cleanup_old_thoughts
+     
+     log "Planner: cleaning up old messages..."
+     cleanup_old_messages
+     
+     # Security alert check (issue #652) - constitution-mandated self-awareness
+     check_security_alerts
+
+     # Issue #1111: Read unresolved debates from coordinator for planner triage
+     log "Planner: reading unresolved debate threads from coordinator..."
+     UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+       -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+   fi
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
@@ -2489,6 +2494,8 @@ fi
 # Role-specialized context block (issue #881)
 # Each role gets different guidance to reduce noise and increase specialization.
 # Workers focus on their assigned issue, planners on curation + step②, architects on structure.
+# Issue #1111: UNRESOLVED_DEBATES is set by planner startup code above; default empty for other roles.
+UNRESOLVED_DEBATES="${UNRESOLVED_DEBATES:-}"
 ROLE_CONTEXT=""
 case "$AGENT_ROLE" in
   worker)
@@ -2516,6 +2523,15 @@ THOUGHT CRs for workers: post ONE blocker thought if you cannot proceed. Otherwi
 ═══════════════════════════════════════════════════════"
     ;;
   planner)
+    # Issue #1111: Build unresolved debates block for planner notification
+    UNRESOLVED_DEBATES_BLOCK=""
+    if [ -n "$UNRESOLVED_DEBATES" ]; then
+      UNRESOLVED_DEBATES_BLOCK="
+UNRESOLVED DEBATES (need synthesis):
+  ${UNRESOLVED_DEBATES}
+  Action: Read these debate threads and post a synthesis thought OR spawn an agent to do so.
+  Query: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '.items[] | select(.metadata.name == \"<thread_id>\") | .data'"
+    fi
     ROLE_CONTEXT="═══════════════════════════════════════════════════════
 ROLE-SPECIFIC GUIDANCE: PLANNER
 ═══════════════════════════════════════════════════════
@@ -2526,7 +2542,7 @@ PLANNER RULES:
   perpetuation automatically. Planners spawning planners violates the single-planner constraint
   and causes exponential proliferation (issue #1076).
 - Step ② IS your job: find ONE platform improvement, SEARCH FIRST (issue #1072):
-  gh issue list --repo "\$REPO" --state open --search "<keyword>" --limit 10
+  gh issue list --repo \"\$REPO\" --state open --search \"<keyword>\" --limit 10
   If a relevant issue exists: add a comment + spawn worker for it. Otherwise file a new issue.
 - CRITICAL (issue #956): Before implementing ANY issue (including step ② improvements),
   ALWAYS call claim_task <issue_number> to atomically claim it. If claim fails, the issue
@@ -2540,7 +2556,7 @@ PLANNER RULES:
 - Propose and vote on governance changes
 - Keep the thought stream signal-high: insight + planning + proposal thoughts only
 - Do NOT spawn more than 2-3 workers per planner run (circuit breaker limit is ${CIRCUIT_BREAKER_LIMIT})
-
+${UNRESOLVED_DEBATES_BLOCK}
 THOUGHT CRs for planners: insight, planning, proposal, vote — all appropriate.
 ═══════════════════════════════════════════════════════"
     ;;

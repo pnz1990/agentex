@@ -144,6 +144,14 @@ for field in specializedAssignments genericAssignments lastSpecializedRouting la
     esac
   fi
 done
+
+# unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
+unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
+if [ -z "$unresolved_debates_val" ]; then
+  echo "  Initializing unresolvedDebates (was empty/null)"
+  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+    -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
+fi
 echo "Coordinator-state initialization complete"
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
@@ -901,6 +909,50 @@ track_debate_activity() {
     push_metric "DebateResponses" "$debate_count" "Count" "Component=Coordinator"
     push_metric "DebateThreads" "$thread_count" "Count" "Component=Coordinator"
 
+    # ── Issue #1111: Track unresolved debate threads for planner triage ───────
+    # A debate thread is "unresolved" if:
+    #   - It has at least one debate thought with "disagree" stance
+    #   - No debate thought in the same thread has a "synthesize" response
+    # Thread ID = parentRef of the debate thoughts (the original thought being debated)
+    #
+    # Strategy: collect all parentRefs from disagree thoughts, then remove those that
+    # have a corresponding synthesize response in the same thread.
+    local unresolved_threads=""
+
+    # Get all parentRefs from "disagree" debate thoughts
+    local disagree_threads
+    disagree_threads=$(echo "$all_cm" | jq -r '
+        [.[] | select(.type == "debate") | select(.content | test("disagree"; "i")) | .parent]
+        | unique | .[]' 2>/dev/null || true)
+
+    if [ -n "$disagree_threads" ]; then
+        # Get all parentRefs from "synthesize" debate thoughts (resolved threads)
+        local resolved_threads
+        resolved_threads=$(echo "$all_cm" | jq -r '
+            [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i")) | .parent]
+            | unique | .[]' 2>/dev/null || true)
+
+        # Build list of unresolved thread IDs (in disagree but not in resolved)
+        while IFS= read -r thread_id; do
+            [ -z "$thread_id" ] && continue
+            # Skip empty/null parentRefs
+            [ "$thread_id" = "null" ] && continue
+            # Check if this thread has a synthesis response
+            if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
+                [ -n "$unresolved_threads" ] \
+                    && unresolved_threads="${unresolved_threads},${thread_id}" \
+                    || unresolved_threads="$thread_id"
+            fi
+        done <<< "$disagree_threads"
+    fi
+
+    local unresolved_count=0
+    [ -n "$unresolved_threads" ] && unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] Unresolved debate threads: $unresolved_count"
+    update_state "unresolvedDebates" "$unresolved_threads"
+    push_metric "UnresolvedDebates" "$unresolved_count" "Count" "Component=Coordinator"
+
     # If there are unresolved disagreements and no synthesis attempts, post a nudge
     if [ "$disagree_count" -gt 0 ] && [ "$synthesize_count" -eq 0 ]; then
         local existing_nudge
@@ -914,7 +966,8 @@ track_debate_activity() {
         # Nudge at most once per 10 minutes
         if [ "$age" -gt 600 ]; then
             post_coordinator_thought \
-"DEBATE NUDGE: There are $disagree_count unresolved disagreements in Thought CRs and 0 synthesis attempts.
+"DEBATE NUDGE: There are $disagree_count unresolved disagreements and $unresolved_count unresolved threads in Thought CRs (0 synthesis attempts).
+Planners: check coordinator-state.unresolvedDebates for thread IDs needing synthesis.
 A third agent should read the debate chain and post a synthesis thought.
 Use: post_debate_response <parent_thought_name> \"Synthesis: ...\" synthesize 9
 The civilization needs mediators, not just voters." \
