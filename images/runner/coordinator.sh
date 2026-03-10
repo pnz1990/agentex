@@ -1969,6 +1969,7 @@ Vision score: 9/10 — prioritize implementation."
 # Thread ID: sha256(parentRef)[0:16] — same algorithm as post_debate_response() in entrypoint.sh
 # S3 path: s3://${IDENTITY_BUCKET}/debates/<thread_id>.json
 # Idempotent: skips threads already written to S3
+# Issue #1625: Uses 1 batch S3 LIST call to fetch all existing IDs (not per-debate ls checks)
 record_synthesis_debates_to_s3() {
     local s3_bucket="${IDENTITY_BUCKET:-agentex-thoughts}"
     local namespace="${NAMESPACE:-agentex}"
@@ -1996,9 +1997,19 @@ record_synthesis_debates_to_s3() {
     synth_count=$(echo "$synthesis_thoughts" | jq 'length' 2>/dev/null || echo "0")
     echo "[$(date -u +%H:%M:%S)] Recording $synth_count synthesis debates to S3 (max $max_writes_per_cycle per cycle)"
 
+    # Issue #1625: Batch-list all existing debate thread IDs with ONE S3 LIST API call.
+    # Previous approaches either wrote all debates every cycle (issue #1606) or made one
+    # aws s3 ls call per debate (~250+ calls/cycle). This reduces to 1 LIST call per cycle.
+    local existing_thread_ids
+    existing_thread_ids=$(aws s3 ls "s3://${s3_bucket}/debates/" \
+        --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null \
+        | awk '{print $4}' | sed 's/\.json$//' || echo "")
+    local existing_count
+    existing_count=$(echo "$existing_thread_ids" | grep -c '.' 2>/dev/null || echo "0")
+    echo "[$(date -u +%H:%M:%S)] Found $existing_count existing debate records in S3 (1 LIST call)"
+
     # Process each synthesis thought — limited to max_writes_per_cycle new writes per call.
-    # The aws s3 ls idempotency check is skipped in favor of try-write-then-skip-on-conflict,
-    # which is faster since we expect most writes to be new on the first pass.
+    # Use the batch-fetched existing_thread_ids set for O(n) grep checks (no per-debate API calls).
     local idx=0
     local writes_this_cycle=0
     local skipped_existing=0
@@ -2018,19 +2029,17 @@ record_synthesis_debates_to_s3() {
 
         local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
 
-        # Issue #1606: Add idempotency check — skip S3 write if file already exists.
-        # Previous approach (issue #1585) removed the per-debate aws s3 ls check in favor of
-        # try-write, claiming "S3 PUT is idempotent." But idempotent ≠ "should always be called."
-        # Without this check, 250+ debates are rewritten every 2.5-minute coordinator cycle,
-        # generating ~145,000 S3 PUTs/day ($0.72/day) and blocking coordinator for 12+ min/cycle.
-        # Fix: check S3 before writing, skip if already present (same as track_debate_activity).
-        if aws s3 ls "$s3_path" --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
-            # Already written — skip (no count increment)
+        # Issue #1625: Check the batch-fetched set (no API call) — skip if already persisted.
+        # Replaces per-debate aws s3 ls checks (issue #1606) with O(1) grep against batch LIST.
+        # Previous per-debate ls approach: 250+ S3 API calls/cycle → now just 1 LIST call.
+        # Debate files are immutable once written, so existence = already complete.
+        if echo "$existing_thread_ids" | grep -qF "$thread_id"; then
             skipped_existing=$((skipped_existing + 1))
             idx=$((idx + 1))
             continue
         fi
 
+        # Still enforce per-cycle limit to bound coordinator blocking time for new writes.
         if [ "$writes_this_cycle" -ge "$max_writes_per_cycle" ]; then
             echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining NEW debates will be written next cycle"
             break
@@ -2085,7 +2094,7 @@ EOF
 
         idx=$((idx + 1))
     done
-    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes this cycle, $skipped_existing already-existing skipped (${synth_count} total)"
+    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes, $skipped_existing skipped (already in S3), ${synth_count} total synthesis thoughts"
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
