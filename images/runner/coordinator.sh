@@ -1183,6 +1183,16 @@ NUDGE_EOF
                 done <<< "$kv_pairs"
 
                 if [ -n "$add_issue" ]; then
+                    # Issue #1436: Validate that the referenced issue is open before adding to visionQueue.
+                    # Closed issues should not be added — agents attempting to work on them will fail.
+                    local issue_state
+                    issue_state=$(gh issue view "$add_issue" --repo "$GITHUB_REPO" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                    if [ "$issue_state" != "OPEN" ]; then
+                        echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue is $issue_state — skipping visionQueue add (closed issues cannot be worked)"
+                        vision_queue_patched=true
+                        continue
+                    fi
+
                     local current_vq
                     current_vq=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
                         -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
