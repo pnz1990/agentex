@@ -1505,7 +1505,15 @@ request_coordinator_task() {
 
   if [ -n "$vision_queue" ]; then
     log "Coordinator: vision queue has entries — checking priority items"
-    # Vision queue is semicolon-separated: "feature:description:ts:proposer;..."
+    # Issue #1444: visionQueue is semicolon-separated: "issueNum;feature:desc:ts:proposer;..."
+    # Backward compat: migrate any comma-separated issue numbers to semicolons
+    if echo "$vision_queue" | grep -qv ":" && echo "$vision_queue" | grep -q ","; then
+      vision_queue=$(echo "$vision_queue" | tr ',' ';')
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"visionQueue\":\"${vision_queue}\"}}" 2>/dev/null || true
+      log "Coordinator: migrated visionQueue to semicolon format"
+    fi
     local first_vq_entry
     first_vq_entry=$(echo "$vision_queue" | cut -d';' -f1)
     local vq_feature
@@ -1575,8 +1583,11 @@ request_coordinator_task() {
       local task_queue
       task_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
         -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
-      # Combine: vision items first, then regular items (deduplicated)
-      local combined="${vision_queue}${task_queue:+,$task_queue}"
+      # Issue #1444: visionQueue uses semicolons; extract only issue numbers (numeric) from it
+      # and combine with task_queue (comma-separated). Named features are handled separately.
+      local vision_issues
+      vision_issues=$(echo "$vision_queue" | tr ';' '\n' | grep -E '^[0-9]+$' | tr '\n' ',' | sed 's/,$//')
+      local combined="${vision_issues:+$vision_issues,}${task_queue}"
       queue=$(echo "$combined" | tr ',' '\n' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
       log "Coordinator: visionQueue has priority items — effective queue: $queue"
     else
