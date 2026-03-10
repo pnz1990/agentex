@@ -1401,15 +1401,20 @@ Proposed by: ${AGENT_NAME}"
 }
 
 # ── credit_mentor_for_success ─────────────────────────────────────────────────
-# Issue #1732 v0.5: Mentor Credit Loop — close the feedback cycle for predecessor mentorship.
+# Issue #1732 v0.5 / Issue #1743: Mentor Credit Loop — close the feedback cycle for predecessor mentorship.
 #
 # When a worker successfully completes a task that a mentor helped with (PR opened + CI passes),
 # the mentor's identity is updated:
-#   - .specializationDetail.citedSynthesesCount += 1
+#   - .specializationDetail.citedSynthesesCount += 1  (shared with debate citations)
+#   - .specializationDetail.successfulMentorships += 1  (dedicated mentor counter, issue #1743)
 #   - .specializationDetail.debateQualityScore recalculated
+#   - .specializationDetail.mentorCredits appended
+#
+# A Thought CR is also posted for in-cluster visibility of the credit event.
 #
 # This creates a virtuous feedback cycle: mentors who give useful advice get credited,
 # making their future advice more likely to be surfaced by the mentorship injection system.
+# The coordinator routing gives +2 bonus per successful mentorship (issue #1743).
 #
 # Usage: credit_mentor_for_success <mentor_agent_name>
 #
@@ -1444,13 +1449,19 @@ credit_mentor_for_success() {
     return 0
   fi
 
-  # Increment citedSynthesesCount (represents successful mentorship outcomes)
+  local creditor_agent="${AGENT_NAME:-unknown}"
+  local credit_timestamp
+  credit_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Increment citedSynthesesCount (represents successful mentorship outcomes, shared with debate citations)
+  # Increment successfulMentorships (dedicated mentor-only counter for routing bonus, issue #1743)
   # Recalculate debateQualityScore = (synthesisCount * 2) + (citedSynthesesCount * 5)
   local updated_identity
   updated_identity=$(echo "$mentor_identity" | jq \
-    --arg creditor "${AGENT_NAME:-unknown}" \
-    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    --arg creditor "$creditor_agent" \
+    --arg timestamp "$credit_timestamp" '
     .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+    .specializationDetail.successfulMentorships = (.specializationDetail.successfulMentorships // 0) + 1 |
     .specializationDetail.debateQualityScore = (
       (.specializationDetail.synthesisCount // 0) * 2 +
       (.specializationDetail.citedSynthesesCount // 0) * 5
@@ -1465,12 +1476,12 @@ credit_mentor_for_success() {
   fi
 
   # Write updated identity back to S3 (per-session path)
+  local new_score cited_count successful_mentorships
   if echo "$updated_identity" | aws s3 cp - "$mentor_identity_path" --content-type application/json >/dev/null 2>&1; then
-    local new_score
     new_score=$(echo "$updated_identity" | jq -r '.specializationDetail.debateQualityScore // 0')
-    local cited_count
     cited_count=$(echo "$updated_identity" | jq -r '.specializationDetail.citedSynthesesCount // 0')
-    log "credit_mentor_for_success: credited mentor ${mentor_agent} — citedSynthesesCount=${cited_count} debateQualityScore=${new_score}"
+    successful_mentorships=$(echo "$updated_identity" | jq -r '.specializationDetail.successfulMentorships // 0')
+    log "credit_mentor_for_success: credited mentor ${mentor_agent} — successfulMentorships=${successful_mentorships} citedSynthesesCount=${cited_count} debateQualityScore=${new_score}"
   else
     log "WARNING: credit_mentor_for_success: failed to write updated identity for ${mentor_agent} (non-fatal)"
     return 0
@@ -1487,9 +1498,10 @@ credit_mentor_for_success() {
       if [ -n "$canonical_identity" ]; then
         local updated_canonical
         updated_canonical=$(echo "$canonical_identity" | jq \
-          --arg creditor "${AGENT_NAME:-unknown}" \
-          --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+          --arg creditor "$creditor_agent" \
+          --arg timestamp "$credit_timestamp" '
           .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+          .specializationDetail.successfulMentorships = (.specializationDetail.successfulMentorships // 0) + 1 |
           .specializationDetail.debateQualityScore = (
             (.specializationDetail.synthesisCount // 0) * 2 +
             (.specializationDetail.citedSynthesesCount // 0) * 5
@@ -1505,6 +1517,31 @@ credit_mentor_for_success() {
       fi
     fi
   fi
+
+  # Post a Thought CR for in-cluster visibility of the mentor credit event (issue #1743)
+  # This lets peers see that a mentor-student cycle completed, enabling debate about effectiveness
+  local thought_name="thought-mentor-credit-$(date +%s)"
+  local mentor_display_name
+  mentor_display_name=$(echo "$mentor_identity" | jq -r '.displayName // $ma' --arg ma "$mentor_agent" 2>/dev/null || echo "$mentor_agent")
+  kubectl apply -f - >/dev/null 2>&1 <<EOF || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: ${thought_name}
+  namespace: ${NAMESPACE:-agentex}
+spec:
+  agentRef: "${AGENT_NAME:-unknown}"
+  taskRef: "${TASK_CR_NAME:-unknown}"
+  thoughtType: insight
+  confidence: 7
+  content: |
+    Mentor credit awarded: ${mentor_display_name} (${mentor_agent}) credited for successful mentorship.
+    Worker: ${creditor_agent} completed task and opened PR with mentor guidance.
+    Mentor successfulMentorships: ${successful_mentorships} | debateQualityScore: ${new_score}
+    This mentor will receive +2 routing priority for future issues matching their specialization.
+    issue: #1743 v0.5 mentor chains completion
+EOF
+  log "credit_mentor_for_success: posted visibility Thought CR ${thought_name}"
 
   return 0
 }
