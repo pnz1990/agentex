@@ -54,37 +54,39 @@ spec:
             - -c
             - |
               set -euo pipefail
-              
+
               echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Pod cleanup starting"
-              
-              # Find completed pods older than 2 hours
-              TWO_HOURS_AGO=$(date -u -d '2 hours ago' +%s 2>/dev/null || date -u -v-2H +%s)
-              
-              # Get all completed/failed pods with their completion times
-              PODS_TO_DELETE=$(kubectl get pods -n agentex -o json | jq -r --arg cutoff "$TWO_HOURS_AGO" '
-                .items[] |
-                select(.status.phase == "Succeeded" or .status.phase == "Failed") |
-                select(.status.containerStatuses != null) |
-                select(.status.containerStatuses[0].state.terminated != null) |
-                select(
-                  (.status.containerStatuses[0].state.terminated.finishedAt | fromdateiso8601) < ($cutoff | tonumber)
-                ) |
-                .metadata.name
-              ')
-              
-              if [ -z "$PODS_TO_DELETE" ]; then
-                echo "No pods older than 2 hours to clean up"
+
+              # Issue #1621: Use kubectl field selectors instead of jq to delete completed/failed pods.
+              # bitnami/kubectl:1.31 may not have jq installed, causing the original jq-based script
+              # to hang until the 5-minute activeDeadlineSeconds timeout is hit.
+              # kubectl field selectors are natively supported and don't require any additional tools.
+
+              SUCCEEDED_COUNT=$(kubectl get pods -n agentex --field-selector 'status.phase=Succeeded' --no-headers 2>/dev/null | wc -l || echo 0)
+              FAILED_COUNT=$(kubectl get pods -n agentex --field-selector 'status.phase=Failed' --no-headers 2>/dev/null | wc -l || echo 0)
+
+              echo "Found $SUCCEEDED_COUNT Succeeded pods and $FAILED_COUNT Failed pods to clean up"
+
+              if [ "$SUCCEEDED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
+                echo "No completed/failed pods to clean up"
                 exit 0
               fi
-              
-              # Count pods to delete
-              POD_COUNT=$(echo "$PODS_TO_DELETE" | wc -l)
-              echo "Found $POD_COUNT pods to delete (older than 2 hours)"
-              
-              # Delete pods (using xargs for safety with large lists)
-              echo "$PODS_TO_DELETE" | xargs -r -n 10 kubectl delete pods -n agentex --wait=false
-              
-              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Cleanup complete: deleted $POD_COUNT pods"
+
+              # Delete all Succeeded pods
+              if [ "$SUCCEEDED_COUNT" -gt 0 ]; then
+                kubectl delete pods -n agentex --field-selector 'status.phase=Succeeded' --wait=false 2>/dev/null && \
+                  echo "Deleted $SUCCEEDED_COUNT Succeeded pod(s)" || \
+                  echo "WARNING: Failed to delete Succeeded pods (non-fatal)"
+              fi
+
+              # Delete all Failed pods
+              if [ "$FAILED_COUNT" -gt 0 ]; then
+                kubectl delete pods -n agentex --field-selector 'status.phase=Failed' --wait=false 2>/dev/null && \
+                  echo "Deleted $FAILED_COUNT Failed pod(s)" || \
+                  echo "WARNING: Failed to delete Failed pods (non-fatal)"
+              fi
+
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Cleanup complete"
               exit 0
             resources:
               requests:
