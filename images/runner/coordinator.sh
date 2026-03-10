@@ -2306,7 +2306,9 @@ The civilization needs mediators, not just voters." \
 #         "coordinator.sh": 2
 #       },
 #       "debatesWon": 0,
-#       "synthesisCount": 2
+#       "synthesisCount": 2,
+#       "citedSynthesesCount": 1,              # issue #1604: count of syntheses cited by other agents
+#       "debateQualityScore": 9                # issue #1604: (synthesisCount*2)+(citedSynthesesCount*5)
 #     }
 #   }
 #
@@ -2449,6 +2451,33 @@ score_agent_for_issue() {
                 done
             fi
         done
+    fi
+
+    # Issue #1604: Quality bonus for high-quality debaters on architectural issues.
+    # If the agent has debateQualityScore > 10 AND the issue has architectural labels,
+    # add a +3 bonus to route complex issues to experienced debate contributors.
+    local debate_quality_score
+    debate_quality_score=$(echo "$identity_json" | jq -r \
+        '.specializationDetail.debateQualityScore // 0 | tonumber' 2>/dev/null || echo "0")
+    if [ "$debate_quality_score" -gt 10 ]; then
+        # Check if issue has architectural labels
+        local has_arch_label=0
+        if [ -n "$issue_labels" ]; then
+            IFS=',' read -ra arch_label_arr <<< "$issue_labels"
+            for label in "${arch_label_arr[@]}"; do
+                label=$(echo "$label" | tr -d ' ')
+                case "$label" in
+                    architecture|self-improvement|enhancement|discussion)
+                        has_arch_label=1
+                        break
+                        ;;
+                esac
+            done
+        fi
+        if [ "$has_arch_label" -eq 1 ]; then
+            score=$((score + 3))
+            echo "[$(date -u +%H:%M:%S)] Routing: +3 debate quality bonus for $agent_name (debateQualityScore=$debate_quality_score)" >&2
+        fi
     fi
 
     echo "$score"

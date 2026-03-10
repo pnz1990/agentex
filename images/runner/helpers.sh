@@ -241,6 +241,85 @@ query_debate_outcomes() {
   echo "$results"
 }
 
+# ── cite_debate_outcome ───────────────────────────────────────────────────────
+# Record that this agent cited a debate synthesis in a decision (issue #1604).
+# This updates:
+#   1. The debate S3 record: adds this agent to the citedBy array
+#   2. The synthesizer's identity: increments their citedSynthesesCount
+#      (which increases their debateQualityScore)
+#
+# Usage: cite_debate_outcome <thread_id>
+#
+# Example (after querying debate outcomes and using a synthesis in a decision):
+#   past=$(query_debate_outcomes "circuit-breaker")
+#   thread_id=$(echo "$past" | jq -r '.[0].threadId')
+#   recorded_by=$(echo "$past" | jq -r '.[0].recordedBy')
+#   cite_debate_outcome "$thread_id" "$recorded_by"
+cite_debate_outcome() {
+  local thread_id="${1:-}"
+  local recorded_by="${2:-}"  # agent name of the synthesizer
+
+  if [ -z "$thread_id" ]; then
+    log "ERROR: cite_debate_outcome requires thread_id"
+    return 1
+  fi
+
+  local s3_path="s3://${S3_BUCKET}/debates/${thread_id}.json"
+
+  # Read existing debate record
+  local existing_data
+  existing_data=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "")
+  if [ -z "$existing_data" ]; then
+    log "WARNING: cite_debate_outcome: debate record not found for thread ${thread_id}"
+    return 1
+  fi
+
+  # Add this agent to citedBy array (deduplicate)
+  local updated_data
+  updated_data=$(echo "$existing_data" | jq \
+    --arg agent "$AGENT_NAME" \
+    'if (.citedBy // []) | index($agent) then . else .citedBy = (.citedBy // []) + [$agent] end' \
+    2>/dev/null || echo "$existing_data")
+
+  # Write updated debate record back to S3
+  if ! echo "$updated_data" | aws s3 cp - "$s3_path" --content-type application/json 2>/dev/null; then
+    log "WARNING: cite_debate_outcome: could not update debate record for thread ${thread_id}"
+    return 1
+  fi
+
+  log "Cited debate synthesis: thread=${thread_id} by ${AGENT_NAME}"
+
+  # Credit the synthesizer's identity if we know who synthesized it
+  if [ -n "$recorded_by" ]; then
+    local synthesizer_identity_path="s3://${S3_BUCKET}/identities/${recorded_by}.json"
+    local synth_identity
+    synth_identity=$(aws s3 cp "$synthesizer_identity_path" - 2>/dev/null || echo "")
+    if [ -n "$synth_identity" ]; then
+      local updated_synth
+      updated_synth=$(echo "$synth_identity" | jq '
+        .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+        .specializationDetail.debateQualityScore = (
+          ((.specializationDetail.synthesisCount // 0) * 2) +
+          ((.specializationDetail.citedSynthesesCount // 0) * 5)
+        )' 2>/dev/null || echo "$synth_identity")
+      if echo "$updated_synth" | aws s3 cp - "$synthesizer_identity_path" --content-type application/json 2>/dev/null; then
+        log "Updated synthesizer identity debateQualityScore: agent=${recorded_by}"
+        # Also update canonical file if displayName is known
+        local synth_display_name
+        synth_display_name=$(echo "$updated_synth" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+        if [ -n "$synth_display_name" ] && [ "$synth_display_name" != "$recorded_by" ]; then
+          local canonical_path="s3://${S3_BUCKET}/identities/canonical/${synth_display_name}.json"
+          echo "$updated_synth" | aws s3 cp - "$canonical_path" --content-type application/json 2>/dev/null || true
+        fi
+      else
+        log "WARNING: cite_debate_outcome: could not update synthesizer identity (non-fatal)"
+      fi
+    fi
+  fi
+
+  return 0
+}
+
 # ── push_metric stub ─────────────────────────────────────────────────────────
 # Stub for CloudWatch metric push — no-op in helpers.sh context since we don't
 # have the full entrypoint.sh environment (no aws cloudwatch put-metric-data call).
@@ -967,5 +1046,5 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

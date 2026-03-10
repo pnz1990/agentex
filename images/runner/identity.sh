@@ -194,6 +194,8 @@ save_identity() {
   local spec_code_areas="{}"
   local spec_debates_won=0
   local spec_synthesis_count=0
+  local spec_cited_syntheses_count=0
+  local spec_debate_quality_score=0
   
   if [[ -n "$existing_json" ]]; then
     tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
@@ -204,6 +206,9 @@ save_identity() {
     spec_code_areas=$(echo "$existing_json" | jq -c '.specializationDetail.codeAreas // {}')
     spec_debates_won=$(echo "$existing_json" | jq -r '.specializationDetail.debatesWon // 0')
     spec_synthesis_count=$(echo "$existing_json" | jq -r '.specializationDetail.synthesisCount // 0')
+    spec_cited_syntheses_count=$(echo "$existing_json" | jq -r '.specializationDetail.citedSynthesesCount // 0')
+    # Recompute debateQualityScore: (synthesisCount * 2) + (citedSynthesesCount * 5)
+    spec_debate_quality_score=$(( (spec_synthesis_count * 2) + (spec_cited_syntheses_count * 5) ))
   fi
   
   local specialization_value="${AGENT_SPECIALIZATION:-}"
@@ -221,7 +226,9 @@ save_identity() {
   "specializationDetail": {
     "codeAreas": $spec_code_areas,
     "debatesWon": $spec_debates_won,
-    "synthesisCount": $spec_synthesis_count
+    "synthesisCount": $spec_synthesis_count,
+    "citedSynthesesCount": $spec_cited_syntheses_count,
+    "debateQualityScore": $spec_debate_quality_score
   },
   "stats": {
     "tasksCompleted": $tasks_completed,
@@ -273,6 +280,7 @@ save_identity_with_inheritance() {
 
   # Inherit accumulated specialization from prior agent
   local spec_label_counts spec_code_areas spec_debates_won spec_synthesis_count
+  local spec_cited_syntheses_count spec_debate_quality_score
   local tasks_completed issues_filed prs_merged thoughts_posted
 
   if [[ -n "$prior_json" ]]; then
@@ -280,6 +288,9 @@ save_identity_with_inheritance() {
     spec_code_areas=$(echo "$prior_json" | jq -c '.specializationDetail.codeAreas // {}')
     spec_debates_won=$(echo "$prior_json" | jq -r '.specializationDetail.debatesWon // 0')
     spec_synthesis_count=$(echo "$prior_json" | jq -r '.specializationDetail.synthesisCount // 0')
+    spec_cited_syntheses_count=$(echo "$prior_json" | jq -r '.specializationDetail.citedSynthesesCount // 0')
+    # Recompute debateQualityScore: (synthesisCount * 2) + (citedSynthesesCount * 5)
+    spec_debate_quality_score=$(( (spec_synthesis_count * 2) + (spec_cited_syntheses_count * 5) ))
     tasks_completed=$(echo "$prior_json" | jq -r '.stats.tasksCompleted // 0')
     issues_filed=$(echo "$prior_json" | jq -r '.stats.issuesFiled // 0')
     prs_merged=$(echo "$prior_json" | jq -r '.stats.prsMerged // 0')
@@ -289,6 +300,8 @@ save_identity_with_inheritance() {
     spec_code_areas="{}"
     spec_debates_won=0
     spec_synthesis_count=0
+    spec_cited_syntheses_count=0
+    spec_debate_quality_score=0
     tasks_completed=0
     issues_filed=0
     prs_merged=0
@@ -311,7 +324,9 @@ save_identity_with_inheritance() {
   "specializationDetail": {
     "codeAreas": $spec_code_areas,
     "debatesWon": $spec_debates_won,
-    "synthesisCount": $spec_synthesis_count
+    "synthesisCount": $spec_synthesis_count,
+    "citedSynthesesCount": $spec_cited_syntheses_count,
+    "debateQualityScore": $spec_debate_quality_score
   },
   "stats": {
     "tasksCompleted": $tasks_completed,
@@ -587,14 +602,19 @@ update_debate_specialization() {
     return 0
   fi
   
-  # Increment synthesisCount
+  # Increment synthesisCount and recompute debateQualityScore
+  # debateQualityScore = (synthesisCount * 2) + (citedSynthesesCount * 5)
   local updated_json
-  updated_json=$(echo "$identity_json" | jq \
-    '.specializationDetail.synthesisCount = (.specializationDetail.synthesisCount // 0) + 1')
+  updated_json=$(echo "$identity_json" | jq '
+    .specializationDetail.synthesisCount = (.specializationDetail.synthesisCount // 0) + 1 |
+    .specializationDetail.debateQualityScore = (
+      ((.specializationDetail.synthesisCount // 0) * 2) +
+      ((.specializationDetail.citedSynthesesCount // 0) * 5)
+    )')
   
   # Save back to S3
   if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
-    echo "[identity] Updated debate specialization: synthesisCount incremented"
+    echo "[identity] Updated debate specialization: synthesisCount incremented, debateQualityScore recomputed"
   else
     echo "[identity] WARNING: Could not save debate specialization update to S3"
   fi
@@ -606,6 +626,53 @@ update_debate_specialization() {
       echo "[identity] Updated canonical debate specialization: $canonical_path"
     else
       echo "[identity] WARNING: Could not update canonical debate specialization (non-fatal)"
+    fi
+  fi
+}
+
+#######################################
+# Increment citedSynthesesCount when this agent's debate synthesis is cited
+# by another agent in a decision (issue #1604 — debate quality scoring).
+# Call this when an agent reads a past debate outcome via query_debate_outcomes()
+# and uses its threadId in a decision (tracked by helpers.sh cite_debate_outcome()).
+# Globals:
+#   AGENT_IDENTITY_FILE, AGENT_DISPLAY_NAME, IDENTITY_BUCKET, IDENTITY_PREFIX
+#######################################
+increment_cited_syntheses_count() {
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    return 0
+  fi
+
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity for cited syntheses update"
+    return 0
+  fi
+
+  # Increment citedSynthesesCount and recompute debateQualityScore
+  local updated_json
+  updated_json=$(echo "$identity_json" | jq '
+    .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+    .specializationDetail.debateQualityScore = (
+      ((.specializationDetail.synthesisCount // 0) * 2) +
+      ((.specializationDetail.citedSynthesesCount // 0) * 5)
+    )')
+
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    echo "[identity] Updated citedSynthesesCount and debateQualityScore"
+  else
+    echo "[identity] WARNING: Could not save citedSynthesesCount update to S3"
+  fi
+
+  # Also update canonical file for cross-generation inheritance
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical citedSynthesesCount: $canonical_path"
+    else
+      echo "[identity] WARNING: Could not update canonical citedSynthesesCount (non-fatal)"
     fi
   fi
 }
