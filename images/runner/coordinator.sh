@@ -1181,6 +1181,41 @@ cleanup_old_cluster_resources() {
         echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: removed $total_deleted stale CRs (thoughts+messages+reports)"
         push_metric "ClusterResourcesDeleted" "$total_deleted" "Count" "Component=Coordinator"
     fi
+
+    # Issue #1667: Prune orphaned entries from unresolvedDebates (parent CM was deleted)
+    prune_orphaned_unresolved_debates
+}
+
+# prune_orphaned_unresolved_debates — remove entries from unresolvedDebates that reference
+# deleted thought ConfigMaps (issue #1667). Called from cleanup_old_cluster_resources() every 30 min.
+#
+# When cleanup_old_thoughts() deletes old thought CMs, any debate thread ID stored in
+# unresolvedDebates whose parent CM is now gone becomes orphaned. This function filters them out.
+prune_orphaned_unresolved_debates() {
+    local current_unresolved
+    current_unresolved=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || true)
+    [ -z "$current_unresolved" ] && return 0
+
+    local pruned_count=0
+    local valid_entries=""
+    while IFS= read -r thread_id; do
+        [ -z "$thread_id" ] && continue
+        if kubectl_with_timeout 5 get configmap "$thread_id" -n "$NAMESPACE" >/dev/null 2>&1; then
+            [ -n "$valid_entries" ] \
+                && valid_entries="${valid_entries},${thread_id}" \
+                || valid_entries="$thread_id"
+        else
+            echo "[$(date -u +%H:%M:%S)] Pruning orphaned unresolvedDebate entry: $thread_id"
+            pruned_count=$((pruned_count + 1))
+        fi
+    done < <(echo "$current_unresolved" | tr ',' '\n')
+
+    if [ "$pruned_count" -gt 0 ]; then
+        update_state "unresolvedDebates" "$valid_entries"
+        echo "[$(date -u +%H:%M:%S)] Pruned $pruned_count orphaned entries from unresolvedDebates"
+        push_metric "OrphanedDebatesPruned" "$pruned_count" "Count" "Component=Coordinator"
+    fi
 }
 
 # Reconcile spawnSlots against actual running job count (leak recovery)
