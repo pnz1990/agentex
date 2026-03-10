@@ -4641,6 +4641,46 @@ Closes #${PR939_ISSUE}"
       done <<< "$SESSION_PR_NUMBERS"
     fi
   fi
+
+  # Issue #1732 v0.5: Mentor Credit Loop — credit mentor when worker PR passes CI.
+  # When a mentor helped this worker (via step 3.8 mentorship injection) and the worker
+  # successfully opened a PR that passed CI, update the mentor's identity to credit them.
+  # This closes the feedback cycle: useful mentors earn quality score boosts, making
+  # their advice more likely to be surfaced in future mentorship lookups.
+  if [ -n "${MENTOR_AGENT_NAME:-}" ]; then
+    log "Mentor credit: crediting mentor ${MENTOR_AGENT_NAME} for worker PR success (issue #1732 v0.5)"
+    if type credit_mentor_for_success &>/dev/null; then
+      credit_mentor_for_success "$MENTOR_AGENT_NAME" 2>/dev/null || true
+    else
+      # Inline fallback: directly update mentor identity S3 file
+      _mentor_identity_path="s3://${S3_BUCKET}/identities/${MENTOR_AGENT_NAME}.json"
+      if aws s3 ls "$_mentor_identity_path" >/dev/null 2>&1; then
+        _mentor_identity=$(aws s3 cp "$_mentor_identity_path" - 2>/dev/null || echo "")
+        if [ -n "$_mentor_identity" ]; then
+          _updated_mentor=$(echo "$_mentor_identity" | jq \
+            --arg creditor "${AGENT_NAME}" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+            .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+            .specializationDetail.debateQualityScore = (
+              (.specializationDetail.synthesisCount // 0) * 2 +
+              (.specializationDetail.citedSynthesesCount // 0) * 5
+            ) |
+            .specializationDetail.mentorCredits = (.specializationDetail.mentorCredits // []) +
+              [{"creditedBy": $creditor, "at": $ts}]
+          ' 2>/dev/null || echo "")
+          if [ -n "$_updated_mentor" ]; then
+            echo "$_updated_mentor" | aws s3 cp - "$_mentor_identity_path" --content-type application/json >/dev/null 2>&1 && \
+              log "Mentor credit: updated ${MENTOR_AGENT_NAME} citedSynthesesCount++ (inline fallback)" || \
+              log "WARNING: Mentor credit inline fallback write failed for ${MENTOR_AGENT_NAME} (non-fatal)"
+          fi
+        fi
+      else
+        log "Mentor credit: identity not found for ${MENTOR_AGENT_NAME} — skipping (non-fatal)"
+      fi
+    fi
+    push_metric "MentorCreditGranted" 1 "Count" "MentorAgent=${MENTOR_AGENT_NAME}"
+    log "Mentor credit complete for ${MENTOR_AGENT_NAME}"
+  fi
 fi
 
 # Update specialization based on issue labels worked on this session (issue #1098, #1347)
