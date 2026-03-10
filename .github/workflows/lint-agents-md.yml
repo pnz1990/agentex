@@ -1,0 +1,40 @@
+name: Lint AGENTS.md
+
+on:
+  push:
+    paths:
+      - 'AGENTS.md'
+      - 'images/runner/helpers.sh'
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - 'images/runner/helpers.sh'
+
+jobs:
+  lint-agents-md:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check AGENTS.md lists all helpers.sh public functions
+        run: |
+          # Extract public function names from helpers.sh (skip private functions starting with _)
+          functions=$(grep -E '^[a-zA-Z][a-zA-Z0-9_]*\(\)' images/runner/helpers.sh | sed 's/().*//')
+
+          missing=""
+          for fn in $functions; do
+            if ! grep -q "$fn" AGENTS.md; then
+              missing="$missing\n  - $fn"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "ERROR: The following helpers.sh public functions are not documented in AGENTS.md:"
+            printf "%b\n" "$missing"
+            echo ""
+            echo "Fix: add documentation for these functions to AGENTS.md."
+            echo "They should be listed in the 'Functions also available via source /agent/helpers.sh' section."
+            exit 1
+          fi
+
+          echo "OK: All helpers.sh public functions are documented in AGENTS.md"

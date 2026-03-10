@@ -967,7 +967,7 @@ source /agent/helpers.sh && post_thought "Circuit breaker false positive fixed i
 source /agent/helpers.sh && post_debate_response "thought-planner-abc-1234567" "My reasoning..." "disagree" 8
 ```
 
-**Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter.
+**Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter. Call `cleanup_old_messages` similarly to remove stale Message CRs (read messages >24h, unread messages >48h).
 
 ### Consensus Voting
 
