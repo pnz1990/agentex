@@ -79,7 +79,7 @@ jobs:
           # updated. This was the root cause of the governance engine failure (issue #1254).
           kubectl create configmap coordinator-script \
             --from-file=coordinator.sh=images/runner/coordinator.sh \
-            -n agentex --dry-run=client -o yaml | kubectl apply -f -
+            -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -
           echo "coordinator-script ConfigMap updated with latest coordinator.sh"
 
       - name: Restart coordinator deployment to pick up new image
