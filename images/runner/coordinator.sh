@@ -1115,6 +1115,104 @@ cleanup_orphaned_pods() {
     push_metric "OrphanedPodsDeleted" "$deleted_count" "Count" "Component=Coordinator"
 }
 
+# check_swarm_dissolution — Coordinator-driven swarm lifecycle management (issue #1787, v0.6)
+# Scans non-Disbanded swarm state ConfigMaps and auto-disbands idle completed swarms.
+#
+# Problem this solves: entrypoint.sh dissolution logic only runs when an agent with SWARM_REF
+# exits. If all swarm agents complete without an active SWARM_REF agent, swarms stay Active
+# forever, cluttering activeSwarms and coordinator-state indefinitely.
+#
+# Dissolution condition (mirrors entrypoint.sh logic):
+#   - All tasks labeled agentex/swarm=<name> have phase=Done
+#   - lastActivityTimestamp > 300 seconds ago
+#
+# Called every 10 iterations (~5 min) in main loop.
+check_swarm_dissolution() {
+    local disbanded_count=0
+
+    # Get all swarm-state ConfigMaps that are not yet Disbanded
+    # Swarm state CMs have the agentex/swarm label set by the swarm-graph RGD
+    while IFS=$'\t' read -r cm_name swarm_name phase last_ts; do
+        [ -z "$cm_name" ] && continue
+        [ -z "$swarm_name" ] && continue
+        [ "$phase" = "Disbanded" ] && continue
+
+        # Check if all tasks for this swarm are Done
+        local total done
+        total=$(kubectl_with_timeout 10 get tasks.kro.run -n "$NAMESPACE" \
+            -l "agentex/swarm=${swarm_name}" -o json 2>/dev/null | \
+            jq '.items | length' 2>/dev/null || echo "0")
+        done=$(kubectl_with_timeout 10 get tasks.kro.run -n "$NAMESPACE" \
+            -l "agentex/swarm=${swarm_name}" -o json 2>/dev/null | \
+            jq '[.items[] | select(.status.phase == "Done")] | length' 2>/dev/null || echo "0")
+
+        # Skip swarms with no tasks or pending tasks
+        [ "$total" -eq 0 ] && continue
+        local pending=$(( total - done ))
+        [ "$pending" -gt 0 ] && continue
+
+        # All tasks done — check idle time
+        [ -z "$last_ts" ] && continue
+        local last_epoch now_epoch idle_secs
+        last_epoch=$(date -d "$last_ts" +%s 2>/dev/null || echo 0)
+        [ "$last_epoch" -eq 0 ] && continue
+        now_epoch=$(date +%s)
+        idle_secs=$(( now_epoch - last_epoch ))
+
+        # 300 seconds = 5 minutes idle threshold (matches entrypoint.sh)
+        if [ "$idle_secs" -gt 300 ]; then
+            echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: disbanding $swarm_name — all $total tasks done, idle ${idle_secs}s"
+
+            # Mark as Disbanded
+            kubectl_with_timeout 10 patch configmap "${cm_name}" -n "$NAMESPACE" \
+                --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
+
+            # Broadcast dissolution event
+            kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Message
+metadata:
+  name: msg-coordinator-swarm-disbanded-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  from: coordinator
+  to: broadcast
+  thread: swarm-lifecycle
+  body: |
+    Swarm ${swarm_name} auto-disbanded by coordinator. All ${total} tasks completed. Idle ${idle_secs}s.
+EOF
+
+            # Post insight thought about dissolution
+            kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-coordinator-swarm-disbanded-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator
+  thoughtType: insight
+  confidence: 8
+  content: |
+    Swarm ${swarm_name} dissolved by coordinator lifecycle check. All ${total} tasks Done. Idle time: ${idle_secs}s.
+EOF
+
+            push_metric "SwarmAutoDisbanded" 1 "Count" "Component=Coordinator"
+            disbanded_count=$(( disbanded_count + 1 ))
+        else
+            echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: $swarm_name all tasks done but only ${idle_secs}s idle (need 300s)"
+        fi
+    done < <(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
+        -l "agentex/swarm" -o json 2>/dev/null | \
+        jq -r '.items[] | select(.data.phase != null) | [.metadata.name, (.metadata.labels["agentex/swarm"] // ""), (.data.phase // ""), (.data.lastActivityTimestamp // "")] | @tsv' \
+        2>/dev/null || true)
+
+    if [ "$disbanded_count" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: disbanded $disbanded_count swarm(s)"
+    fi
+}
+
 # cleanup_old_cluster_resources — Periodically delete stale Thought and Message CRs (issue #1617)
 # The cluster accumulates 4000+ Thought ConfigMaps and 1600+ Report CRs when planner cleanup
 # doesn't run frequently enough. The coordinator runs continuously every ~30s and is better
@@ -3987,6 +4085,14 @@ while true; do
     # are deleted without cascade-deleting their pods (historical behavior pre-TTL governance).
     if [ $((iteration % 10)) -eq 0 ]; then
         cleanup_orphaned_pods
+    fi
+
+    # Every 10 iterations (~5 min): auto-disband idle completed swarms (issue #1787, v0.6)
+    # Coordinator-driven swarm lifecycle management: when all swarm tasks are Done and the
+    # swarm has been idle for 300s, mark phase=Disbanded even if no SWARM_REF agent is running.
+    # This prevents swarms from staying Active forever after all members finish their tasks.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        check_swarm_dissolution
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.
