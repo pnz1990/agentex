@@ -608,7 +608,14 @@ cleanup_stale_assignments() {
     for pair in "${PAIRS[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        local issue="${pair##*:}"
+        # Issue #1504: Strip trailing whitespace from issue number.
+        # Legacy coordinator writes (before PR #1473 fixed update_state()) stored issue
+        # numbers with trailing spaces (e.g., "1483 "). This caused two failures:
+        # 1. [[ "$issue" =~ ^[0-9]+$ ]] → FALSE, skipping the closed-issue check.
+        # 2. claim_task()'s grep regex didn't match "1483 " when checking for "1483",
+        #    allowing duplicate claims of the same issue by different agents.
+        local issue
+        issue=$(echo "${pair##*:}" | tr -d '[:space:]')
 
         local job_active
         # Issue #1170: Suppress jq parse errors from kubectl non-JSON output.
@@ -634,9 +641,12 @@ cleanup_stale_assignments() {
                     continue
                 fi
             fi
+            # Issue #1504: Reconstruct the pair from sanitized agent_name + issue (no trailing spaces).
+            # Using ${pair} would preserve the original trailing space and corrupt future reads.
+            local clean_pair="${agent_name}:${issue}"
             [ -n "$cleaned_assignments" ] \
-                && cleaned_assignments="${cleaned_assignments},${pair}" \
-                || cleaned_assignments="$pair"
+                && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                || cleaned_assignments="${clean_pair}"
         else
             echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue, releasing assignment (NOT re-queuing; refresh_task_queue handles re-population)"
             stale_count=$((stale_count + 1))
