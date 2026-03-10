@@ -2906,8 +2906,8 @@ If claim fails (returns 1), pick a different issue — another agent already cla
        IDENTITY_WITH_SPEC=0
        if [ "${IDENTITY_COUNT:-0}" -gt 0 ]; then
          # Sample up to 5 identity files to check for specialization data
-         for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
-             --region "$BEDROCK_REGION" 2>/dev/null | awk '{print $4}' | head -5); do
+          for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
+              --region "$BEDROCK_REGION" 2>/dev/null | sort -k1,2 -r | awk '{print $4}' | grep -v '^$' | head -5); do
            spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
              --region "$BEDROCK_REGION" 2>/dev/null | \
              jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
