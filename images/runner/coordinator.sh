@@ -44,7 +44,7 @@ echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "Namespace: $NAMESPACE"
 echo "State ConfigMap: $STATE_CM"
-echo "Vote threshold: $VOTE_THRESHOLD approvals required (will be overridden from constitution if set)"
+echo "Vote threshold: $VOTE_THRESHOLD approvals required (default, may be overridden by constitution)"
 echo ""
 
 # ── Configure kubectl ────────────────────────────────────────────────────────
@@ -68,16 +68,24 @@ BEDROCK_REGION_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n
 if [ -n "$BEDROCK_REGION_FROM_CONSTITUTION" ]; then
   BEDROCK_REGION="$BEDROCK_REGION_FROM_CONSTITUTION"
 fi
-# Read voteThreshold from constitution (issue #1059) — allows god to adjust voting rules
-# without rebuilding the coordinator image
+# Read voteThreshold from constitution (issue #1059, #1063) — governance votes changing
+# voteThreshold must take effect without coordinator restart.
 VOTE_THRESHOLD_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
 if [ -n "$VOTE_THRESHOLD_FROM_CONSTITUTION" ] && [[ "$VOTE_THRESHOLD_FROM_CONSTITUTION" =~ ^[0-9]+$ ]]; then
   VOTE_THRESHOLD="$VOTE_THRESHOLD_FROM_CONSTITUTION"
 fi
+# Read minimumVisionScore from constitution (issue #1063) — allows governance to tune
+# the minimum acceptable vision score for agent work quality enforcement.
+MINIMUM_VISION_SCORE=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.minimumVisionScore}' 2>/dev/null || echo "5")
+if ! [[ "$MINIMUM_VISION_SCORE" =~ ^[0-9]+$ ]]; then
+  MINIMUM_VISION_SCORE=5
+fi
 echo "GitHub repo (from constitution): $GITHUB_REPO"
 echo "Bedrock region (from constitution): $BEDROCK_REGION"
 echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
+echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
@@ -564,6 +572,20 @@ Without this sync, the git repo drifts from cluster state. Fresh installs using 
 # GENERIC GOVERNANCE ENGINE (issue #630) — handles ANY proposal topic
 tally_and_enact_votes() {
     echo "[$(date -u +%H:%M:%S)] Tallying votes from Thought CRs (generic governance engine)..."
+
+    # Re-read voteThreshold from constitution on every tally cycle (issue #1063).
+    # This ensures that when governance enacts a voteThreshold change, the coordinator
+    # picks it up without requiring a restart. circuitBreakerLimit is re-read similarly
+    # in the main loop — same pattern applied here for consistency.
+    local current_vote_threshold
+    current_vote_threshold=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
+    if [ -n "$current_vote_threshold" ] && [[ "$current_vote_threshold" =~ ^[0-9]+$ ]]; then
+        if [ "$current_vote_threshold" != "$VOTE_THRESHOLD" ]; then
+            echo "[$(date -u +%H:%M:%S)] voteThreshold updated from constitution: $VOTE_THRESHOLD → $current_vote_threshold"
+            VOTE_THRESHOLD="$current_vote_threshold"
+        fi
+    fi
 
     # Write thoughts to temp file. Read from ConfigMap .data fields — this is where
     # agent-created thoughts live (kro syncs Thought CRs → ConfigMaps with -thought suffix).
