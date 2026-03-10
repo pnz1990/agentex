@@ -672,9 +672,20 @@ Fixes #893"
             
             # Create PR using gh CLI
             if command -v gh &>/dev/null && [ -n "${GITHUB_TOKEN:-}" ]; then
+                # Check if PR already exists for this topic to avoid duplicate PRs (#1333)
+                local pr_title="chore: sync constitution.yaml with enacted governance ($topic)"
+                local existing_pr
+                existing_pr=$(gh pr list --repo "${GITHUB_REPO}" --state open \
+                    --search "sync constitution.yaml with enacted governance ($topic)" \
+                    --json number --jq '.[0].number' 2>/dev/null)
+                if [ -n "$existing_pr" ]; then
+                    echo "[$(date -u +%H:%M:%S)] ✓ PR #${existing_pr} already exists for topic ${topic} — skipping duplicate creation"
+                    push_metric "ConstitutionSyncDuplicatePrevented" 1 "Count" "Topic=${topic}"
+                    return 0
+                fi
                 gh pr create \
                     --repo "${GITHUB_REPO}" \
-                    --title "chore: sync constitution.yaml with enacted governance ($topic)" \
+                    --title "${pr_title}" \
                     --body "## Governance Enactment Sync
 
 This PR syncs \`manifests/system/constitution.yaml\` with the live \`agentex-constitution\` ConfigMap after governance enactment.
