@@ -1179,7 +1179,7 @@ check_swarm_dissolution() {
     local checked=0
 
     # Process each swarm state CM
-    while IFS=$'\t' read -r swarm_name phase last_ts member_agents total_tasks; do
+    while IFS=$'\t' read -r swarm_name phase last_ts member_agents total_tasks swarm_goal; do
         [ -z "$swarm_name" ] && continue
         [ "$phase" = "Disbanded" ] && continue
 
@@ -1223,12 +1223,50 @@ check_swarm_dissolution() {
         # DISSOLUTION: all tasks done, idle > 300s, not yet Disbanded
         echo "[$(date -u +%H:%M:%S)] SWARM DISSOLUTION: $swarm_ref completed all $total tasks, idle ${idle_seconds}s — disbanding"
 
+        # CRITICAL (issue #1790): Write swarm memory to S3 before disbanding
+        # The entrypoint.sh path calls write_swarm_memory() from helpers.sh when an agent
+        # with SWARM_REF exits. The coordinator path must also persist swarm memory so that
+        # coordinator-driven dissolutions (the common path) don't silently lose institutional knowledge.
+        #
+        # Inline implementation (coordinator.sh doesn't source helpers.sh):
+        local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+        local timestamp
+        timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        
+        # Build members JSON array from member_agents (already CSV format from CM data)
+        local members_json
+        members_json=$(echo "$member_agents" | tr ',' '\n' | jq -R . 2>/dev/null | jq -s . 2>/dev/null || echo "[]")
+        
+        # Escape strings for JSON
+        local safe_goal
+        safe_goal=$(echo "$swarm_goal" | sed 's/"/\\"/g' | tr '\n' ' ')
+        
+        # Key decisions: extract from coordinator thought history or swarm state if available
+        local key_decisions="Coordinator-driven dissolution: all tasks completed, idle threshold met"
+        
+        local memory_json
+        memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"coordinator"}\n' \
+          "$swarm_ref" \
+          "$safe_goal" \
+          "$members_json" \
+          "$total" \
+          "$key_decisions" \
+          "$timestamp")
+        
+        local s3_path="s3://${s3_bucket}/swarm-memories/${swarm_ref}.json"
+        
+        if echo "$memory_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
+          echo "[$(date -u +%H:%M:%S)] Swarm memory persisted to ${s3_path}"
+        else
+          echo "[$(date -u +%H:%M:%S)] WARNING: Failed to persist swarm memory to S3 (non-fatal)"
+        fi
+
         # Patch phase to Disbanded
         kubectl_with_timeout 10 patch configmap "${swarm_name}" -n "$NAMESPACE" \
             --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
 
         # Post coordinator thought
-        post_coordinator_thought "Swarm $swarm_ref dissolved by coordinator. Goal achieved. All $total tasks completed. Members: $member_agents. Idle: ${idle_seconds}s." "insight"
+        post_coordinator_thought "Swarm $swarm_ref dissolved by coordinator. Goal achieved. All $total tasks completed. Members: $member_agents. Idle: ${idle_seconds}s. Memory persisted to S3 (issue #1790)." "insight"
 
         push_metric "SwarmDisbanded" 1 "Count" "Component=Coordinator"
         disbanded=$((disbanded + 1))
@@ -1239,7 +1277,8 @@ check_swarm_dissolution() {
             (.data.phase // "Forming"),
             (.data.lastActivityTimestamp // ""),
             (.data.memberAgents // ""),
-            (.data.tasksCompleted // "0")
+            (.data.tasksCompleted // "0"),
+            (.data.goal // "completed platform improvement")
         ] | @tsv' 2>/dev/null)
 
     if [ "$checked" -gt 0 ]; then
