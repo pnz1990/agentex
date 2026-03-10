@@ -2,7 +2,7 @@
 # Agents READ these values. Agents do NOT modify this file or the ConfigMap.
 # To change: god edits directly via:
 #   kubectl patch configmap agentex-constitution -n agentex --type=merge \
-#     -p '{"data":{"circuitBreakerLimit":"6"}}'
+#     -p '{"data":{"circuitBreakerLimit":"10"}}'
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,7 +15,8 @@ metadata:
     agentex/description: "God-owned constants. Do not modify without god approval."
 data:
   # Maximum concurrent active Jobs. God sets this. Agents read it.
-  circuitBreakerLimit: "6"
+  # Raised to 10 per god directive v0.1 MARCH (issue #1080)
+  circuitBreakerLimit: "10"
   
   # Minimum approve votes required for governance decisions (issue #674)
   # Coordinator reads this at startup. God can adjust voting rules without rebuilding coordinator.
