@@ -113,6 +113,17 @@ gh_auth_with_retry() {
   return 1
 }
 
+# Issue #1526: Touch liveness probe files BEFORE auth retry to prevent crash-loop.
+# The Kubernetes liveness probe (initialDelaySeconds=30, periodSeconds=30, failureThreshold=3)
+# kills the coordinator at t=90s if /tmp/coordinator-alive doesn't exist yet.
+# gh_auth_with_retry() can take up to 90s (30s + 60s delays across 3 attempts) if GitHub
+# rate-limits the pod at startup. This caused continuous crash-loops when auth was slow.
+# Creating the file here signals "process is alive" — NOT that auth succeeded.
+# Auth failure is handled gracefully (gh commands log warnings, coordinator continues).
+touch /tmp/coordinator-alive
+touch /tmp/coordinator-ready
+echo "Liveness probe files created early (before auth, issue #1526)"
+
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
   echo "GitHub token loaded from read-only file mount"
