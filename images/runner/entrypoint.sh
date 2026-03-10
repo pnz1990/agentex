@@ -1821,11 +1821,28 @@ get_mentor_insight() {
 
   # Step 2: List S3 identities (newest first, sample up to 30 to stay fast)
   # Limit: 30 identities × ~200ms/S3-read = ~6s max. Graceful degradation if slow.
+  # Per-session files: identities/<agentName>.json  (non-recursive ls finds these)
+  # Canonical files:   identities/canonical/<displayName>.json  (need separate ls)
+  # Issue #1520: aws s3 ls is non-recursive, so identities/canonical/ is returned as
+  # a directory prefix and its contents are SKIPPED. We must also list canonical/ explicitly.
   local identity_keys
   identity_keys=$(timeout 10s aws s3 ls "s3://${S3_BUCKET}/identities/" \
     --region "$BEDROCK_REGION" 2>/dev/null | \
-    sort -k1,2 -r | awk '{print $4}' | head -30 || echo "")
-  if [ -z "$identity_keys" ]; then
+    sort -k1,2 -r | awk '{print $4}' | head -20 || echo "")
+
+  # Also include canonical identity files — these have accumulated specialization history
+  # across all sessions using a given display name. After PR #1486/#1514 merges, canonical
+  # files become the primary record of specialization. Prefix canonical/ to distinguish path.
+  local canonical_keys
+  canonical_keys=$(timeout 10s aws s3 ls "s3://${S3_BUCKET}/identities/canonical/" \
+    --region "$BEDROCK_REGION" 2>/dev/null | \
+    sort -k1,2 -r | awk '{print "canonical/"$4}' | head -20 || echo "")
+
+  # Merge: per-session first (20), then canonical (20), deduplicated by display name later
+  local all_identity_keys
+  all_identity_keys=$(printf "%s\n%s" "$identity_keys" "$canonical_keys" | grep -v '^$' | head -30)
+
+  if [ -z "$all_identity_keys" ]; then
     log "Mentorship: no identity files found in S3 — skipping"
     return 0
   fi
@@ -1834,10 +1851,14 @@ get_mentor_insight() {
   local best_agent="" best_display="" best_score=0 best_spec=""
   while IFS= read -r identity_key; do
     [ -z "$identity_key" ] && continue
-    # Skip own identity
+    # Skip own per-session identity
     [[ "$identity_key" == "${AGENT_NAME}.json" ]] && continue
+    # Skip canonical entry for own display name
+    [[ "$identity_key" == "canonical/${AGENT_DISPLAY_NAME}.json" ]] && continue
 
     local identity_json
+    # Both per-session (identities/<name>.json) and canonical (identities/canonical/<name>.json)
+    # use the same base path since canonical/ is a subdirectory under identities/.
     identity_json=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
       --region "$BEDROCK_REGION" 2>/dev/null || echo "")
     [ -z "$identity_json" ] && continue
@@ -1873,8 +1894,13 @@ get_mentor_insight() {
       best_agent="$agent_name"
       best_display="$display_name"
       best_spec="${spec:-$issue_labels}"
+    elif [ "$score" -eq "$best_score" ] && [ "$score" -gt 0 ] && [[ "$identity_key" == canonical/* ]]; then
+      # Canonical entry for the same score: prefer canonical (accumulated history) over per-session
+      best_agent="$agent_name"
+      best_display="$display_name"
+      best_spec="${spec:-$issue_labels}"
     fi
-  done <<< "$identity_keys"
+  done <<< "$all_identity_keys"
 
   if [ -z "$best_agent" ] || [ "$best_score" -eq 0 ]; then
     log "Mentorship: no matching specialist found for issue #$issue_num labels ($issue_labels)"
