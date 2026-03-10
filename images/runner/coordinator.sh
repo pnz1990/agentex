@@ -647,11 +647,14 @@ sync_constitution_to_git() {
         return 1
     fi
     
-    # Update constitution.yaml — surgically update only the changed keys (issue #1317)
-    # Strategy: parse kv_pairs to find which keys changed, then use sed to update ONLY
-    # those keys in the existing file. This preserves all comments, annotations, and
-    # documentation. Previously used head -16 + full data rebuild which DESTROYED all docs.
+    # Update constitution.yaml AND chart/values.yaml — surgically update only the changed
+    # keys (issue #1317). Strategy: parse kv_pairs to find which keys changed, then use
+    # sed to update ONLY those keys in each file. This preserves all comments, annotations,
+    # and documentation. Both files use "  key: "value"" (2-space indent) for governance keys.
+    # chart/values.yaml must also be updated so fresh helm installs reflect governance
+    # decisions (issue #1408).
     local constitution_file="manifests/system/constitution.yaml"
+    local values_file="chart/values.yaml"
     
     # Parse kv_pairs (format: "key1=value1 key2=value2") and update each changed key.
     # Skip meta-keys that are not real constitution fields (reason=, proposalRef=).
@@ -668,24 +671,33 @@ sync_constitution_to_git() {
             [ "$key" = "$mk" ] && is_meta=true && break
         done
         "$is_meta" && continue
+        # Escape any forward slashes in value for sed
+        local escaped_value
+        escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
         # Surgically update the key in constitution.yaml using sed
         # Pattern: "  key: ..." (exactly 2-space indent, matches data section keys)
         # The sed replacement preserves the line format with quoted value
         if grep -q "^  ${key}: " "$constitution_file" 2>/dev/null; then
-            # Escape any forward slashes in value for sed
-            local escaped_value
-            escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
             sed -i "s/^  ${key}: .*$/  ${key}: \"${escaped_value}\"/" "$constitution_file"
             echo "[$(date -u +%H:%M:%S)] ✓ Updated constitution.yaml: ${key}=${value}"
             updated_any=true
         else
             echo "[$(date -u +%H:%M:%S)] WARNING: key '${key}' not found in constitution.yaml — skipping"
         fi
+        # Also update chart/values.yaml with the same surgical sed pattern (issue #1408)
+        # Both files use "  key: "value"" (2-space indent) for governance-affected keys.
+        # This ensures fresh helm installs reflect enacted governance decisions.
+        if grep -q "^  ${key}: " "$values_file" 2>/dev/null; then
+            sed -i "s/^  ${key}: .*$/  ${key}: \"${escaped_value}\"/" "$values_file"
+            echo "[$(date -u +%H:%M:%S)] ✓ Updated chart/values.yaml: ${key}=${value}"
+        else
+            echo "[$(date -u +%H:%M:%S)] INFO: key '${key}' not in chart/values.yaml — skipping (constitution-only key)"
+        fi
     done <<< "$(echo "$kv_pairs" | tr ' ' '\n')"
     
-    # Check if there are changes
-    if ! git diff --quiet "$constitution_file"; then
-        git add "$constitution_file"
+    # Check if there are changes (either file)
+    if ! git diff --quiet "$constitution_file" || ! git diff --quiet "$values_file"; then
+        git add "$constitution_file" "$values_file"
         
         # Build commit message
         local commit_msg="chore: sync constitution.yaml with enacted governance decision
@@ -698,7 +710,11 @@ This commit syncs the git repo with the cluster ConfigMap after
 governance enactment. Without this sync, fresh installs would revert
 the civilization's collective decisions.
 
-Fixes #893"
+Both manifests/system/constitution.yaml and chart/values.yaml are updated
+so that both kubectl-apply and helm-install installations stay in sync.
+
+Fixes #893
+Fixes #1408"
         
         git commit -m "$commit_msg" 2>/dev/null || return 1
         
@@ -724,7 +740,7 @@ Fixes #893"
                     --title "${pr_title}" \
                     --body "## Governance Enactment Sync
 
-This PR syncs \`manifests/system/constitution.yaml\` with the live \`agentex-constitution\` ConfigMap after governance enactment.
+This PR syncs \`manifests/system/constitution.yaml\` and \`chart/values.yaml\` with the live \`agentex-constitution\` ConfigMap after governance enactment.
 
 **Enacted changes:**
 \`\`\`
@@ -737,9 +753,9 @@ ${kv_pairs}
 - Enactment timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 **Why this matters:**
-Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization.
+Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization. Fresh Helm installs (\`helm install agentex ./chart\`) would also use stale defaults from \`chart/values.yaml\` without this fix.
 
-**Related:** Issue #893, Issue #891 (constitution drift detection)
+**Related:** Issue #893, Issue #891 (constitution drift detection), Issue #1408 (values.yaml drift)
 
 **Auto-merge eligible:** This is a data sync PR (not protected file) reflecting already-enacted governance. Safe to merge immediately." \
                     --head "$branch_name" \
@@ -759,7 +775,7 @@ Without this sync, the git repo drifts from cluster state. Fresh installs using 
             return 1
         fi
     else
-        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml (already synced)"
+        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml or chart/values.yaml (already synced)"
     fi
     
     cd / && rm -rf "$workspace"
