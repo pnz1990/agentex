@@ -1506,20 +1506,25 @@ tally_and_enact_votes() {
      # and ensures vote totals are complete even after coordinator restart (voteRegistry reset).
      local cutoff_24h
      cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-     if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
-       # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h)
-       # The 5-min buffer handles clock skew and thoughts created just before last tally.
-       local last_tally_minus5m
-       last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
-       # Compare: use 24h window if lastTallyTimestamp is older than 24h
-       if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
-         tally_cutoff_ts="$cutoff_24h"
-       else
-         tally_cutoff_ts="$last_tally_minus5m"
-       fi
-     else
-       tally_cutoff_ts="$cutoff_24h"
-     fi
+      if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
+        # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h)
+        # "Earlier" means further back in time — the timestamp that is LESS THAN the other.
+        # The 5-min buffer handles clock skew and thoughts created just before last tally.
+        # The 24h floor ensures vote counts remain complete after coordinator restart.
+        # We want the BROADER window (further back in time) to catch more votes.
+        local last_tally_minus5m
+        last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
+        # Issue #1712: Use the EARLIER (less restrictive) of the two cutoffs.
+        # If last_tally_minus5m < cutoff_24h, then last_tally_minus5m is further back in
+        # time — use it for a broader window. Otherwise use cutoff_24h as the 24h floor.
+        if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
+          tally_cutoff_ts="$last_tally_minus5m"  # broader window (further back in time)
+        else
+          tally_cutoff_ts="$cutoff_24h"  # 24h floor is broader (coordinator recently restarted)
+        fi
+      else
+        tally_cutoff_ts="$cutoff_24h"
+      fi
 
      kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
          | jq --arg cutoff "$tally_cutoff_ts" '[.items[] |
@@ -1544,17 +1549,29 @@ tally_and_enact_votes() {
         echo "[$(date -u +%H:%M:%S)] No new governance thoughts since ${tally_cutoff_ts:-startup} — skipping tally"
         return 0
     fi
-    echo "[$(date -u +%H:%M:%S)] Loaded $thought_count thoughts for tally (since ${tally_cutoff_ts:-epoch})"
+     echo "[$(date -u +%H:%M:%S)] Loaded $thought_count thoughts for tally (since ${tally_cutoff_ts:-epoch})"
 
-    # Extract all unique proposal topics from #proposal-<topic> tags
+    # Extract all unique proposal topics from #proposal-<topic> tags in the time window
     local topics
     topics=$(jq -r '.[] | select(.type == "proposal") | .content' "$thoughts_file" \
         | grep -oE '#proposal-[a-zA-Z0-9_-]+' \
         | sed 's/#proposal-//' \
         | sort -u 2>/dev/null || true)
 
+    # Issue #1711: Also extract topics from VOTE thoughts in the window.
+    # If a proposal is older than the tally window, it won't appear above, but its
+    # recent votes will. Extract voted topics and add them to the set to process.
+    local voted_topics
+    voted_topics=$(jq -r '.[] | select(.type == "vote") | .content' "$thoughts_file" \
+        | grep -oE '#vote-[a-zA-Z0-9_-]+' \
+        | sed 's/#vote-//' \
+        | sort -u 2>/dev/null || true)
+    if [ -n "$voted_topics" ]; then
+        topics=$(printf '%s\n%s\n' "$topics" "$voted_topics" | sort -u | grep -v '^$' || true)
+    fi
+
     if [ -z "$topics" ]; then
-        echo "[$(date -u +%H:%M:%S)] No active proposals found"
+        echo "[$(date -u +%H:%M:%S)] No active proposals or votes found"
         return 0
     fi
 
@@ -1604,6 +1621,19 @@ tally_and_enact_votes() {
         any_proposal=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
             "$thoughts_file" 2>/dev/null \
             | grep "^#proposal-${topic}" | head -1 || true)
+
+        # Issue #1711: If proposal is older than the tally window, it won't appear in
+        # thoughts_file (which is filtered by tally_cutoff_ts). But recent votes for the
+        # proposal ARE within the window — do a full-history proposal lookup to avoid
+        # skipping a valid proposal that has accumulated votes over time.
+        if [ -z "$any_proposal" ]; then
+            any_proposal=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+                | jq -r '.items[] | select(.data.thoughtType == "proposal") | .data.content' \
+                | grep "^#proposal-${topic}" | head -1 || true)
+            if [ -n "$any_proposal" ]; then
+                echo "[$(date -u +%H:%M:%S)] Found older proposal for $topic via full-history scan"
+            fi
+        fi
 
         [ -z "$any_proposal" ] && continue
 
