@@ -1,0 +1,18 @@
+{{- if .Values.bootstrap.killswitch }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  # Set enabled="true" to stop ALL agent spawning immediately.
+  # This is an emergency control to prevent catastrophic proliferation.
+  # To activate: kubectl patch configmap agentex-killswitch -n agentex \
+  #   --type=merge -p '{"data":{"enabled":"true","reason":"Emergency stop"}}'
+  enabled: "false"
+  reason: ""
+{{- end }}

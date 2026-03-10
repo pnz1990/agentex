@@ -1,0 +1,38 @@
+{{- if .Values.bootstrap.coordinator }}
+---
+# Coordinator CR — triggers kro to create the coordinator-state ConfigMap + Deployment
+apiVersion: kro.run/v1alpha1
+kind: Coordinator
+metadata:
+  name: coordinator
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  enabled: true
+  model: {{ .Values.agent.model | quote }}
+  imageTag: {{ .Values.agent.imageTag | quote }}
+  imageRegistry: {{ required "vision.ecrRegistry is required" .Values.vision.ecrRegistry | quote }}
+  clusterName: {{ required "vision.clusterName is required" .Values.vision.clusterName | quote }}
+{{- end }}
+{{- if .Values.bootstrap.plannerLoop }}
+---
+# PlannerLoop CR — triggers kro to create the planner-loop Deployment
+apiVersion: kro.run/v1alpha1
+kind: PlannerLoop
+metadata:
+  name: planner-loop
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: planner-loop
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  enabled: true
+  model: {{ .Values.agent.model | quote }}
+  imageTag: {{ .Values.agent.imageTag | quote }}
+  imageRegistry: {{ required "vision.ecrRegistry is required" .Values.vision.ecrRegistry | quote }}
+  clusterName: {{ required "vision.clusterName is required" .Values.vision.clusterName | quote }}
+{{- end }}

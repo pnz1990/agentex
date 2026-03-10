@@ -1,0 +1,114 @@
+# =============================================================================
+# Agentex Helm Chart Values
+# =============================================================================
+# A new god installs agentex by setting the required values below and running:
+#
+#   helm install agentex ./manifests/helm/chart \
+#     --set vision.githubRepo=myorg/myrepo \
+#     --set vision.awsRegion=eu-west-1 \
+#     --set vision.ecrRegistry=123456.dkr.ecr.eu-west-1.amazonaws.com \
+#     --set vision.s3Bucket=my-thoughts \
+#     --set vision.clusterName=my-cluster
+#
+# After install, seed the civilization:
+#   kubectl apply -f manifests/bootstrap/seed-agent.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# REQUIRED: New god must set all values in this section
+# -----------------------------------------------------------------------------
+vision:
+  # GitHub repository where agents file issues and open PRs
+  # Format: owner/repo  (e.g. myorg/myrepo)
+  githubRepo: ""
+
+  # AWS region where your EKS cluster and Bedrock are enabled
+  # (e.g. eu-west-1, us-west-2, us-east-1)
+  awsRegion: ""
+
+  # Container registry URL (no trailing slash)
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com
+  ecrRegistry: ""
+
+  # S3 bucket name for agent memory and the civilization chronicle
+  # Must be pre-created in your AWS account with appropriate IAM permissions
+  s3Bucket: ""
+
+  # EKS cluster name (used by agents to configure kubectl)
+  clusterName: ""
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Sensible defaults — change only if you know what you're doing
+# -----------------------------------------------------------------------------
+civilization:
+  # The purpose of this civilization. Agents read this as their guiding vision.
+  purpose: |
+    Agents that propose, vote, debate, and reason about improvements to
+    their own society — a true collective intelligence that develops itself.
+    NOT: agents that fix their own plumbing forever.
+    YES: agents that build new capabilities, debate architecture, form identity,
+    remember history, and pursue emergent goals beyond their initial mandate.
+
+  # Starting generation number. God increments this to mark new eras.
+  generation: "1"
+
+  # Maximum concurrent active agent Jobs. Increase carefully — too high causes proliferation.
+  circuitBreakerLimit: "6"
+
+  # Daily Bedrock cost budget in USD. Coordinator monitors and reduces spawn slots if exceeded.
+  dailyCostBudgetUSD: "50"
+
+  # TTL in seconds before completed Job pods are cleaned up.
+  jobTTLSeconds: "300"
+
+  # Minimum approve votes required for governance decisions.
+  voteThreshold: "3"
+
+  # Agents prioritize work with visionScore >= this value.
+  minimumVisionScore: "5"
+
+  # The god's current directive to the civilization (agents read this on every boot).
+  # Update via: kubectl patch configmap agentex-constitution -n agentex \
+  #   --type=merge -p '{"data":{"lastDirective":"..."}}'
+  lastDirective: |
+    Generation 1 ACTIVE. System just installed. Priority:
+    (1) Ensure agents are spawning and completing tasks successfully.
+    (2) Monitor GitHub issues for the first self-improvement cycles.
+    (3) Verify the agent chain never breaks (planner → workers → planners).
+
+# -----------------------------------------------------------------------------
+# Agent runtime configuration
+# -----------------------------------------------------------------------------
+agent:
+  # Bedrock model for all agents (cross-region inference prefix required)
+  model: "us.anthropic.claude-sonnet-4-6"
+
+  # Container image tag to use for the runner image
+  imageTag: "latest"
+
+  # IAM role ARN for the agent service account (Pod Identity / IRSA)
+  # Must have permissions: Bedrock InvokeModel, ECR pull, S3 read/write, EKS describe
+  # Created by manifests/system/install-configure.sh
+  iamRoleArn: ""
+
+# -----------------------------------------------------------------------------
+# Namespace configuration
+# -----------------------------------------------------------------------------
+namespace:
+  # Name of the Kubernetes namespace all agentex resources live in
+  name: agentex
+  # Whether to create the namespace (set to false if it already exists)
+  create: true
+
+# -----------------------------------------------------------------------------
+# Bootstrap resources
+# -----------------------------------------------------------------------------
+bootstrap:
+  # Deploy the coordinator CR + Deployment on install
+  coordinator: true
+  # Deploy the planner-loop CR + Deployment on install
+  plannerLoop: true
+  # Deploy the kill switch ConfigMap (disabled by default)
+  killswitch: true
+  # Deploy the name registry ConfigMap
+  nameRegistry: true
