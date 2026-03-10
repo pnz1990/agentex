@@ -428,38 +428,75 @@ refresh_task_queue() {
     fi
 
     # Build scored list: "score:number"
-    local scored_issues=""
-    local numbers
-    
-    # Issue #960 fix: Always include unlabeled issues in the queue to prevent starvation.
-    # Strategy: Query ALL open issues, then filter out meta-issues only.
-    # This ensures queue is never empty when actionable work exists.
-    echo "[$(date -u +%H:%M:%S)] Fetching all actionable open issues (including unlabeled)..."
-    numbers=$(echo "$issues_json" | jq -r '.[] |
-        select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
-        .number' 2>/dev/null | head -20)
+     local scored_issues=""
+     local numbers
+     # Issue #1442: Accumulate labels for bulk cache update after loop
+     local labels_cache_updates=""
+     
+     # Issue #960 fix: Always include unlabeled issues in the queue to prevent starvation.
+     # Strategy: Query ALL open issues, then filter out meta-issues only.
+     # This ensures queue is never empty when actionable work exists.
+     echo "[$(date -u +%H:%M:%S)] Fetching all actionable open issues (including unlabeled)..."
+     numbers=$(echo "$issues_json" | jq -r '.[] |
+         select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
+         .number' 2>/dev/null | head -20)
 
-    for num in $numbers; do
-        # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
-        if echo " $covered_issues " | grep -q " $num "; then
-            echo "[$(date -u +%H:%M:%S)] Issue #1384: Skipping issue #$num — open PR already exists"
-            continue
-        fi
+     for num in $numbers; do
+         # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
+         if echo " $covered_issues " | grep -q " $num "; then
+             echo "[$(date -u +%H:%M:%S)] Issue #1384: Skipping issue #$num — open PR already exists"
+             continue
+         fi
 
-        # Score based on labels already fetched (avoid extra API calls)
-        local labels
-        labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
+         # Score based on labels already fetched (avoid extra API calls)
+         local labels
+         labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
 
-        local best_score=5
-        for entry in "${VISION_PRIORITY_LABELS[@]}"; do
-            local label="${entry%%:*}"
-            local score="${entry##*:}"
-            if echo "$labels" | grep -qi "$label"; then
-                [ "$score" -gt "$best_score" ] && best_score="$score"
-            fi
-        done
-        scored_issues="${scored_issues}${best_score}:${num}\n"
-    done
+         # Issue #1442: Accumulate label cache entries using data already fetched (no extra API call)
+         # This pre-populates issueLabels so agents can find labels at claim time without GitHub API
+         labels_cache_updates="${labels_cache_updates}${num}:${labels}|"
+
+         local best_score=5
+         for entry in "${VISION_PRIORITY_LABELS[@]}"; do
+             local label="${entry%%:*}"
+             local score="${entry##*:}"
+             if echo "$labels" | grep -qi "$label"; then
+                 [ "$score" -gt "$best_score" ] && best_score="$score"
+             fi
+         done
+         scored_issues="${scored_issues}${best_score}:${num}\n"
+     done
+
+     # Issue #1442: Bulk-update issueLabels cache with labels fetched above (zero extra API calls).
+     # Merge new entries into existing cache: keep entries for issues NOT in this refresh batch
+     # (those may be older claimed issues), then append/overwrite the freshly-fetched entries.
+     if [ -n "$labels_cache_updates" ]; then
+         local existing_cache
+         existing_cache=$(get_state "issueLabels" 2>/dev/null || echo "")
+         # Build updated cache: start with existing entries for issues not in this batch
+         # then append new entries from this refresh (which overwrite stale entries)
+         local refreshed_nums
+         refreshed_nums=$(echo "$labels_cache_updates" | tr '|' '\n' | cut -d: -f1 | grep -v '^$' | tr '\n' '|')
+         local preserved_entries=""
+         if [ -n "$existing_cache" ]; then
+             preserved_entries=$(echo "$existing_cache" | tr '|' '\n' | while IFS= read -r entry; do
+                 [ -z "$entry" ] && continue
+                 local en
+                 en="${entry%%:*}"
+                 # Only keep if NOT in this refresh batch (to avoid stale entries)
+                 if ! echo "$refreshed_nums" | tr '|' '\n' | grep -q "^${en}$"; then
+                     printf '%s|' "$entry"
+                 fi
+             done)
+         fi
+         local new_cache="${preserved_entries}${labels_cache_updates%|}"
+         # Truncate to prevent coordinator-state ConfigMap from exceeding size limits (~200 entries)
+         new_cache=$(echo "$new_cache" | tr '|' '\n' | grep -v '^$' | tail -200 | tr '\n' '|' | sed 's/|$//')
+         update_state "issueLabels" "$new_cache"
+         local cache_count
+         cache_count=$(echo "$new_cache" | tr '|' '\n' | grep -v '^$' | wc -l | tr -d ' ')
+         echo "[$(date -u +%H:%M:%S)] Issue #1442: Pre-populated issueLabels cache with $cache_count entries"
+     fi
 
     if [ -n "$scored_issues" ]; then
         # Sort by score descending, extract issue numbers
