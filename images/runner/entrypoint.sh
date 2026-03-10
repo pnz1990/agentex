@@ -1747,42 +1747,51 @@ release_coordinator_task() {
 }
 
 # register_with_coordinator() - Announce this agent's presence to the coordinator
-register_with_coordinator() {
-  local current
-  current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-    -o jsonpath='{.data.activeAgents}' 2>/dev/null || echo "")
+ register_with_coordinator() {
+   local current
+   current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+     -o jsonpath='{.data.activeAgents}' 2>/dev/null || echo "")
 
-  local new_val
-  if [ -z "$current" ]; then
-    new_val="${AGENT_NAME}:${AGENT_ROLE}"
-  else
-    # Deduplicate: remove any prior entry for this agent then add fresh
-    # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
-    # (no matches), which would crash the script under set -euo pipefail
-    new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
-    new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
-    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
-  fi
+   # Issue #1515: Include displayName as 3rd field ("name:role:displayName") so that
+   # find_best_agent_for_issue() can pass it to score_agent_for_issue() for canonical S3 lookup.
+   # New pods have no per-session S3 file yet (written at exit), but canonical history exists
+   # under displayName. Without this, routing always returns score=0 for new agent pods.
+   local agent_entry="${AGENT_NAME}:${AGENT_ROLE}"
+   if [ -n "${AGENT_DISPLAY_NAME:-}" ] && [ "${AGENT_DISPLAY_NAME}" != "${AGENT_NAME}" ]; then
+     agent_entry="${AGENT_NAME}:${AGENT_ROLE}:${AGENT_DISPLAY_NAME}"
+   fi
 
-  # Build patch data — include lastPlannerSeen timestamp for planners (issue #1274)
-  local patch_data="{\"data\":{\"activeAgents\":\"${new_val}\"}}"
-  if [ "${AGENT_ROLE}" = "planner" ]; then
-    local ts
-    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    patch_data="{\"data\":{\"activeAgents\":\"${new_val}\",\"lastPlannerSeen\":\"${ts}\"}}"
-  fi
+   local new_val
+   if [ -z "$current" ]; then
+     new_val="$agent_entry"
+   else
+     # Deduplicate: remove any prior entry for this agent then add fresh
+     # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
+     # (no matches), which would crash the script under set -euo pipefail
+     new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
+     new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
+     [ -n "$new_val" ] && new_val="${new_val},${agent_entry}" || new_val="${agent_entry}"
+   fi
 
-  local err_output
-  if ! err_output=$(kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
-    --type=merge -p "${patch_data}" 2>&1); then
-    log "WARNING: Failed to register with coordinator: $err_output"
-    return 1
-  fi
-  
-  log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE})"
-  [ "${AGENT_ROLE}" = "planner" ] && log "Coordinator: updated lastPlannerSeen=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  return 0
-}
+   # Build patch data — include lastPlannerSeen timestamp for planners (issue #1274)
+   local patch_data="{\"data\":{\"activeAgents\":\"${new_val}\"}}"
+   if [ "${AGENT_ROLE}" = "planner" ]; then
+     local ts
+     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+     patch_data="{\"data\":{\"activeAgents\":\"${new_val}\",\"lastPlannerSeen\":\"${ts}\"}}"
+   fi
+
+   local err_output
+   if ! err_output=$(kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+     --type=merge -p "${patch_data}" 2>&1); then
+     log "WARNING: Failed to register with coordinator: $err_output"
+     return 1
+   fi
+   
+   log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE}) displayName=${AGENT_DISPLAY_NAME:-unset}"
+   [ "${AGENT_ROLE}" = "planner" ] && log "Coordinator: updated lastPlannerSeen=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   return 0
+ }
 
 # get_mentor_insight() - Find predecessor mentor for an issue (issue #1228)
 # Predecessor mentorship: when an agent claims an issue, we look up S3 identities

@@ -2012,41 +2012,55 @@ update_identity_bucket_from_constitution() {
 #   $2 - issue_number
 #   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
 #   $4 - issue_keywords (space-separated keywords from title/body)
+#   $5 - display_name (optional: persistent display name from registry, e.g., worker-deep-cipher)
+#          If provided, canonical history at identities/canonical/<displayName>.json is checked
+#          EVEN when the agent has no per-session file (new pod). This is the primary fix
+#          for issue #1515: new agents always have empty per-session files, but may have
+#          accumulated specialization history under their displayName across prior sessions.
 # Returns: integer score via stdout (0 if agent has no specialization data)
 #
-# Issue #1475: canonical history lookup.
+# Issue #1475/#1515: canonical history lookup — two paths required.
 # Agents are ephemeral (new agent_name per pod). Specialization history accumulates
-# per-session and is written at exit. A new worker pod has no identity file yet.
-# Fix: after reading agent_name file (may be empty for new pods), also check the
-# canonical history file at identities/canonical/<displayName>.json (written by
-# save_identity() since PR #1489). This allows returning workers (who reclaim a
-# display name) to have their historical specialization considered immediately.
+# per-session under identities/canonical/<displayName>.json (written at exit by identity.sh).
+# A new pod has NO per-session S3 file yet. The fix must try canonical UNCONDITIONALLY
+# when displayName is known (passed as arg 5 from find_best_agent_for_issue).
 score_agent_for_issue() {
     local agent_name="$1"
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    local display_name="${5:-}"  # Issue #1515: passed from find_best_agent_for_issue
 
-    # Read agent identity from S3 — first try per-session file (may be empty for new agents)
+    # Issue #1515: If displayName is known, try canonical history FIRST (unconditionally).
+    # New pods have no per-session file — per-session file is only written at agent EXIT.
+    # Canonical path accumulates specialization across all sessions under same displayName.
     local identity_json=""
-    identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
-        --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        if [ -n "$identity_json" ]; then
+            echo "[$(date -u +%H:%M:%S)] Routing: using canonical history for $agent_name (displayName=$display_name)" >&2
+        fi
+    fi
 
-    # Issue #1475: if per-session file exists, try to upgrade to canonical history.
-    # The per-session file contains only THIS session's data (usually empty for new agents).
-    # The canonical file at identities/canonical/<displayName>.json contains accumulated
-    # history across all sessions using this display name (written by identity.sh PR #1489).
-    if [ -n "$identity_json" ]; then
-        local display_name
-        display_name=$(echo "$identity_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
-        if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
-            local canonical_json
-            canonical_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
-                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-            if [ -n "$canonical_json" ]; then
-                # Use canonical (accumulated) history instead of per-session (fresh) file
-                identity_json="$canonical_json"
-                echo "[$(date -u +%H:%M:%S)] Routing: using canonical history for $agent_name (displayName=$display_name)" >&2
+    # Fall back to per-session file (may have specialization if agent ran multiple tasks,
+    # or as a backwards-compatibility path when displayName is not passed by caller).
+    if [ -z "$identity_json" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        # If per-session file loaded and has a displayName, upgrade to canonical history
+        # (backwards-compat path for callers that don't pass displayName as arg 5).
+        if [ -n "$identity_json" ]; then
+            local inferred_display
+            inferred_display=$(echo "$identity_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+            if [ -n "$inferred_display" ] && [ "$inferred_display" != "$agent_name" ]; then
+                local canonical_json
+                canonical_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${inferred_display}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+                if [ -n "$canonical_json" ]; then
+                    identity_json="$canonical_json"
+                    echo "[$(date -u +%H:%M:%S)] Routing: upgraded to canonical history for $agent_name (displayName=$inferred_display)" >&2
+                fi
             fi
         fi
     fi
@@ -2148,59 +2162,64 @@ extract_issue_keywords() {
 #   $2 - issue_labels (comma-separated)
 #   $3 - active_assignments (pre-fetched from caller to avoid redundant kubectl calls, issue #1478)
 # Returns: best agent name if score > threshold, empty string otherwise
-find_best_agent_for_issue() {
-    local issue_number="$1"
-    local issue_labels="$2"
-    local active_assignments="${3:-}"  # Issue #1478: passed from caller to avoid N redundant get_state calls
+ find_best_agent_for_issue() {
+     local issue_number="$1"
+     local issue_labels="$2"
+     local active_assignments="${3:-}"  # Issue #1478: passed from caller to avoid N redundant get_state calls
 
-    # Get active agents
-    local active_agents
-    active_agents=$(get_state "activeAgents")
-    if [ -z "$active_agents" ]; then
-        echo ""
-        return 0
-    fi
+     # Get active agents
+     local active_agents
+     active_agents=$(get_state "activeAgents")
+     if [ -z "$active_agents" ]; then
+         echo ""
+         return 0
+     fi
 
-    # If caller didn't pass active_assignments, fetch once here (fallback for direct calls)
-    if [ -z "$active_assignments" ]; then
-        active_assignments=$(get_state "activeAssignments")
-    fi
+     # If caller didn't pass active_assignments, fetch once here (fallback for direct calls)
+     if [ -z "$active_assignments" ]; then
+         active_assignments=$(get_state "activeAssignments")
+     fi
 
-    # Extract issue keywords (limit API calls by calling once)
-    local issue_keywords
-    issue_keywords=$(extract_issue_keywords "$issue_number")
+     # Extract issue keywords (limit API calls by calling once)
+     local issue_keywords
+     issue_keywords=$(extract_issue_keywords "$issue_number")
 
-    local best_agent=""
-    local best_score=0
+     local best_agent=""
+     local best_score=0
 
-    IFS=',' read -ra agent_pairs <<< "$active_agents"
-    for pair in "${agent_pairs[@]}"; do
-        [ -z "$pair" ] && continue
-        local agent_name="${pair%%:*}"
-        # Use cut for role: supports both "name:role" and future "name:role:displayName" format
-        local agent_role
-        agent_role=$(echo "$pair" | cut -d: -f2)
+     IFS=',' read -ra agent_pairs <<< "$active_agents"
+     for pair in "${agent_pairs[@]}"; do
+         [ -z "$pair" ] && continue
+         # Issue #1515: support "name:role:displayName" triplet format registered by entrypoint.sh
+         # This allows score_agent_for_issue() to try canonical S3 lookup unconditionally,
+         # even when the agent has no per-session file (new pod at session start).
+         local agent_name="${pair%%:*}"
+         # Extract role (field 2) and optional displayName (field 3)
+         local agent_role
+         agent_role=$(echo "$pair" | cut -d: -f2 | tr -d ' ')
+         local agent_display_name
+         agent_display_name=$(echo "$pair" | cut -d: -f3 | tr -d ' ')
 
-        # Only consider worker agents for specialization routing
-        [ "$agent_role" != "worker" ] && continue
+         # Only consider worker agents for specialization routing
+         [ "$agent_role" != "worker" ] && continue
 
-        # Don't route to agents that already have assignments
-        # Issue #1478: use pre-fetched active_assignments instead of calling get_state N times
-        if echo "$active_assignments" | grep -q "${agent_name}:"; then
-            continue
-        fi
+         # Don't route to agents that already have assignments
+         # Issue #1478: use pre-fetched active_assignments instead of calling get_state N times
+         if echo "$active_assignments" | grep -q "${agent_name}:"; then
+             continue
+         fi
 
-        local agent_score
-        agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+         local agent_score
+         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
+             "$issue_labels" "$issue_keywords" "$agent_display_name")
 
-        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
+         echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
 
-        if [ "$agent_score" -gt "$best_score" ]; then
-            best_score="$agent_score"
-            best_agent="$agent_name"
-        fi
-    done
+         if [ "$agent_score" -gt "$best_score" ]; then
+             best_score="$agent_score"
+             best_agent="$agent_name"
+         fi
+     done
 
     # Only return if score exceeds threshold
     if [ "$best_score" -gt "$SPECIALIZATION_ROUTING_THRESHOLD" ]; then
@@ -2328,32 +2347,45 @@ route_tasks_by_specialization() {
         for pair in "${agent_pairs[@]}"; do
             [ -z "$pair" ] && continue
             local aname
-            aname=$(echo "$pair" | cut -d: -f1)
+            aname=$(echo "$pair" | cut -d: -f1 | tr -d ' ')
             [ -z "$aname" ] && continue
             agents_checked=$((agents_checked + 1))
 
+            # Issue #1515: extract displayName from triplet "name:role:displayName" if present.
+            # This allows canonical lookup without needing per-session file.
+            local adisp_from_triplet
+            adisp_from_triplet=$(echo "$pair" | cut -d: -f3 | tr -d ' ')
+
             local spec_data=""
-            # Issue #1517: try canonical path first (persistent cross-generation history),
-            # then fall back to per-session path. Per-session files are empty for new agents,
-            # causing the diagnostic to always report 0 agents with spec data.
-            # Step 1: try to get displayName from per-session file
-            local per_session_json=""
-            per_session_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
-                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-            if [ -n "$per_session_json" ]; then
-                # Check per-session file for spec data first
-                spec_data=$(echo "$per_session_json" | \
+            # Issue #1515/#1517: try canonical path FIRST using displayName from registration triplet.
+            # New agents have empty per-session files — canonical is the only path with history.
+            if [ -n "$adisp_from_triplet" ] && [ "$adisp_from_triplet" != "$aname" ]; then
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${adisp_from_triplet}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null | \
                     jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
                     2>/dev/null || echo "")
-                # If no spec in per-session, try canonical path using displayName
-                if [ -z "$spec_data" ]; then
-                    local adisp
-                    adisp=$(echo "$per_session_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
-                    if [ -n "$adisp" ] && [ "$adisp" != "$aname" ]; then
-                        spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${adisp}.json" - \
-                            --region "$BEDROCK_REGION" 2>/dev/null | \
-                            jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
-                            2>/dev/null || echo "")
+            fi
+
+            # Fall back to per-session file (for agents without displayName in registration, or new agents)
+            if [ -z "$spec_data" ]; then
+                local per_session_json=""
+                per_session_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+                if [ -n "$per_session_json" ]; then
+                    # Check per-session file for spec data first
+                    spec_data=$(echo "$per_session_json" | \
+                        jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                        2>/dev/null || echo "")
+                    # If no spec in per-session, try canonical path using displayName from file
+                    if [ -z "$spec_data" ]; then
+                        local adisp
+                        adisp=$(echo "$per_session_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+                        if [ -n "$adisp" ] && [ "$adisp" != "$aname" ]; then
+                            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${adisp}.json" - \
+                                --region "$BEDROCK_REGION" 2>/dev/null | \
+                                jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                                2>/dev/null || echo "")
+                        fi
                     fi
                 fi
             fi
