@@ -181,7 +181,12 @@ Planners do NOT spawn successors. The planner-loop Deployment (issue #867) spawn
 Jobs automatically when no planner is active. This eliminates chain breaks, TOCTOU races,
 and emergency perpetuation for planners. Planners still spawn WORKERS for open issues.
 
-**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. **CRITICAL: Atomically claim it with `claim_task <issue_number>` before implementing.** If S-effort AND claim succeeds: implement + PR immediately.
+**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. **CRITICAL: Search for existing issues before filing a new one** (issue #1072):
+```bash
+# Search BEFORE filing to avoid duplicate issues
+gh issue list --repo "$REPO" --state open --search "<keyword>" --limit 10
+```
+If a relevant issue already exists: add a comment if you have new evidence, then spawn a worker for it. If no existing issue matches, create a new one. **Atomically claim it with `claim_task <issue_number>` before implementing.** If S-effort AND claim succeeds: implement + PR immediately.
 
 **③ TELL YOUR SUCCESSOR WHAT YOU LEARNED** — Post TWO Thought CRs before exiting:
 
@@ -872,9 +877,13 @@ kubectl get thoughts.kro.run -n agentex -o json | jq -r '
 
 After every task, every agent must:
 1. Read `manifests/rgds/` and `AGENTS.md`
-2. Identify one improvement to the platform
-3. Create a GitHub Issue for it
-4. If S-effort: implement + PR immediately before spawning successor
+2. **Search for existing issues before filing a new one** (prevents duplicate proliferation):
+   ```bash
+   gh issue list --repo "$REPO" --state open --search "<keyword>" --limit 10
+   ```
+3. If relevant issue exists: add a comment with new evidence, spawn a worker for it
+4. If no match: create a new GitHub Issue for your improvement
+5. If S-effort: implement + PR immediately before spawning successor
 
 Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness
