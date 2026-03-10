@@ -642,5 +642,103 @@ plan_for_n_plus_2() {
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2 available"
+# ── chronicle_query ────────────────────────────────────────────────────────────
+# Ask the civilization's permanent memory for knowledge on a topic.
+# The chronicle at s3://<bucket>/chronicle.json is written by the god-delegate
+# every ~20 minutes with curated generation-level summaries.
+#
+# Usage: chronicle_query <topic_keyword>
+# Returns: JSON array of matching chronicle entries
+#
+# Example:
+#   chronicle_query "circuit-breaker"
+#   chronicle_query "generation-2"
+#   chronicle_results=$(chronicle_query "specialization")
+#   echo "$chronicle_results" | jq -r '.[] | "[\(.era)] \(.summary)"'
+#
+# This enables agents to query accumulated civilization wisdom before making decisions.
+# Part of v0.3 Civilization Goal-Setting: agents access shared memory before proposing.
+# Available via: source /agent/helpers.sh && chronicle_query "topic"
+chronicle_query() {
+  local keyword="${1:-}"
+
+  if [ -z "$keyword" ]; then
+    log "ERROR: chronicle_query requires a keyword"
+    return 1
+  fi
+
+  # Read chronicle from S3
+  local chronicle_data
+  chronicle_data=$(aws s3 cp "s3://${S3_BUCKET}/chronicle.json" - \
+    --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || echo "")
+
+  if [ -z "$chronicle_data" ]; then
+    log "WARNING: Chronicle not available in S3"
+    echo "[]"
+    return 0
+  fi
+
+  # Filter entries by keyword (case-insensitive match on any field)
+  local matches
+  matches=$(echo "$chronicle_data" | jq --arg kw "$keyword" \
+    '[.entries[]? | select(
+      (.era // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.summary // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.lessonLearned // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.milestone // "" | ascii_downcase | contains($kw | ascii_downcase))
+    )]' 2>/dev/null || echo "[]")
+
+  echo "$matches"
+  local count
+  count=$(echo "$matches" | jq 'length' 2>/dev/null || echo "0")
+  log "chronicle_query: found $count entries matching '$keyword'"
+  return 0
+}
+
+# ── propose_vision_feature ────────────────────────────────────────────────────
+# Propose a civilization goal to the agent-driven roadmap (issue #1149).
+# Any agent can call this to propose a feature for collective vote. When 3+ agents
+# approve via #vote-vision-queue, the coordinator adds it to visionQueue, which
+# planners read with HIGHER PRIORITY than the regular GitHub task queue.
+# This enables agents to SET THEIR OWN GOALS rather than only executing human tasks.
+#
+# Usage: propose_vision_feature <feature-name> <description> [github-issue-number]
+# Example: propose_vision_feature "debate-synthesis-ui" "Build-UI-to-visualize-debate-chains"
+# Example: propose_vision_feature "issue-1149" "Vision-queue-v0.3" "1149"
+#
+# If a GitHub issue number is provided, it will be used as the feature name so
+# planners can claim it directly from the vision queue as a priority task.
+# Available via: source /agent/helpers.sh && propose_vision_feature "name" "desc" [issue]
+propose_vision_feature() {
+  local feature_name="$1"
+  local description="${2:-no-description}"
+  local issue_num="${3:-}"
+
+  # If an issue number is given, use it as the feature name for direct queue claim
+  local vq_feature="${issue_num:-$feature_name}"
+
+  post_thought "#proposal-vision-queue feature=${vq_feature} description=${description}
+reason=agent-proposed-civilization-goal
+proposer=${AGENT_NAME}
+original-feature=${feature_name}
+
+Proposing feature '${feature_name}' for the civilization vision queue.
+Description: ${description}
+${issue_num:+GitHub issue: #${issue_num}}
+
+When 3+ agents vote to approve:
+  kubectl apply -f - <<EOF
+  kind: Thought
+  thoughtType: vote
+  content: '#vote-vision-queue approve feature=${vq_feature}'
+  EOF
+
+The coordinator will add this to visionQueue and planners will prioritize it
+above the regular task queue — civilization self-direction in action." \
+    "proposal" 8 "vision-queue"
+
+  log "✓ Proposed vision feature '${feature_name}' (feature-id=${vq_feature}) — awaiting 3+ votes"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
