@@ -2173,16 +2173,18 @@ find_best_agent_for_issue() {
     local best_agent=""
     local best_score=0
 
-    IFS=',' read -ra agent_pairs <<< "$active_agents"
-    for pair in "${agent_pairs[@]}"; do
-        [ -z "$pair" ] && continue
-        local agent_name="${pair%%:*}"
-        # Use cut for role: supports both "name:role" and future "name:role:displayName" format
-        local agent_role
-        agent_role=$(echo "$pair" | cut -d: -f2)
+     IFS=',' read -ra agent_pairs <<< "$active_agents"
+     for pair in "${agent_pairs[@]}"; do
+         [ -z "$pair" ] && continue
+         local agent_name="${pair%%:*}"
+         # Use cut for role: supports both "name:role" and future "name:role:displayName" format
+         # Issue #1491: trim whitespace — activeAgents entries sometimes have trailing spaces
+         # (e.g., "worker-123:worker ") which cause role comparison to fail silently.
+         local agent_role
+         agent_role=$(echo "$pair" | cut -d: -f2 | tr -d ' ')
 
-        # Only consider worker agents for specialization routing
-        [ "$agent_role" != "worker" ] && continue
+         # Only consider worker agents for specialization routing
+         [ "$agent_role" != "worker" ] && continue
 
         # Don't route to agents that already have assignments
         # Issue #1478: use pre-fetched active_assignments instead of calling get_state N times

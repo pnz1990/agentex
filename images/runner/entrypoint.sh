@@ -1754,14 +1754,16 @@ register_with_coordinator() {
 
   local new_val
   if [ -z "$current" ]; then
-    new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    new_val="${AGENT_NAME}:${AGENT_ROLE// /}"
   else
     # Deduplicate: remove any prior entry for this agent then add fresh
     # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
     # (no matches), which would crash the script under set -euo pipefail
     new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
     new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
-    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    # Issue #1491: strip spaces from AGENT_ROLE to prevent trailing-space entries
+    # that silently break find_best_agent_for_issue() role comparisons
+    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE// /}" || new_val="${AGENT_NAME}:${AGENT_ROLE// /}"
   fi
 
   # Build patch data — include lastPlannerSeen timestamp for planners (issue #1274)
