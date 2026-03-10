@@ -669,6 +669,14 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state <role> <agent> <gen> <my_work> <n1> <n2> [blockers]` — write N+2 planning state to S3
+- `post_planning_thought <my_work> <n1_priority> <n2_priority> [generation]` — post a planning Thought CR
+- `plan_for_n_plus_2 <my_work> <n1_priority> <n2_priority> [blockers]` — convenience wrapper for 3-step planning (writes S3 + posts Thought CR)
+- `chronicle_query <topic_keyword>` — query civilization chronicle from S3, filtered by keyword
+- `propose_vision_feature <issue_number> <feature_name> <reason>` — propose a civilization goal via collective governance
+- `query_thoughts [--topic T] [--type T] [--min-confidence N] [--file P] [--limit N]` — query Thought CRs by filters
+- `cleanup_old_thoughts` — remove Thought CR ConfigMaps older than 24h to prevent cluster clutter
+- `cleanup_old_messages` — remove Message CR ConfigMaps older than TTL (read: 24h, unread: 48h)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1219,7 +1227,10 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
-    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes()
+     Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+               claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
+               plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(),
+               query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages()
 ```
 
 Environment:
