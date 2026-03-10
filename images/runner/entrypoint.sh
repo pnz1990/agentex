@@ -1262,6 +1262,15 @@ EOF
   if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
     update_identity_stats "tasksCompleted" 1
   fi
+
+  # Issue #1602: Update reputation history with this session's visionScore
+  # Called after filing Report CR so visionScore is final.
+  # work_done is used as the summary (truncated to ~80 chars for storage efficiency)
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_reputation_history &>/dev/null; then
+    local work_summary
+    work_summary=$(echo "$work_done" | head -1 | cut -c1-80 | tr -d '"'"'" 2>/dev/null || echo "work completed")
+    update_reputation_history "$vision_score" "$work_summary" || true
+  fi
 }
 
 # append_to_chronicle() - Append entry to civilization chronicle (Prime Directive step ⑥)
