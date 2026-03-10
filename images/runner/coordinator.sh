@@ -474,13 +474,15 @@ refresh_task_queue() {
 
         # Issue #1149: Prepend visionQueue items BEFORE taskQueue so agent-voted issues get priority
         # visionQueue contains issues that 3+ agents voted to prioritize via governance
-        # Format: "issueNumber:voteCount" pairs; extract just the issue numbers
+        # Issue #1444: visionQueue uses ";" separator (consistent with vision-queue topic and
+        # request_coordinator_task() which parses with cut -d';' -f1)
         local vision_queue
         vision_queue=$(get_state "visionQueue")
         if [ -n "$vision_queue" ]; then
-            # Extract issue numbers from "issueNumber:voteCount" pairs
+            # Extract issue numbers from semicolon-separated entries (each entry may be just a number
+            # or a feature:description:ts:proposer tuple; extract the first field before ":")
             local vision_issues
-            vision_issues=$(echo "$vision_queue" | tr ',' '\n' | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+            vision_issues=$(echo "$vision_queue" | tr ';' '\n' | cut -d: -f1 | grep -E '^[0-9]+$' | tr '\n' ',' | sed 's/,$//')
             if [ -n "$vision_issues" ]; then
                 # Prepend vision issues, then deduplicate (vision issues appear first)
                 sorted_issues="${vision_issues},${sorted_issues}"
@@ -1188,10 +1190,12 @@ NUDGE_EOF
                         -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
 
                     # Deduplication: only add if not already present
-                    if echo "$current_vq" | tr ',' '\n' | grep -q "^${add_issue}$"; then
+                    # Issue #1444: Use semicolon separator (consistent with vision-queue topic
+                    # and request_coordinator_task() which parses with cut -d';' -f1)
+                    if echo "$current_vq" | tr ';' '\n' | grep -q "^${add_issue}$"; then
                         echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already present, skipping"
                     else
-                        local new_vq="${current_vq:+$current_vq,}${add_issue}"
+                        local new_vq="${current_vq:+$current_vq;}${add_issue}"
                         kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
                             --type=merge \
                             -p "{\"data\":{\"visionQueue\":\"$new_vq\"}}" \
