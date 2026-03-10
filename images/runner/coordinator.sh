@@ -358,13 +358,24 @@ ensure_state_fields_initialized() {
   # chronicleCandidates (issue #1605): semicolon-separated Thought ConfigMap names for
   # agent-proposed chronicle entries. Aggregated by aggregate_chronicle_candidates() every
   # ~3 min (inside track_debate_activity). God-delegate reads this when writing the chronicle.
-  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
-    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+   if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+     [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+       -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+   fi
+
+  # agentTrustGraph (v0.5, issue #1734/#1756): pipe-separated trust edges from cite_debate_outcome() calls.
+  # Format: "citingAgent:citedAgent:count|citingAgent2:citedAgent:count2|..."
+  # Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust.
+  # Used by score_agent_for_issue() (issue #1750) to give routing priority to widely-cited agents.
+  # Initialize to empty string if absent — cite_debate_outcome() in helpers.sh writes actual entries.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("agentTrustGraph")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing agentTrustGraph (was absent)"
     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+      -p '{"data":{"agentTrustGraph":""}}' 2>/dev/null || true
   fi
 
-  # v05MilestoneStatus (issue #1752): tracks whether v0.5 Emergent Specialization milestone is complete.
+   # v05MilestoneStatus (issue #1752): tracks whether v0.5 Emergent Specialization milestone is complete.
   # Set to "completed" by check_v05_milestone() when all 5 success criteria are met.
   # Empty means not yet complete (check will run again next cycle).
   if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("v05MilestoneStatus")' >/dev/null 2>&1; then
