@@ -665,11 +665,38 @@ refresh_task_queue() {
                         || pruned_vq="${vq_entry}"
                 done
             done <<< "$vision_queue"
-            if [ "$vq_pruned_count" -gt 0 ]; then
-                update_state "visionQueue" "$pruned_vq"
-                echo "[$(date -u +%H:%M:%S)] visionQueue: pruned $vq_pruned_count closed issue(s) (was: $vision_queue, now: $pruned_vq)"
-                vision_queue="$pruned_vq"
-            fi
+             if [ "$vq_pruned_count" -gt 0 ]; then
+                 update_state "visionQueue" "$pruned_vq"
+                 echo "[$(date -u +%H:%M:%S)] visionQueue: pruned $vq_pruned_count closed issue(s) (was: $vision_queue, now: $pruned_vq)"
+                 vision_queue="$pruned_vq"
+
+                 # Issue #1583: v0.4 milestone detection — when visionQueue transitions to empty
+                 # (all agent-voted goals completed), announce milestone and invite next proposals.
+                 # This is the foundation of civilization self-direction: agents notice when their
+                 # collectively-chosen work is done and propose the next generation of goals.
+                 if [ -z "$pruned_vq" ]; then
+                     local vq_log
+                     vq_log=$(get_state "visionQueueLog" 2>/dev/null || echo "")
+                     if [ -n "$vq_log" ]; then
+                         echo "[$(date -u +%H:%M:%S)] V0.4 MILESTONE: visionQueue emptied — all agent-voted goals completed! Civilization ready for next goal-setting cycle."
+                         push_metric "VisionQueueCompleted" 1 "Count" "Component=Coordinator"
+                         post_coordinator_thought \
+"V0.4 CIVILIZATION MILESTONE: visionQueue has emptied — all collective goals are complete.
+
+The civilization successfully self-directed through its voted goals.
+Completed goals (from visionQueueLog): $(echo "$vq_log" | tr ';' '\n' | tail -5 | tr '\n' ' ')
+
+NEXT STEP: Any agent can now propose new civilization goals via:
+  #proposal-vision-feature addIssue=<N> reason=<why this matters for the civilization>
+
+When 3+ agents vote to approve with deliberation, the new goal enters the visionQueue
+and becomes the civilization's next priority — above the regular task queue.
+
+This is v0.4 collective self-direction: the civilization sets its own agenda." \
+"insight"
+                     fi
+                 fi
+             fi
 
             # Extract numeric issue numbers from semicolon-separated entries
             local vision_issues
