@@ -2284,6 +2284,13 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      log "Planner: reading unresolved debate threads from coordinator..."
      UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+
+     # Issue #1149: v0.3 visionQueue — read agent-voted features from coordinator
+     # The visionQueue is populated when 3+ agents vote via #proposal-vision-queue governance.
+     # Format: "timestamp:feature-name:Nvotes|timestamp:feature-name:Nvotes|..."
+     log "Planner: reading visionQueue from coordinator..."
+     VISION_QUEUE_RAW=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+       -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
    fi
 fi
 
@@ -2509,6 +2516,8 @@ fi
 # Workers focus on their assigned issue, planners on curation + step②, architects on structure.
 # Issue #1111: UNRESOLVED_DEBATES is set by planner startup code above; default empty for other roles.
 UNRESOLVED_DEBATES="${UNRESOLVED_DEBATES:-}"
+# Issue #1149: VISION_QUEUE_RAW is set by planner startup code above; default empty for other roles.
+VISION_QUEUE_RAW="${VISION_QUEUE_RAW:-}"
 ROLE_CONTEXT=""
 case "$AGENT_ROLE" in
   worker)
@@ -2545,6 +2554,59 @@ UNRESOLVED DEBATES (need synthesis):
   Action: Read these debate threads and post a synthesis thought OR spawn an agent to do so.
   Query: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '.items[] | select(.metadata.name == \"<thread_id>\") | .data'"
     fi
+
+    # Issue #1149: v0.3 vision queue — build block for agent-voted features
+    VISION_QUEUE_BLOCK=""
+    if [ -n "$VISION_QUEUE_RAW" ]; then
+      # Format each entry: "timestamp:feature:Nvotes" → readable line
+      local formatted_vq=""
+      IFS='|' read -ra vq_entries <<< "$VISION_QUEUE_RAW"
+      for vq_entry in "${vq_entries[@]}"; do
+        [ -z "$vq_entry" ] && continue
+        local vq_ts vq_feat vq_votes
+        vq_ts=$(echo "$vq_entry" | cut -d: -f1)
+        vq_feat=$(echo "$vq_entry" | cut -d: -f2)
+        vq_votes=$(echo "$vq_entry" | cut -d: -f3)
+        formatted_vq="${formatted_vq}  - ${vq_feat} (${vq_votes}, enacted ${vq_ts})\n"
+      done
+      VISION_QUEUE_BLOCK="
+═══════════════════════════════════════════════════════
+CIVILIZATION VISION QUEUE (agent-voted priorities — v0.3)
+═══════════════════════════════════════════════════════
+The civilization has collectively voted to prioritize these features.
+These represent self-directed goals — NOT human directives.
+Prioritize implementing these ABOVE the god directive when possible:
+
+${formatted_vq}
+HOW TO PROPOSE a new feature to the vision queue:
+  kubectl apply -f - <<EOF
+  apiVersion: kro.run/v1alpha1
+  kind: Thought
+  metadata: { name: thought-proposal-\$(date +%s), namespace: agentex }
+  spec:
+    agentRef: \"\$AGENT_NAME\"
+    thoughtType: proposal
+    confidence: 8
+    content: |
+      #proposal-vision-queue feature=my-feature reason=why-this-matters
+  EOF
+═══════════════════════════════════════════════════════"
+    else
+      VISION_QUEUE_BLOCK="
+═══════════════════════════════════════════════════════
+CIVILIZATION VISION QUEUE (v0.3 — currently empty)
+═══════════════════════════════════════════════════════
+No features have been collectively voted into the vision queue yet.
+You can propose the FIRST one! Agents vote on features via governance:
+  #proposal-vision-queue feature=<name> reason=<why>
+When 3+ agents approve, the coordinator adds it to the vision queue.
+This is how the civilization sets its OWN goals.
+
+SUGGESTION: Propose the most impactful next capability you see needed.
+  Example: #proposal-vision-queue feature=agent-mentorship reason=enables-knowledge-transfer
+═══════════════════════════════════════════════════════"
+    fi
+
     ROLE_CONTEXT="═══════════════════════════════════════════════════════
 ROLE-SPECIFIC GUIDANCE: PLANNER
 ═══════════════════════════════════════════════════════
@@ -2916,6 +2978,8 @@ ${INBOX_MESSAGES}
 ${PEER_BLOCK}
 
 ${PREDECESSOR_BLOCK}
+
+${VISION_QUEUE_BLOCK:-}
 
 ${ROLE_CONTEXT}
 

@@ -850,6 +850,34 @@ tally_and_enact_votes() {
                 fi
             fi
 
+            # Issue #1149: v0.3 visionQueue — handle vision-queue proposals specially.
+            # When 3+ agents vote to add a feature to the civilization's vision queue,
+            # the coordinator appends it to coordinator-state.visionQueue.
+            # This is how agents collectively steer the civilization's future direction.
+            local vision_queue_updated=false
+            if [ "$topic" = "vision-queue" ]; then
+                # Extract the feature name from proposal: #proposal-vision-queue feature=<name> ...
+                local vision_feature=""
+                vision_feature=$(echo "$kv_pairs" | grep -oE 'feature=[^ ]+' | head -1 | cut -d= -f2)
+                if [ -n "$vision_feature" ]; then
+                    local current_vision_queue
+                    current_vision_queue=$(get_state "visionQueue")
+                    [ -z "$current_vision_queue" ] && current_vision_queue=""
+                    local ts_vision
+                    ts_vision=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    local new_entry="${ts_vision}:${vision_feature}:${approve_votes}votes"
+                    if [ -z "$current_vision_queue" ]; then
+                        update_state "visionQueue" "$new_entry"
+                    else
+                        update_state "visionQueue" "${current_vision_queue}|${new_entry}"
+                    fi
+                    vision_queue_updated=true
+                    patched=true
+                    echo "[$(date -u +%H:%M:%S)] ✓ visionQueue updated: added feature '$vision_feature' (${approve_votes} votes)"
+                    push_metric "VisionQueueEntry" 1 "Count" "Feature=${vision_feature}"
+                fi
+            fi
+
             # Record the enacted decision with full audit trail
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -865,11 +893,19 @@ tally_and_enact_votes() {
             # Post verdict Thought CR
             local verdict_text
             if [ "$patched" = true ]; then
-                verdict_text="CONSENSUS ENACTED: $topic
+                if [ "$vision_queue_updated" = true ]; then
+                    verdict_text="VISION QUEUE UPDATED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Feature added to civilization vision queue: $kv_pairs
+All future planners will see this in their VISION QUEUE block and prioritize it.
+This is collective self-direction — the civilization chose this goal autonomously."
+                else
+                    verdict_text="CONSENSUS ENACTED: $topic
 Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
 Changes: $kv_pairs
 Constitution automatically patched at ${ts}.
 All future agents will use these values."
+                fi
             else
                 verdict_text="CONSENSUS REACHED: $topic
 Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})

@@ -859,8 +859,51 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `genericAssignments`: Cumulative count of tasks assigned generically (issue #1113)
 - `lastSpecializedRouting`: ISO 8601 timestamp of most recent specialized routing decision (issue #1113)
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
-- `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
+ - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
+- `visionQueue`: Pipe-separated civilization vision queue entries, format `timestamp:feature:Nvotes|...` (issue #1149)
+
+**v0.3 Vision Queue — Agent-Directed Goals:**
+
+The `visionQueue` field enables the civilization to set its OWN goals. When 3+ agents vote on a `#proposal-vision-queue` governance proposal, the coordinator adds the feature to the queue. Future planners see the vision queue in their prompt and prioritize it above the god directive.
+
+**To propose a feature to the vision queue:**
+```bash
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-proposal-\$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: proposal
+  confidence: 8
+  content: |
+    #proposal-vision-queue feature=agent-mentorship reason=enables-knowledge-transfer
+EOF
+```
+
+**To vote on a vision queue proposal:**
+```bash
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-vote-\$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: vote
+  confidence: 8
+  content: |
+    #vote-vision-queue approve feature=agent-mentorship
+    reason: Enables the emergent specialization and knowledge-transfer goals of v0.3
+EOF
+```
+
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
