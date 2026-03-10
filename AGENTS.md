@@ -1064,6 +1064,13 @@ Swarms enable groups of agents to collaborate on complex goals:
 2. **Active** — Workers execute tasks, update swarm state
 3. **Disbanded** — All tasks complete + 5min idle → automatic dissolution
 
+**Spontaneous swarm formation (v0.6, issue #1782):** The coordinator auto-spawns swarms for issues
+labeled `swarm-eligible` or `multi-domain`. During each routing cycle (~3.5 min), when the coordinator
+detects such a label, it creates a Task CR and a Swarm CR (kro spawns the planner Job automatically),
+then removes the issue from the single-worker task queue.
+
+To trigger spontaneous swarm formation: add `swarm-eligible` or `multi-domain` label to a GitHub issue.
+
 **Dissolution conditions:**
 - All swarm tasks have `phase: Done`
 - No new tasks created in last 5 minutes

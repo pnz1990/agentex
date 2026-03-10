@@ -3995,6 +3995,171 @@ find_best_agent_for_issue() {
     fi
 }
 
+# ── spawn_swarm_for_issue ─────────────────────────────────────────────────────
+# Spontaneous swarm formation (issue #1782 — v0.6 Collective Action feature)
+#
+# When the coordinator detects an issue labeled 'swarm-eligible' or 'multi-domain',
+# it creates a Swarm CR (which kro auto-spawns a planner Job) instead of assigning
+# the issue to a single worker. This enables multi-agent coalitions to self-organize
+# around complex goals without direct god intervention.
+#
+# Arguments:
+#   $1 - issue_number
+#   $2 - issue_labels (comma-separated string)
+#   $3 - issue_title
+#
+# Returns:
+#   0 if swarm was spawned for this issue (caller should skip single-worker assignment)
+#   1 if issue is not swarm-eligible (caller should proceed with normal routing)
+#
+# Side effects:
+#   - Creates a Task CR (plannerTaskRef for the Swarm)
+#   - Creates a Swarm CR (kro spawns a planner Job automatically via swarm-graph RGD)
+#   - Updates coordinator-state.activeSwarms with the new swarm entry
+#   - Writes S3 formation record (swarm-memories/ path, aligned with write_swarm_memory per issue #1799)
+#   - Emits a Thought CR announcing the swarm formation
+#   - Pushes SwarmSpawned CloudWatch metric
+#
+spawn_swarm_for_issue() {
+    local issue_number="$1"
+    local issue_labels="$2"
+    local issue_title="$3"
+
+    # Only spawn swarms for issues with swarm-eligible or multi-domain labels
+    if ! echo "$issue_labels" | grep -qE "swarm-eligible|multi-domain"; then
+        return 1
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] SWARM FORMATION: issue #${issue_number} labeled swarm-eligible/multi-domain — spawning swarm (issue #1782)"
+
+    local swarm_name="swarm-issue-${issue_number}-$(date +%s)"
+    local task_name="task-${swarm_name}-planner"
+    local swarm_goal="Collectively resolve GitHub issue #${issue_number}: ${issue_title}"
+    # Coordinator-spawned swarms use goalOrigin="coordinator" per issue #1799 fix.
+    # This field is checked by check_v06_milestone() Criterion 3 (emergent goals check).
+    local goal_origin="coordinator"
+
+    # Step 1: Create Task CR for the swarm planner (plannerTaskRef in Swarm spec)
+    kubectl_with_timeout 10 apply -f - <<TASK_EOF 2>/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${NAMESPACE}
+spec:
+  title: "Swarm planner for issue #${issue_number}"
+  description: |
+    You are the planner for swarm ${swarm_name}.
+    Goal: ${swarm_goal}
+    Swarm goal origin: ${goal_origin}
+
+    1. Read issue #${issue_number}: gh issue view ${issue_number} --repo ${GITHUB_REPO}
+    2. Break the issue into parallel sub-tasks.
+    3. Spawn 2-3 worker agents (using spawn_task_and_agent) with SWARM_REF=${swarm_name}.
+    4. Monitor progress via: kubectl get configmap ${swarm_name}-state -n ${NAMESPACE}
+    5. Ensure workers open PRs and mark tasks Done.
+    6. When all workers complete, dissolution will happen automatically.
+  effort: "L"
+  githubIssue: ${issue_number}
+TASK_EOF
+
+    local task_rc=$?
+    if [ $task_rc -ne 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: Failed to create Task CR ${task_name} for swarm — skipping swarm spawn"
+        return 1
+    fi
+    echo "[$(date -u +%H:%M:%S)] Swarm Task CR created: ${task_name}"
+
+    # Step 2: Create Swarm CR (kro auto-spawns the planner Job via swarm-graph RGD)
+    kubectl_with_timeout 10 apply -f - <<SWARM_EOF 2>/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/issue: "${issue_number}"
+    agentex/goal-origin: "${goal_origin}"
+spec:
+  goal: "${swarm_goal}"
+  plannerTaskRef: "${task_name}"
+  maxAgents: 5
+  workers: 3
+  reviewers: 1
+SWARM_EOF
+
+    local swarm_rc=$?
+    if [ $swarm_rc -ne 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: Failed to create Swarm CR ${swarm_name} — cleaning up Task CR"
+        kubectl_with_timeout 10 delete task "${task_name}" -n "${NAMESPACE}" 2>/dev/null || true
+        return 1
+    fi
+    echo "[$(date -u +%H:%M:%S)] Swarm CR created: ${swarm_name} (kro will spawn planner Job)"
+
+    # Step 3: Track in coordinator-state.activeSwarms
+    # Format: "swarm-name:issue-number:goal-summary|..."
+    local goal_summary
+    goal_summary=$(echo "$issue_title" | cut -c1-40 | tr ' ' '-' | tr -d '[:punct:]' | tr -d '"')
+    local swarm_entry="${swarm_name}:${issue_number}:${goal_summary}"
+    local current_active_swarms
+    current_active_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if [ -z "$current_active_swarms" ]; then
+        update_state "activeSwarms" "$swarm_entry"
+    else
+        update_state "activeSwarms" "${current_active_swarms}|${swarm_entry}"
+    fi
+    echo "[$(date -u +%H:%M:%S)] Updated activeSwarms with entry: ${swarm_entry}"
+
+    # Step 4: Write swarm formation record to S3 for v0.6 milestone criterion 1 tracking.
+    # Uses swarm-memories/ path — must match write_swarm_memory() path (issue #1799 fix).
+    local s3_bucket="${IDENTITY_BUCKET:-agentex-thoughts}"
+    local formation_record
+    formation_record=$(printf '{"swarmName":"%s","issueNumber":"%s","goal":"%s","goalOrigin":"%s","memberCount":0,"memberAgents":[],"tasksCompleted":0,"formedAt":"%s","formedBy":"coordinator","phase":"Forming"}\n' \
+        "$swarm_name" "$issue_number" \
+        "$(echo "$swarm_goal" | sed 's/"/\\"/g')" \
+        "$goal_origin" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    echo "$formation_record" | aws s3 cp - \
+        "s3://${s3_bucket}/swarm-memories/${swarm_name}.json" \
+        --region "${BEDROCK_REGION:-us-west-2}" \
+        --content-type application/json 2>/dev/null && \
+        echo "[$(date -u +%H:%M:%S)] Swarm formation record persisted to S3: swarm-memories/${swarm_name}.json" || \
+        echo "[$(date -u +%H:%M:%S)] WARNING: Failed to persist swarm formation record to S3 (non-fatal)"
+
+    # Step 5: Post a Thought CR announcing the spontaneous swarm formation
+    kubectl_with_timeout 10 apply -f - <<THOUGHT_EOF 2>/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-swarm-formed-${issue_number}-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-swarm-spawn
+  thoughtType: insight
+  confidence: 9
+  content: |
+    SPONTANEOUS SWARM FORMATION (issue #1782 — v0.6 Collective Action)
+
+    Swarm ${swarm_name} spawned for issue #${issue_number}.
+    Goal: ${swarm_goal}
+    Goal origin: ${goal_origin} (coordinator-driven, labels: ${issue_labels})
+
+    The coordinator detected a swarm-eligible/multi-domain issue and auto-spawned
+    a swarm instead of assigning to a single worker. This is v0.6 collective action
+    in practice: agents will self-organize into a coalition around this goal.
+
+    Swarm state: kubectl get configmap ${swarm_name}-state -n ${NAMESPACE}
+    Task CR: ${task_name}
+THOUGHT_EOF
+    echo "[$(date -u +%H:%M:%S)] Swarm formation Thought CR posted"
+
+    # Step 6: Emit CloudWatch metric for swarm formation observability
+    push_metric "SwarmSpawned" 1 "Count" "IssueNumber=${issue_number}" 2>/dev/null || true
+
+    return 0
+}
+
 # Perform identity-based task routing cycle:
 # For each issue in the task queue that is NOT yet assigned, attempt to find
 # a specialized agent. Record routing decisions and emit metrics.
@@ -4089,6 +4254,29 @@ route_tasks_by_specialization() {
         if [ -z "$issue_labels" ]; then
             issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
                 --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        fi
+
+        # Issue #1782: Check if this issue should be handled by a swarm (v0.6 Collective Action).
+        # Swarm-eligible issues (labeled 'swarm-eligible' or 'multi-domain') are dispatched to
+        # a spontaneous swarm instead of a single worker. The coordinator creates a Task CR
+        # (plannerTaskRef) and a Swarm CR (kro spawns the planner Job automatically).
+        # Swarm spawn only triggers once per issue — the swarm planner then owns the issue.
+        if echo "$issue_labels" | grep -qE "swarm-eligible|multi-domain"; then
+            local issue_title_for_swarm=""
+            issue_title_for_swarm=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+                --json title --jq '.title' 2>/dev/null | head -1 || echo "issue #${issue_num}")
+            if spawn_swarm_for_issue "$issue_num" "$issue_labels" "$issue_title_for_swarm"; then
+                # Swarm was spawned — remove from task queue so it is not also assigned to a single worker.
+                # The swarm planner will claim the issue via claim_task when it starts.
+                local updated_queue
+                updated_queue=$(echo "$task_queue" | tr ',' '\n' | grep -v "^${issue_num}$" | tr '\n' ',' | sed 's/,$//')
+                update_state "taskQueue" "$updated_queue" 2>/dev/null || true
+                # Update local variable so subsequent iterations use the pruned queue
+                task_queue="$updated_queue"
+                echo "[$(date -u +%H:%M:%S)] Issue #${issue_num} dispatched to swarm — removed from single-agent task queue"
+                unassigned_count=$((unassigned_count - 1))  # swarm dispatch is not a generic-routing failure
+                continue
+            fi
         fi
 
         # Find best specialized agent
