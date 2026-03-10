@@ -3196,36 +3196,66 @@ check_v05_milestone() {
     # god-delegates and planners first (alphabetically earlier), and workers last —
     # causing criteria 1/3/4 to never see the worker identities that hold promotedRole,
     # proactiveIssuesFound, and mentorCredits values.
-    local identity_files
-    identity_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
-        --region "$BEDROCK_REGION" 2>/dev/null | \
-        sort -k1,2 -r | awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
+     # Issue #1896: Use aws s3 sync to batch-download identity files to a temp dir.
+     # Previously, 50 sequential aws s3 cp calls took 90+ seconds, blocking the coordinator
+     # main loop entirely (liveness probe fires at 90s threshold). A single sync call
+     # downloads all files in ~5-10 seconds using parallel transfers.
+     local identity_tmp_dir
+     identity_tmp_dir=$(mktemp -d 2>/dev/null || echo "/tmp/v05-identity-$$")
+     mkdir -p "$identity_tmp_dir"
 
-    local promoted_count=0
-    local proactive_count=0
-    local mentor_credit_count=0
+     # First, get the 50 most recent identity filenames (newest-first)
+     local identity_files_list
+     identity_files_list=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
+         --region "$BEDROCK_REGION" 2>/dev/null | \
+         sort -k1,2 -r | awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
 
-    for ifile in $identity_files; do
-        local ijson
-        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-        [ -z "$ijson" ] && continue
+     # Batch-download only the 50 selected files using aws s3 sync with --exclude/--include.
+     # Build an include pattern for each file. If list is empty, skip.
+     if [ -n "$identity_files_list" ]; then
+         local sync_includes=""
+         for f in $identity_files_list; do
+             sync_includes="$sync_includes --include $f"
+         done
+         # shellcheck disable=SC2086
+         aws s3 sync "s3://${IDENTITY_BUCKET}/identities/" "$identity_tmp_dir/" \
+             --region "$BEDROCK_REGION" \
+             --exclude "*" \
+             $sync_includes \
+             --quiet 2>/dev/null || true
+     fi
+     echo "[$(date -u +%H:%M:%S)] v0.5 identity sync complete: $(ls "$identity_tmp_dir/" 2>/dev/null | wc -l) files downloaded"
 
-        # Criterion 1: promotedRole
-        local prole
-        prole=$(echo "$ijson" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
-        [ -n "$prole" ] && promoted_count=$((promoted_count + 1))
+     local promoted_count=0
+     local proactive_count=0
+     local mentor_credit_count=0
 
-        # Criterion 3: proactiveIssuesFound (under .stats.proactiveIssuesFound per issue #1759)
-        local pif
-        pif=$(echo "$ijson" | jq -r '.stats.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
-        [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
+     # Process local files — no per-file network calls (issue #1896)
+     for ifile in $identity_files_list; do
+         local local_path="$identity_tmp_dir/$ifile"
+         [ ! -f "$local_path" ] && continue
+         local ijson
+         ijson=$(cat "$local_path" 2>/dev/null || echo "")
+         [ -z "$ijson" ] && continue
 
-        # Criterion 4: mentorCredits array length (under .specializationDetail.mentorCredits per issue #1759)
-        local mc
-        mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
-        [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
-    done
+         # Criterion 1: promotedRole
+         local prole
+         prole=$(echo "$ijson" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
+         [ -n "$prole" ] && promoted_count=$((promoted_count + 1))
+
+         # Criterion 3: proactiveIssuesFound (under .stats.proactiveIssuesFound per issue #1759)
+         local pif
+         pif=$(echo "$ijson" | jq -r '.stats.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
+         [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
+
+         # Criterion 4: mentorCredits array length (under .specializationDetail.mentorCredits per issue #1759)
+         local mc
+         mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
+         [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
+     done
+
+     # Cleanup temp dir
+     rm -rf "$identity_tmp_dir" 2>/dev/null || true
 
     # ── Criterion 1: 3+ agents with promotedRole ─────────────────────────────
     if [ "$promoted_count" -ge 3 ]; then
@@ -3406,25 +3436,45 @@ check_v06_milestone() {
     local criteria_met=0
     local criteria_report=""
 
-    # ── Read S3 swarm dissolution records ────────────────────────────────────
-    # Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
-    # by the swarm memory persistence feature (issue #1773).
-    # NOTE: Path must be swarm-memories/ to match write_swarm_memory() in helpers.sh (issue #1799).
-    local swarm_files
-    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
-        --region "$BEDROCK_REGION" 2>/dev/null | \
-        awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
+     # ── Read S3 swarm dissolution records ────────────────────────────────────
+     # Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
+     # by the swarm memory persistence feature (issue #1773).
+     # NOTE: Path must be swarm-memories/ to match write_swarm_memory() in helpers.sh (issue #1799).
+     # Issue #1896: Use aws s3 sync to batch-download swarm files instead of sequential aws s3 cp
+     local swarm_files
+     swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
+         --region "$BEDROCK_REGION" 2>/dev/null | \
+         awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
 
-    local swarm_memory_count=0
-    local max_coalition_size=0
-    local emergent_goal_count=0
-    local swarm_formation_count=0
+     local swarm_tmp_dir
+     swarm_tmp_dir=$(mktemp -d 2>/dev/null || echo "/tmp/v06-swarm-$$")
+     mkdir -p "$swarm_tmp_dir"
 
-    for sfile in $swarm_files; do
-        local sjson
-        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-        [ -z "$sjson" ] && continue
+     if [ -n "$swarm_files" ]; then
+         local swarm_sync_includes=""
+         for f in $swarm_files; do
+             swarm_sync_includes="$swarm_sync_includes --include $f"
+         done
+         # shellcheck disable=SC2086
+         aws s3 sync "s3://${IDENTITY_BUCKET}/swarm-memories/" "$swarm_tmp_dir/" \
+             --region "$BEDROCK_REGION" \
+             --exclude "*" \
+             $swarm_sync_includes \
+             --quiet 2>/dev/null || true
+     fi
+
+     local swarm_memory_count=0
+     local max_coalition_size=0
+     local emergent_goal_count=0
+     local swarm_formation_count=0
+
+     for sfile in $swarm_files; do
+         local slocal_path="$swarm_tmp_dir/$sfile"
+         [ ! -f "$slocal_path" ] && continue
+         local sjson
+         sjson=$(cat "$slocal_path" 2>/dev/null || echo "")
+         [ -z "$sjson" ] && continue
+
 
         swarm_memory_count=$((swarm_memory_count + 1))
         swarm_formation_count=$((swarm_formation_count + 1))
@@ -3441,15 +3491,18 @@ check_v06_milestone() {
             max_coalition_size=$member_array_len
         fi
 
-        # Check for emergent goals (agent-proposed goal, not god-assigned)
-        local goal_origin
-        goal_origin=$(echo "$sjson" | jq -r '.goalOrigin // ""' 2>/dev/null || echo "")
-        if [ "$goal_origin" = "agent-proposed" ] || [ "$goal_origin" = "emergent" ]; then
-            emergent_goal_count=$((emergent_goal_count + 1))
-        fi
-    done
+         # Check for emergent goals (agent-proposed goal, not god-assigned)
+         local goal_origin
+         goal_origin=$(echo "$sjson" | jq -r '.goalOrigin // ""' 2>/dev/null || echo "")
+         if [ "$goal_origin" = "agent-proposed" ] || [ "$goal_origin" = "emergent" ]; then
+             emergent_goal_count=$((emergent_goal_count + 1))
+         fi
+     done
 
-    # Also count live (non-disbanded) swarms from activeSwarms for formation count
+     # Cleanup swarm temp dir (issue #1896)
+     rm -rf "$swarm_tmp_dir" 2>/dev/null || true
+
+     # Also count live (non-disbanded) swarms from activeSwarms for formation count
     local active_swarms_field
     active_swarms_field=$(get_state "activeSwarms" 2>/dev/null || echo "")
     if [ -n "$active_swarms_field" ]; then
@@ -4526,7 +4579,10 @@ while true; do
     # When all criteria pass, posts a milestone completion Thought CR and files a GitHub issue.
     # No-ops after v05MilestoneStatus = "completed" is set.
     if [ $((iteration % 20)) -eq 0 ]; then
-        check_v05_milestone
+        # Issue #1896: Add 60s timeout as safety net — check_v05_milestone downloads S3 files
+        # and can block for 90+ seconds without the sync optimization. If sync fails or is slow,
+        # timeout prevents coordinator loop starvation (liveness probe fires at ~90s).
+        timeout 60s check_v05_milestone || echo "[$(date -u +%H:%M:%S)] WARNING: check_v05_milestone timed out or failed — will retry next cycle"
     fi
 
     # Every 20 iterations (~10 min): check v0.6 milestone completion (issue #1789)
@@ -4534,7 +4590,8 @@ while true; do
     # When all criteria pass, posts a milestone completion Thought CR and files a GitHub issue.
     # No-ops after v06MilestoneStatus = "completed" is set.
     if [ $((iteration % 20)) -eq 0 ]; then
-        check_v06_milestone
+        # Issue #1896: Add 60s timeout as safety net for v0.6 milestone check too
+        timeout 60s check_v06_milestone || echo "[$(date -u +%H:%M:%S)] WARNING: check_v06_milestone timed out or failed — will retry next cycle"
     fi
 
     # Every 10 iterations (~5 min): re-check and initialize any missing state fields (issue #1178)
