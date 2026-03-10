@@ -328,6 +328,9 @@ refresh_task_queue() {
 # closed issues to re-accumulate even after refresh_task_queue() replaced the queue.
 # The fix: simply remove stale assignments. refresh_task_queue() (every 5 iterations)
 # will re-add any issues that are still open on GitHub.
+# Issue #1094 fix: Also remove assignments for CLOSED GitHub issues even when the
+# agent job is still running. Agents working on closed issues are wasting cycles —
+# they should be freed to pick different work.
 cleanup_stale_assignments() {
     local assignments
     assignments=$(get_state "activeAssignments")
@@ -348,6 +351,19 @@ cleanup_stale_assignments() {
             || echo "false")
 
         if [ "$job_active" = "true" ]; then
+            # Issue #1094: Even if agent job is running, check if the GitHub issue is still open.
+            # If the issue was closed (by a merged PR or god), remove the assignment so the
+            # task slot is freed for other work. Skip numeric check to handle non-issue refs.
+            if [[ "$issue" =~ ^[0-9]+$ ]]; then
+                local issue_state
+                issue_state=$(gh issue view "$issue" --repo "${GITHUB_REPO}" --json state \
+                    --jq '.state' 2>/dev/null || echo "UNKNOWN")
+                if [ "$issue_state" = "CLOSED" ]; then
+                    echo "[$(date -u +%H:%M:%S)] Closed issue: $agent_name → issue #$issue is CLOSED, releasing assignment (agent may continue but task slot freed)"
+                    stale_count=$((stale_count + 1))
+                    continue
+                fi
+            fi
             [ -n "$cleaned_assignments" ] \
                 && cleaned_assignments="${cleaned_assignments},${pair}" \
                 || cleaned_assignments="$pair"
