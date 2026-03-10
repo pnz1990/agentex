@@ -593,6 +593,141 @@ parentRef: ${parent_thought_name}"
   post_thought "$content" "debate" "$confidence" "${parent_topic}" "" "${parent_thought_name}"
   log "Posted debate response (${stance}) to thought ${parent_thought_name} by ${parent_agent}"
   push_metric "DebateResponse" 1 "Count" "Stance=${stance}"
+  
+  # If this is a synthesis response, automatically record the debate outcome
+  if [ "$stance" = "synthesize" ]; then
+    local thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+    record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"
+  fi
+}
+
+# record_debate_outcome: Store debate resolution in S3 for future agent queries
+# Usage: record_debate_outcome <thread_id> <outcome> <resolution> [topic]
+# Outcomes: synthesized | consensus-agree | consensus-disagree | unresolved
+#
+# Example:
+#   record_debate_outcome "a3f2c8d1" "synthesized" \
+#     "Compromise: reduce TTL to 240s, increase cleanup frequency to 5min" \
+#     "circuit-breaker"
+#
+# Creates: s3://agentex-thoughts/debates/<thread_id>.json
+record_debate_outcome() {
+  local thread_id="$1"
+  local outcome="$2"
+  local resolution="$3"
+  local topic="${4:-}"
+  
+  if [ -z "$thread_id" ] || [ -z "$outcome" ] || [ -z "$resolution" ]; then
+    log "ERROR: record_debate_outcome requires thread_id, outcome, and resolution"
+    return 1
+  fi
+  
+  local s3_path="s3://${S3_BUCKET}/debates/${thread_id}.json"
+  local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  
+  # Build participant list from current agent
+  local participants="[\"${AGENT_NAME}\"]"
+  
+  # Check if debate already exists in S3 and merge participants
+  if aws s3 ls "$s3_path" >/dev/null 2>&1; then
+    existing_data=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "{}")
+    if [ -n "$existing_data" ] && [ "$existing_data" != "{}" ]; then
+      # Extract existing participants and add current agent
+      existing_participants=$(echo "$existing_data" | jq -r '.participants // []' 2>/dev/null)
+      if [ -n "$existing_participants" ]; then
+        participants=$(echo "$existing_participants" | jq -r --arg agent "$AGENT_NAME" \
+          'if . | index($agent) then . else . + [$agent] end' 2>/dev/null || echo "$participants")
+      fi
+    fi
+  fi
+  
+  # Escape JSON special characters in resolution text
+  local escaped_resolution
+  escaped_resolution=$(echo "$resolution" | jq -Rs '.')
+  
+  # Build JSON document
+  local debate_json
+  debate_json=$(cat <<EOF
+{
+  "threadId": "$thread_id",
+  "topic": "$topic",
+  "outcome": "$outcome",
+  "resolution": $escaped_resolution,
+  "participants": $participants,
+  "timestamp": "$timestamp",
+  "recordedBy": "$AGENT_NAME"
+}
+EOF
+)
+  
+  # Write to S3
+  if ! s3_output=$(echo "$debate_json" | aws s3 cp - "$s3_path" --content-type application/json 2>&1); then
+    log "WARNING: Failed to record debate outcome to S3: $s3_output"
+    return 1
+  fi
+  
+  log "Recorded debate outcome: thread=$thread_id outcome=$outcome topic=$topic"
+  push_metric "DebateOutcomeRecorded" 1
+  return 0
+}
+
+# query_debate_outcomes: Query past debate resolutions from S3 by topic
+# Usage: query_debate_outcomes [topic_keyword]
+# Returns: JSON array of debate outcomes matching the topic
+#
+# Example:
+#   query_debate_outcomes "circuit-breaker"
+#
+# Output format: [{threadId, topic, outcome, resolution, participants, timestamp}, ...]
+query_debate_outcomes() {
+  local topic_filter="${1:-}"
+  
+  # List all debate files in S3
+  local debate_files
+  debate_files=$(aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}')
+  
+  if [ -z "$debate_files" ]; then
+    log "No debate outcomes found in S3"
+    echo "[]"
+    return 0
+  fi
+  
+  # Collect matching debates
+  local results="["
+  local first=true
+  
+  while IFS= read -r file; do
+    if [ -z "$file" ]; then continue; fi
+    
+    local s3_path="s3://${S3_BUCKET}/debates/${file}"
+    local debate_json
+    debate_json=$(aws s3 cp "$s3_path" - 2>/dev/null)
+    
+    if [ -z "$debate_json" ]; then continue; fi
+    
+    # Filter by topic if specified
+    if [ -n "$topic_filter" ]; then
+      local debate_topic
+      debate_topic=$(echo "$debate_json" | jq -r '.topic // ""' 2>/dev/null)
+      if [[ ! "$debate_topic" =~ $topic_filter ]]; then
+        continue
+      fi
+    fi
+    
+    # Add to results
+    if [ "$first" = true ]; then
+      first=false
+    else
+      results="${results},"
+    fi
+    results="${results}${debate_json}"
+  done <<< "$debate_files"
+  
+  results="${results}]"
+  
+  echo "$results" | jq '.' 2>/dev/null || echo "[]"
+  log "Query returned $(echo "$results" | jq 'length' 2>/dev/null || echo 0) debate outcomes for topic: ${topic_filter:-all}"
+  return 0
 }
 
 # query_thoughts() - Query thoughts by topic, type, confidence, or file path
