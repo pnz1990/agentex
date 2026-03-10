@@ -2867,8 +2867,8 @@ THOUGHT_EOF
 # Success Criteria (from issue #1732):
 #   1. Dynamic role promotions: 3+ agents with promotedRole in S3 identity
 #   2. Trust graph: 5+ distinct citation edges in coordinator-state.agentTrustGraph
-#   3. Proactive issue discovery: 2+ agents with proactiveIssuesFound > 0 in S3 identity
-#   4. Mentor credit loop: 1+ agent with mentorCredits > 0 in S3 identity
+#   3. Proactive issue discovery: 2+ agents with .stats.proactiveIssuesFound > 0 in S3 identity
+#   4. Mentor credit loop: 1+ agent with .specializationDetail.mentorCredits array length > 0
 #   5. Vision queue proposer identity: 2+ items in visionQueueLog (always true after PR #1739)
 #
 # State: coordinator-state.v05MilestoneStatus — set to "completed" on success
@@ -2942,7 +2942,9 @@ check_v05_milestone() {
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$ijson" ] && continue
         local pif
-        pif=$(echo "$ijson" | jq -r '.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
+        # Issue #1759: proactiveIssuesFound is stored under .stats.proactiveIssuesFound
+        # NOT at top-level .proactiveIssuesFound (which is how identity.sh writes it).
+        pif=$(echo "$ijson" | jq -r '.stats.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
         [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
     done
 
@@ -2962,7 +2964,11 @@ check_v05_milestone() {
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$ijson" ] && continue
         local mc
-        mc=$(echo "$ijson" | jq -r '.mentorCredits // 0 | tonumber' 2>/dev/null || echo "0")
+        # Issue #1759: mentorCredits is stored as an ARRAY at
+        # .specializationDetail.mentorCredits (written by credit_mentor_for_success() in helpers.sh).
+        # It is NOT a top-level integer .mentorCredits.
+        # Check if array has at least 1 entry using | length.
+        mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
         [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
     done
 
