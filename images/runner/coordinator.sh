@@ -699,19 +699,25 @@ tally_and_enact_votes() {
         
         echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
         
-        # Get most recent proposal for this topic
+        # Get most recent proposal for this topic (issue #1222)
+        # FIX: When multiple proposals exist for a topic, jq outputs ALL their content
+        # concatenated. The old `| tail -1` returned the last LINE of combined output
+        # (often an empty line after trailing newline), causing silent skip.
+        # NEW: Extract the declaration line directly using grep to get the line starting
+        # with "#proposal-<topic>" — this is the only line we need for kv_pairs extraction.
         local proposal_content
         proposal_content=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
-            "$thoughts_file" | tail -1 || true)
-        
+            "$thoughts_file" 2>/dev/null | grep "^#proposal-${topic}" | tail -1 || true)
+
         [ -z "$proposal_content" ] && continue
 
         # Extract key=value pairs from proposal declaration line only (issue #754)
         # IMPORTANT: Only extract from first line to avoid picking up values from evidence/reasoning text
         # Example: "#proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-at-limit-6"
         # Should extract "circuitBreakerLimit=12" and "reason=...", NOT "limit-6" from later lines
+        # NOTE: proposal_content is already the declaration line (from grep above)
         local kv_pairs
-        kv_pairs=$(echo "$proposal_content" | head -1 | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
@@ -762,9 +768,10 @@ tally_and_enact_votes() {
         # ISSUE #747 FIX: god-delegate proposals require explicit agent votes
         # God-delegate proposals are often tests or provocations for debate.
         # They should NOT be auto-enacted even if they reach threshold.
+        # FIX (issue #1222): Use same grep pattern to get most recent proposal's agent
         local proposer_agent
         proposer_agent=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .agent" \
-            "$thoughts_file" | tail -1 || echo "unknown")
+            "$thoughts_file" 2>/dev/null | tail -1 || echo "unknown")
         
         if [[ "$proposer_agent" == god-delegate-* ]]; then
             echo "[$(date -u +%H:%M:%S)] SAFETY: $topic proposed by $proposer_agent (god-delegate). Requires 4+ approve votes (raised threshold for god proposals)."
