@@ -1365,6 +1365,32 @@ claim_task() {
   local issue="$1"
   [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
 
+  # Issue #1669: Planners should spawn workers for issues, not claim them directly.
+  # Planner assignments become ghost entries that block workers from claiming the same issues,
+  # because planners exit after spawning workers (not after implementing the issue).
+  local calling_role="${AGENT_ROLE:-}"
+  if [ "$calling_role" = "planner" ]; then
+    log "Coordinator: planners should not claim issues — spawn a worker for issue #$issue instead (role=$calling_role)"
+    return 1
+  fi
+
+  # Issue #1672: Check if an open PR already exists for this issue before claiming.
+  # The coordinator's task queue refresh (refresh_task_queue) already skips issues
+  # with open PRs, but workers that self-select via direct claim_task() bypass that check.
+  # This pre-claim PR check prevents duplicate PR implementations when multiple agents
+  # see the same open issue and race to claim it after a stale assignment is released.
+  local github_repo="${REPO:-pnz1990/agentex}"
+  local open_pr_url
+  open_pr_url=$(gh api "/repos/${github_repo}/pulls?state=open&per_page=100" 2>/dev/null | \
+    jq -r --arg n "$issue" \
+    '.[] | select(.body // "" | test("(C|c)loses? #\($n)\\b|(F|f)ixes? #\($n)\\b|(R|r)esolves? #\($n)\\b")) | .html_url' \
+    2>/dev/null | head -1)
+  if [ -n "$open_pr_url" ]; then
+    log "Coordinator: issue #$issue already has open PR — skipping to prevent duplicate implementation (PR: $open_pr_url)"
+    push_metric "TaskClaimBlockedByPR" 1
+    return 1
+  fi
+
   local max_attempts=5
   local attempt=0
 
