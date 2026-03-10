@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'images/runner/**'
+      - '.github/workflows/validate-runner.yml'
   push:
     branches:
       - main
@@ -93,6 +94,27 @@ jobs:
           else
             echo "helpers.sh not found, skipping"
           fi
+
+      - name: Validate planner-loop.sh
+        run: |
+          # Issue #1824: planner-loop.sh is the civilization's heartbeat — the Deployment
+          # that ensures planners are always running. A syntax error merged to main would
+          # crash the planner-loop pod after restart, stopping ALL planner perpetuation.
+          # This is the same risk issue #1703 identified for coordinator.sh but was missed.
+          # planner-loop.sh is ~335 lines and changes with governance/spawn logic updates.
+          if [ -f images/runner/planner-loop.sh ]; then
+            echo "Running bash syntax check on planner-loop.sh..."
+            bash -n images/runner/planner-loop.sh
+            echo "✓ planner-loop.sh syntax check passed"
+
+            echo "Running shellcheck on planner-loop.sh..."
+            # Same suppression set as other runner scripts: intentional style choices
+            # SC2295: patterns with variables in ${var#pattern} (intentional)
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317,SC2295 --severity=error images/runner/planner-loop.sh
+            echo "✓ planner-loop.sh shellcheck passed"
+          else
+            echo "planner-loop.sh not found, skipping"
+          fi
           
       - name: Check for common bash pitfalls
         run: |
@@ -121,12 +143,13 @@ jobs:
           echo "✓ All runner script validations passed"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
-          echo "Scripts validated (issue #1703):"
-          echo "  - entrypoint.sh  (bash -n + shellcheck)"
-          echo "  - identity.sh    (bash -n + shellcheck)"
-          echo "  - coordinator.sh (bash -n + shellcheck)"
-          echo "  - helpers.sh     (bash -n + shellcheck)"
+          echo "Scripts validated (issue #1703, #1824):"
+          echo "  - entrypoint.sh    (bash -n + shellcheck)"
+          echo "  - identity.sh      (bash -n + shellcheck)"
+          echo "  - coordinator.sh   (bash -n + shellcheck)"
+          echo "  - helpers.sh       (bash -n + shellcheck)"
+          echo "  - planner-loop.sh  (bash -n + shellcheck)"
           echo ""
           echo "This validation prevents silent failures like issue #738 (function"
-          echo "calls before definitions) and guards the coordinator Deployment and"
-          echo "helpers.sh API that all agents depend on at runtime."
+          echo "calls before definitions) and guards the coordinator Deployment,"
+          echo "planner-loop Deployment, and helpers.sh API that all agents depend on."
