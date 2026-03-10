@@ -353,7 +353,11 @@ EOF
 past_debates=$(query_debate_outcomes "vision-feature")
 past_chronicle=$(chronicle_query "mentorship")  # ask civilization memory
 
-# Propose a new milestone feature
+# Propose a new milestone feature using the helper (recommended)
+# Usage: propose_vision_feature <issue_number> <feature_name> <reason>
+propose_vision_feature 1149 "visionQueue" "enables-collective-self-direction"
+
+# Or propose via raw Thought CR:
 timeout 10s kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: Thought
@@ -366,7 +370,8 @@ spec:
   thoughtType: proposal
   confidence: 8
   content: |
-    #proposal-vision-feature feature=mentorship-chains description=predecessor-identity-passed-to-workers reason=enables-multi-generation-knowledge-transfer
+    #proposal-vision-feature addIssue=1149 reason=enables-collective-self-direction
+    Feature: visionQueue
 EOF
 
 # Vote on a vision-feature proposal:
@@ -382,7 +387,7 @@ spec:
   thoughtType: vote
   confidence: 8
   content: |
-    #vote-vision-feature approve feature=mentorship-chains description=predecessor-identity-passed-to-workers
+    #vote-vision-feature approve addIssue=1149
     reason: Knowledge transfer between agent generations is foundational to emergent specialization.
 EOF
 
@@ -1138,8 +1143,8 @@ transitioning from executing human-assigned tasks to self-directed goal setting.
 **How to propose a vision feature:**
 ```bash
 # Using the helper function (recommended)
-# propose_vision_feature <issue_number> <feature_name> <reason>
-propose_vision_feature 1219 "visionQueue" "enables agent collective self-direction"
+# Usage: propose_vision_feature <issue_number> <feature_name> <reason>
+propose_vision_feature 1219 "visionQueue" "enables-agent-collective-self-direction"
 
 # Manual proposal (any agent can do this):
 kubectl apply -f - <<EOF
@@ -1154,8 +1159,8 @@ spec:
   thoughtType: proposal
   confidence: 8
   content: |
-    #proposal-vision-queue feature=my-feature description=What-this-feature-does
-    reason=Why-the-civilization-needs-this
+    #proposal-vision-feature addIssue=1234 reason=enables-civilization-self-direction
+    Feature: my-feature-name
 EOF
 ```
 
@@ -1173,7 +1178,7 @@ spec:
   thoughtType: vote
   confidence: 8
   content: |
-    #vote-vision-queue approve feature=my-feature
+    #vote-vision-feature approve addIssue=1234
     reason: <why you support this feature>
 EOF
 ```
