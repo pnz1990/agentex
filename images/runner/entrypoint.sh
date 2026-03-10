@@ -4209,11 +4209,13 @@ PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --j
 # Temp file /tmp/agentex-n2-priority-set survives subprocess isolation.
 N2_COORDINATION=$( ( [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ] ) && echo 1 || echo 0)
 
-# Compute vision-aligned self-improvement score (issue #1283)
+# Compute vision-aligned self-improvement score (issue #1283, role-aware: issue #1723)
 # Replaces volume-based scoring (issues + PRs) with quality-based metrics:
 #   +3 for debate participation (encouraged deliberative society)
 #   +3 for synthesis persisted to S3 (anti-amnesia, prevents civilization debate loss)
-#   +3 for vision-aligned issue filing (prevents trivial-issue gaming)
+#   +3 for primary contribution — ROLE-AWARE (governance: audit-role-aware, 21+ votes):
+#       worker/reviewer/architect: opening PRs (their primary deliverable)
+#       planner: filing vision-aligned issues (their primary deliverable)
 #   +1 for N+2 planning coordination (multi-generation awareness)
 # Maximum: 10 points
 SI_SCORE=0
@@ -4227,10 +4229,35 @@ if [ "$SYNTHESIS_PERSISTED_FLAG" -eq 1 ]; then
   SI_SCORE=$((SI_SCORE + 3))
   SI_DETAILS_PARTS+=("synthesis-persisted=yes")
 fi
-if [ "$VISION_ISSUES" -gt 0 ]; then
+
+# Issue #1723: Role-aware primary contribution scoring (governance: audit-role-aware).
+# Workers/reviewers/architects: scored on PRs opened (implementing issues is their job).
+# Planners: scored on vision-aligned issues filed (identifying improvements is their job).
+# This prevents workers from being penalized for not filing new issues when their PR IS
+# the contribution, and prevents planners from being penalized for not opening PRs directly.
+case "$AGENT_ROLE" in
+  worker|reviewer|architect)
+    # Workers/reviewers/architects: primary contribution = PRs opened
+    PRIMARY_CONTRIBUTION="$PRS_OPENED"
+    PRIMARY_LABEL="prs-opened"
+    ;;
+  planner)
+    # Planners: primary contribution = vision-aligned issues filed
+    PRIMARY_CONTRIBUTION="$VISION_ISSUES"
+    PRIMARY_LABEL="vision-issues"
+    ;;
+  *)
+    # Default (god-delegate, critic, etc.): vision-aligned issues
+    PRIMARY_CONTRIBUTION="$VISION_ISSUES"
+    PRIMARY_LABEL="vision-issues"
+    ;;
+esac
+
+if [ "$PRIMARY_CONTRIBUTION" -gt 0 ]; then
   SI_SCORE=$((SI_SCORE + 3))
-  SI_DETAILS_PARTS+=("vision-issues=$VISION_ISSUES")
+  SI_DETAILS_PARTS+=("primary-contrib(${AGENT_ROLE}/${PRIMARY_LABEL})=${PRIMARY_CONTRIBUTION}")
 fi
+
 if [ "$N2_COORDINATION" -eq 1 ]; then
   SI_SCORE=$((SI_SCORE + 1))
   SI_DETAILS_PARTS+=("n2-coordination=yes")
@@ -4240,7 +4267,7 @@ fi
 if [ "${#SI_DETAILS_PARTS[@]}" -gt 0 ]; then
   SI_DETAILS="Vision-aligned compliance: $(IFS=', '; echo "${SI_DETAILS_PARTS[*]}")"
 else
-  SI_DETAILS="No vision-aligned contributions detected (debate=0, synthesis=0, vision-issues=0, n2=0). Issues=$ISSUES_CREATED, PRs=$PRS_OPENED (volume metrics no longer drive score)."
+  SI_DETAILS="No vision-aligned contributions detected (debate=0, synthesis=0, primary-contrib=0, n2=0). Role=${AGENT_ROLE} Issues=$ISSUES_CREATED, PRs=$PRS_OPENED (volume metrics no longer drive score)."
 fi
 
 # Post audit result as a thought for peer visibility
@@ -4250,6 +4277,7 @@ post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Dir
 push_metric "SelfImprovementScore" "$SI_SCORE" "None"
 push_metric "DebateResponsesByAgent" "$DEBATE_RESPONSES" "Count"
 push_metric "SynthesisPersistedByAgent" "$SYNTHESIS_PERSISTED_FLAG" "Count"
+push_metric "PrimaryContributionByAgent" "$PRIMARY_CONTRIBUTION" "Count"
 push_metric "VisionIssuesByAgent" "$VISION_ISSUES" "Count"
 push_metric "N2CoordinationUsed" "$N2_COORDINATION" "Count"
 # Legacy volume metrics still tracked for trend analysis (but no longer drive score)
@@ -4264,7 +4292,7 @@ if [ "$PRS_OPENED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_id
   update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
 fi
 
-log "Self-improvement audit complete: score=$SI_SCORE/10 (debate=$DEBATE_RESPONSES synthesis-persisted=$SYNTHESIS_PERSISTED_FLAG vision-issues=$VISION_ISSUES n2=$N2_COORDINATION)"
+log "Self-improvement audit complete: score=$SI_SCORE/10 (debate=$DEBATE_RESPONSES synthesis-persisted=$SYNTHESIS_PERSISTED_FLAG primary-contrib[${AGENT_ROLE}/${PRIMARY_LABEL}]=${PRIMARY_CONTRIBUTION} n2=$N2_COORDINATION)"
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
 # The agent who opened a PR has the most context to fix a CI failure.
