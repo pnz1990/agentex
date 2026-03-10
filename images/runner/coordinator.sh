@@ -2339,12 +2339,33 @@ route_tasks_by_specialization() {
         best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
 
         if [ -n "$best_agent" ]; then
-            # Record specialized routing decision in coordinator state
-            local routing_entry="${issue_num}:${best_agent}"
-            routing_log="${routing_log}${routing_entry};"
-            specialized_count=$((specialized_count + 1))
-            push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
-            echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num → $best_agent"
+            # Issue #1474: Pre-claim the issue on behalf of the specialized agent.
+            # Write best_agent:issue_num directly to activeAssignments so the agent
+            # finds its pre-assignment when it calls request_coordinator_task().
+            # Without this, workers race to claim tasks BEFORE routing runs and
+            # find nothing left to route, keeping specializedAssignments = 0 forever.
+            local new_pre_assignments
+            local cur_assignments
+            cur_assignments=$(get_state "activeAssignments")
+            if [ -z "$cur_assignments" ]; then
+                new_pre_assignments="${best_agent}:${issue_num}"
+            else
+                new_pre_assignments="${cur_assignments},${best_agent}:${issue_num}"
+            fi
+            if update_state "activeAssignments" "$new_pre_assignments"; then
+                # Also update the local variable so subsequent iterations see the new assignment
+                active_assignments="$new_pre_assignments"
+
+                # Record specialized routing decision in coordinator state
+                local routing_entry="${issue_num}:${best_agent}"
+                routing_log="${routing_log}${routing_entry};"
+                specialized_count=$((specialized_count + 1))
+                push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
+                echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING (pre-claimed): issue #$issue_num → $best_agent"
+            else
+                echo "[$(date -u +%H:%M:%S)] WARNING: pre-claim write failed for $best_agent:$issue_num — falling back to generic"
+                generic_count=$((generic_count + 1))
+            fi
         else
             generic_count=$((generic_count + 1))
         fi
