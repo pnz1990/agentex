@@ -1067,10 +1067,17 @@ score_agent_for_issue() {
         return 0
     fi
 
-    # Check if identity has specialization data
-    local has_spec
-    has_spec=$(echo "$identity_json" | jq -r '.specialization // empty' 2>/dev/null || echo "")
-    if [ -z "$has_spec" ]; then
+    # Check if identity has ANY specialization data (label counts or code areas).
+    # NOTE: Do NOT gate on .specialization string field — that is only set after 3+ issues
+    # with the same label (update_specialization threshold). Scoring should work as soon as
+    # an agent has any label count history (even 1 issue). Without this, routing always
+    # returns 0 until an agent crosses the threshold, making v0.2 routing non-functional.
+    # Issue #1152: removed premature early-exit on empty .specialization string.
+    local has_label_data
+    has_label_data=$(echo "$identity_json" | jq -r \
+        'if (.specializationLabelCounts | length) > 0 or (.specializationDetail.codeAreas | length) > 0 then "yes" else "" end' \
+        2>/dev/null || echo "")
+    if [ -z "$has_label_data" ]; then
         echo "0"
         return 0
     fi
