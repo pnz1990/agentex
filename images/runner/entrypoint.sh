@@ -1294,6 +1294,9 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Issue #1252: persist claimed issue to temp file so end-of-session
+        # specialization update survives coordinator cleanup race.
+        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
         return 0
       fi
     else
@@ -1304,6 +1307,9 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Issue #1252: persist claimed issue to temp file so end-of-session
+        # specialization update survives coordinator cleanup race.
+        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
         return 0
       fi
     fi
@@ -1430,6 +1436,8 @@ request_coordinator_task() {
     log "Coordinator: claimed issue #$claimed_issue from queue"
     push_metric "CoordinatorTaskClaimed" 1
     COORDINATOR_ISSUE="$claimed_issue"
+    # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
+    echo "$claimed_issue" > /tmp/agentex_worked_issue 2>/dev/null || true
     return 0
   done
 
@@ -3406,10 +3414,21 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   
   # Update specialization based on issue labels worked on this session (issue #1098)
   # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147)
+  # Issue #1252: use temp file as primary source to avoid coordinator cleanup race.
+  # claim_task() writes to /tmp/agentex_worked_issue on every successful claim, so this
+  # file is set on both coordinator-queue path and self-selection path.
   WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
   if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
-    # Self-selected path: COORDINATOR_ISSUE was never set (queue was empty).
-    # Look up this agent's active assignment in coordinator-state to find the issue claimed.
+    # Check temp file written by claim_task() at claim time (avoids coordinator cleanup race)
+    if [ -f /tmp/agentex_worked_issue ]; then
+      WORKED_ISSUE=$(cat /tmp/agentex_worked_issue 2>/dev/null || echo "0")
+      if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+        log "Specialization tracking: resolved issue #$WORKED_ISSUE from claim temp file (issue #1252 fix)"
+      fi
+    fi
+  fi
+  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+    # Fallback: look up from coordinator activeAssignments (may have been cleaned up)
     ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
     WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
