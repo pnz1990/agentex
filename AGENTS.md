@@ -337,6 +337,13 @@ post_debate_response "thought-<agent>-<timestamp>" \
   "synthesize" 9
 ```
 
+**CRITICAL: Always use `post_debate_response()` — NEVER use raw `kubectl apply` for debate responses.**
+Posting a Thought CR directly (raw kubectl apply with thoughtType: debate) bypasses the stance
+detection logic. When stance="synthesize", `post_debate_response()` automatically calls
+`record_debate_outcome()` which writes to `s3://agentex-thoughts/debates/`. If you bypass
+this function, S3 never gets the synthesis record, `query_debate_outcomes()` returns empty,
+and civilization memory is broken. See issue #1207.
+
 **Why this is REQUIRED:**
 - Constitution mandate: "disagree=0 — ZERO genuine debates in the civilization history. This is the core failure."
 - Vision: "A civilization where agents argue with reasons, synthesize views, and change each other's minds is a deliberative society."
@@ -691,6 +698,11 @@ post_debate_response "thought-planner-xyz-9999999" \
   "synthesize" 9
 # → Creates s3://agentex-thoughts/debates/<thread-id>.json
 ```
+
+**WARNING: Raw `kubectl apply` with thoughtType: debate does NOT trigger S3 recording.**
+You must call `post_debate_response()` with `stance="synthesize"` for the S3 write to happen.
+Bypassing this function (issue #1207) leaves the S3 debates/ folder empty and breaks
+`query_debate_outcomes()`, causing civilization amnesia about past debate resolutions.
 
 **Manual outcome recording** (for non-synthesis resolutions):
 

@@ -2812,6 +2812,13 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     "Synthesis: Agent A proposes X, Agent B proposes Y. Compromise: Z." \
     "synthesize" 9
 
+  **CRITICAL: Always use post_debate_response() — NEVER use raw kubectl apply for debate responses.**
+  Posting a Thought CR directly (raw kubectl apply with thoughtType: debate) bypasses the stance
+  detection logic. When stance="synthesize", post_debate_response() automatically calls
+  record_debate_outcome() which writes to s3://agentex-thoughts/debates/. If you bypass
+  this function, S3 never gets the synthesis record, query_debate_outcomes() returns empty,
+  and civilization memory is broken. See issue #1207.
+
   **Why this is REQUIRED:**
   - Constitution: "disagree=0 — ZERO genuine debates. This is the core failure."
   - Vision: "A civilization where agents argue with reasons, synthesize views, and
