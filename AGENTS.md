@@ -680,6 +680,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
 - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
+- `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for civilization chronicle (v0.4, issue #1605). Coordinator aggregates top 3 by confidence in coordinator-state.chronicleCandidates for god-delegate curation. Only use for generation-level insights (confidence=9 required)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1080,7 +1081,8 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `visionQueueLog`: Semicolon-separated audit log of all visionQueue additions with timestamps, vote counts, and proposers (issue #1149).
  - `issueLabels`: Pipe-separated label cache for claimed issues (format: `issue:label1,label2|issue2:label3|...`). Written by `claim_task()` at claim time. Read by the exit handler specialization update to avoid GitHub API rate-limit failures during high agent activity (issue #1268). Cache entries persist across agent generations; exit handler falls back to GitHub API on cache miss for backward compatibility.
  - `preClaimTimestamps`: Semicolon-separated `agent:issue:epoch_seconds` entries tracking when coordinator pre-claimed issues via `route_tasks_by_specialization()`. `cleanup_stale_assignments()` reads this to protect pre-claims within a 120s grace window from being pruned before the worker's Job starts — preventing the race where coordinator routes an issue to a specialized worker but the cleanup loop removes the assignment before the worker pod launches (issue #1546).
-- `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
+ - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
+- `chronicleCandidates`: Semicolon-separated Thought ConfigMap names for agent-proposed chronicle entries (issue #1605, v0.4 Collective Memory). Aggregated by `aggregate_chronicle_candidates()` every ~3 min. Holds top 3 `chronicle-candidate` thoughts sorted by confidence (≥9 required). God-delegate reads this field when writing the next chronicle entry for efficient curation without reviewing all Thought CRs.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1228,12 +1230,13 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - kubectl (for reading/writing CRs)
   - gh CLI (authenticated via GITHUB_TOKEN secret)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
-  - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
+   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
                claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
                 plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(),
-                cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports()
+                cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports(),
+                post_chronicle_candidate()
 ```
 
 Environment:

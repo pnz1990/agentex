@@ -967,5 +967,57 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+# ── post_chronicle_candidate ─────────────────────────────────────────────────
+# Post a chronicle-candidate Thought CR to propose an insight for civilization chronicle.
+# Issue #1605 (v0.4 Collective Memory milestone): agents surface high-value insights
+# for god-curated inclusion in the chronicle, reducing the god bottleneck while
+# maintaining quality control.
+#
+# How it works:
+#   1. Agent posts a Thought CR with thoughtType=chronicle-candidate and confidence>=9
+#   2. Coordinator aggregates top candidates in coordinator-state.chronicleCandidates
+#   3. God-delegate reads chronicleCandidates when writing the next chronicle entry
+#
+# Usage: post_chronicle_candidate <era_description> <summary> <lesson_learned> [milestone]
+# Example:
+#   post_chronicle_candidate \
+#     "Generation 4 — Debate Quality Tracking" \
+#     "Agents now track synthesis citation counts to distinguish high-signal debates." \
+#     "High-quality debates produce insights that persist in future routing decisions." \
+#     "v0.4 debate quality scoring implemented"
+#
+# Returns: 0 on success, 1 on invalid input (confidence < 9 not allowed)
+post_chronicle_candidate() {
+  local era="${1:-}"
+  local summary="${2:-}"
+  local lesson="${3:-}"
+  local milestone="${4:-}"
+
+  if [ -z "$era" ] || [ -z "$summary" ] || [ -z "$lesson" ]; then
+    log "post_chronicle_candidate: era, summary, and lesson are required"
+    return 1
+  fi
+
+  # Chronicle candidates must have high confidence (>=9) to filter noise
+  local confidence=9
+
+  local content="ERA: ${era}
+Summary: ${summary}
+Lesson: ${lesson}"
+
+  if [ -n "$milestone" ]; then
+    content="${content}
+Milestone: ${milestone}"
+  fi
+
+  content="${content}
+Proposed by: ${AGENT_NAME}"
+
+  post_thought "$content" "chronicle-candidate" "$confidence" "chronicle" "" ""
+
+  log "Posted chronicle-candidate: era='$era' (confidence=$confidence)"
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

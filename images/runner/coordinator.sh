@@ -352,6 +352,15 @@ ensure_state_fields_initialized() {
       -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
   fi
 
+  # chronicleCandidates (issue #1605): semicolon-separated Thought ConfigMap names for
+  # agent-proposed chronicle entries. Aggregated by aggregate_chronicle_candidates() every
+  # ~3 min (every 6 iterations). God-delegate reads this when writing the next chronicle entry.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -2070,6 +2079,56 @@ EOF
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
+# ── aggregate_chronicle_candidates (issue #1605) ─────────────────────────────
+#
+# Aggregate Thought CRs with thoughtType=chronicle-candidate and surface the
+# top 3 (by confidence score) in coordinator-state.chronicleCandidates.
+#
+# The god-delegate reads chronicleCandidates when writing the next chronicle entry,
+# making human curation faster while preserving quality control.
+#
+# v0.4 Collective Memory: agents propose their own insights for the civilization
+# chronicle rather than relying solely on god to curate everything.
+#
+# Implementation:
+#   1. Read all Thought CRs with thoughtType=chronicle-candidate
+#   2. Sort by confidence (highest first)
+#   3. Take top 3 ConfigMap names
+#   4. Patch coordinator-state.chronicleCandidates (semicolon-separated names)
+aggregate_chronicle_candidates() {
+    # Fetch chronicle-candidate thoughts using label selector to avoid OOM
+    local candidates_json
+    candidates_json=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+        -l agentex/thought -o json 2>/dev/null | \
+        jq '[.items[] | select(.data.thoughtType == "chronicle-candidate") | {
+            name: .metadata.name,
+            confidence: ((.data.confidence // "7") | tonumber),
+            agent: (.data.agentRef // ""),
+            content: ((.data.content // "") | .[0:200]),
+            createdAt: .metadata.creationTimestamp
+        }] | sort_by(-.confidence, .createdAt) | .[0:3]' 2>/dev/null || echo "[]")
+
+    if [ -z "$candidates_json" ] || [ "$candidates_json" = "[]" ] || [ "$candidates_json" = "null" ]; then
+        # No candidates found — keep existing chronicleCandidates field as-is
+        return 0
+    fi
+
+    # Extract top candidate names
+    local top_candidates
+    top_candidates=$(echo "$candidates_json" | jq -r '.[].name' 2>/dev/null | tr '\n' ';' | sed 's/;$//')
+
+    if [ -z "$top_candidates" ]; then
+        return 0
+    fi
+
+    local candidate_count
+    candidate_count=$(echo "$candidates_json" | jq 'length' 2>/dev/null || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] Chronicle candidates: $candidate_count found, top 3 surfaced (issue #1605)"
+    update_state "chronicleCandidates" "$top_candidates"
+    push_metric "ChroniceCandidates" "$candidate_count" "Count" "Component=Coordinator"
+}
+
 track_debate_activity() {
     local all_cm
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
@@ -2234,6 +2293,11 @@ DEBATE_EOF
         fi
     fi
     # ── End Issue #1161 ───────────────────────────────────────────────────────
+
+    # ── Issue #1605: Aggregate chronicle-candidate thoughts ──────────────────
+    # After processing debate activity, also aggregate chronicle candidates so
+    # god-delegate can find agent-proposed chronicle entries efficiently.
+    aggregate_chronicle_candidates
 
     # If there are unresolved disagreements and no synthesis attempts, post a nudge
     if [ "$disagree_count" -gt 0 ] && [ "$synthesize_count" -eq 0 ]; then
