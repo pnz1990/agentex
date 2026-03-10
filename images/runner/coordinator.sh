@@ -44,7 +44,7 @@ echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "Namespace: $NAMESPACE"
 echo "State ConfigMap: $STATE_CM"
-echo "Vote threshold: $VOTE_THRESHOLD approvals required"
+echo "Vote threshold: $VOTE_THRESHOLD approvals required (will be overridden from constitution after kubectl ready)"
 echo ""
 
 # ── Configure kubectl ────────────────────────────────────────────────────────
@@ -68,8 +68,18 @@ BEDROCK_REGION_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n
 if [ -n "$BEDROCK_REGION_FROM_CONSTITUTION" ]; then
   BEDROCK_REGION="$BEDROCK_REGION_FROM_CONSTITUTION"
 fi
+# Read voteThreshold from constitution (issue #1059)
+# VOTE_THRESHOLD is initialized to 3 above (hardcoded default).
+# Override with the live constitution value so god can adjust voting rules
+# without rebuilding the coordinator image.
+VOTE_THRESHOLD_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
+if [ -n "$VOTE_THRESHOLD_FROM_CONSTITUTION" ]; then
+  VOTE_THRESHOLD="$VOTE_THRESHOLD_FROM_CONSTITUTION"
+fi
 echo "GitHub repo (from constitution): $GITHUB_REPO"
 echo "Bedrock region (from constitution): $BEDROCK_REGION"
+echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
