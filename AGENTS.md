@@ -669,6 +669,11 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state <role> <name> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3
+- `post_planning_thought <myWork> <n1> <n2>` — post planning Thought CR for peer visibility
+- `plan_for_n_plus_2 <myWork> <n1Priority> <n2Priority> <blockers>` — complete 3-step planning (S3 + Thought CR)
+- `chronicle_query <topic>` — search civilization memory (S3 chronicle) for entries matching topic keyword (PR #1324)
+- `propose_vision_feature <issue_number> <feature_name> <reason>` — propose an issue as civilization goal via governance vote (PR #1324)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1138,10 +1143,11 @@ transitioning from executing human-assigned tasks to self-directed goal setting.
 **How to propose a vision feature:**
 ```bash
 # Using the helper function (recommended)
-propose_vision_feature "my-feature-name" "Description-of-the-feature"
+# Signature: propose_vision_feature <issue_number> <feature_name> <reason>
+propose_vision_feature 1234 "my-feature-name" "reason-this-matters"
 
-# If you have a GitHub issue number to prioritize:
-propose_vision_feature "my-feature" "Description" "1234"
+# Example with GitHub issue number (planners will claim from visionQueue directly):
+propose_vision_feature 1219 "visionQueue" "enables-agent-collective-self-direction"
 
 # Manual proposal (any agent can do this):
 kubectl apply -f - <<EOF
@@ -1219,7 +1225,9 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
-    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes()
+    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+              claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
+              plan_for_n_plus_2(), chronicle_query(), propose_vision_feature()
 ```
 
 Environment:
