@@ -701,6 +701,39 @@ cleanup_stale_assignments() {
         raw_job_json=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null || echo "")
         job_active=$(echo "${raw_job_json:-{\}}" | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null || echo "false")
 
+        # Issue #1546: Check grace window for coordinator pre-claims
+        # If job is not active but this is a recent pre-claim (< 120s), keep the assignment.
+        # This allows time for kro to create the Job after route_tasks_by_specialization() pre-claims.
+        if [ "$job_active" = "false" ]; then
+            local pre_claim_timestamps
+            pre_claim_timestamps=$(get_state "preClaimTimestamps")
+            if [ -n "$pre_claim_timestamps" ]; then
+                local ts_now
+                ts_now=$(date -u +%s)
+                local pre_claim_age=""
+                # Search for timestamp entry matching this agent:issue pair
+                local ts_entry
+                ts_entry=$(echo "$pre_claim_timestamps" | tr ';' '\n' | grep "^${agent_name}:${issue}:" | head -1)
+                if [ -n "$ts_entry" ]; then
+                    local claim_ts
+                    claim_ts=$(echo "$ts_entry" | cut -d: -f3)
+                    if [[ "$claim_ts" =~ ^[0-9]+$ ]]; then
+                        pre_claim_age=$((ts_now - claim_ts))
+                    fi
+                fi
+                
+                # If pre-claim is < 120s old, keep the assignment (grace window)
+                if [ -n "$pre_claim_age" ] && [ "$pre_claim_age" -lt 120 ]; then
+                    echo "[$(date -u +%H:%M:%S)] Grace window: $agent_name → issue #$issue pre-claimed ${pre_claim_age}s ago, keeping assignment"
+                    local clean_pair="${agent_name}:${issue}"
+                    [ -n "$cleaned_assignments" ] \
+                        && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                        || cleaned_assignments="${clean_pair}"
+                    continue
+                fi
+            fi
+        fi
+
         if [ "$job_active" = "true" ]; then
             # Issue #1094: Even if agent job is running, check if the GitHub issue is still open.
             # If the issue was closed (by a merged PR or god), remove the assignment so the
@@ -755,6 +788,35 @@ cleanup_stale_assignments() {
 
     update_state "activeAssignments" "$cleaned_assignments"
     [ $stale_count -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Cleaned $stale_count stale assignments"
+    
+    # Issue #1546: Clean up old pre-claim timestamp entries (> 300s old)
+    # Keep only timestamps for assignments that still exist in cleaned_assignments or are < 300s old
+    local pre_claim_timestamps
+    pre_claim_timestamps=$(get_state "preClaimTimestamps")
+    if [ -n "$pre_claim_timestamps" ]; then
+        local ts_now
+        ts_now=$(date -u +%s)
+        local cleaned_timestamps=""
+        
+        IFS=';' read -ra ts_entries <<< "$pre_claim_timestamps"
+        for ts_entry in "${ts_entries[@]}"; do
+            [ -z "$ts_entry" ] && continue
+            local ts_agent="${ts_entry%%:*}"
+            local ts_rest="${ts_entry#*:}"
+            local ts_issue="${ts_rest%%:*}"
+            local claim_ts="${ts_rest##*:}"
+            
+            # Keep if assignment still exists OR timestamp is < 300s old
+            if echo "$cleaned_assignments" | grep -q "${ts_agent}:${ts_issue}"; then
+                [ -n "$cleaned_timestamps" ] && cleaned_timestamps="${cleaned_timestamps};${ts_entry}" || cleaned_timestamps="${ts_entry}"
+            elif [[ "$claim_ts" =~ ^[0-9]+$ ]] && [ $((ts_now - claim_ts)) -lt 300 ]; then
+                [ -n "$cleaned_timestamps" ] && cleaned_timestamps="${cleaned_timestamps};${ts_entry}" || cleaned_timestamps="${ts_entry}"
+            fi
+        done
+        
+        update_state "preClaimTimestamps" "$cleaned_timestamps"
+    fi
+    
     # Clean up local helper function to avoid name pollution
     unset -f _get_issue_state 2>/dev/null || true
 }
@@ -2402,10 +2464,39 @@ route_tasks_by_specialization() {
             specialized_count=$((specialized_count + 1))
             push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
             echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num → $best_agent"
+            
+            # Issue #1546: Pre-claim the issue on behalf of the specialized agent
+            # This reserves the issue before generic claiming can race. The cleanup function
+            # will respect a 120s grace window to allow the worker Job to start.
+            local pre_claim="${best_agent}:${issue_num}"
+            if [ -n "$active_assignments" ]; then
+                active_assignments="${active_assignments},${pre_claim}"
+            else
+                active_assignments="${pre_claim}"
+            fi
+            
+            # Track pre-claim timestamp for grace window enforcement in cleanup_stale_assignments()
+            local ts_now
+            ts_now=$(date -u +%s)
+            local pre_claim_ts="${best_agent}:${issue_num}:${ts_now}"
+            local existing_timestamps
+            existing_timestamps=$(get_state "preClaimTimestamps")
+            if [ -n "$existing_timestamps" ]; then
+                update_state "preClaimTimestamps" "${existing_timestamps};${pre_claim_ts}"
+            else
+                update_state "preClaimTimestamps" "${pre_claim_ts}"
+            fi
+            
+            echo "[$(date -u +%H:%M:%S)] PRE-CLAIMED: $best_agent → issue #$issue_num (grace window: 120s)"
         else
             generic_count=$((generic_count + 1))
         fi
     done
+    
+    # Issue #1546: Write pre-claimed assignments to coordinator state
+    if [ "$specialized_count" -gt 0 ]; then
+        update_state "activeAssignments" "$active_assignments"
+    fi
 
     # Update routing metrics in coordinator state
     if [ "$specialized_count" -gt 0 ] || [ "$generic_count" -gt 0 ]; then
