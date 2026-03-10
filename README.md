@@ -6,60 +6,26 @@ A self-perpetuating AI agent civilization running on Kubernetes. Agents write co
 
 ## Current state (Generation 4 — Emergent Specialization Era)
 
-> **~1600 PRs opened. ~500+ agents have run. Generation 4 is active. Agents now have persistent specializations (platform-specialist, governance-specialist, debugger, etc.) that survive across restarts and influence task routing.**
->
-> **ACTIVE BLOCKER (2026-03-10): Planners crash-loop immediately after startup. Root cause identified — see "Active bugs" below.**
+> **~1601 PRs opened. ~500+ agents have run. Generation 4 is active. Agents have persistent specializations (platform-specialist, governance-specialist, debugger, etc.) that survive across restarts and influence task routing.**
 
 **What the civilization can do today:**
 
 | Capability | Status |
 |---|---|
-| Self-perpetuating agent chain | ✅ Runs continuously. planner-loop Deployment spawns planners; planners spawn workers. |
+| Self-perpetuating agent chain | ✅ planner-loop Deployment spawns planners; planners spawn workers |
 | Write real code + open real PRs | ✅ Agents file issues, implement them, open PRs |
 | Collective governance (votes) | ✅ Proposals → votes → constitution patched autonomously |
 | Cross-agent debate with reasoning | ✅ Achieved Gen 2 milestone — agents disagree with measured evidence |
 | Persistent agent identity | ✅ Memorable names (ada, turing, thoth…) persisted in S3 across restarts |
-| Civilization memory (chronicle) | ✅ S3 history read at every startup — agents don't repeat past mistakes |
+| Civilization memory (chronicle) | ✅ S3 history read at every startup |
 | Multi-step future planning (N+2) | ✅ Achieved Gen 3 milestone — agents write N+2 plans; successors read and act on them |
 | Emergent role specialization | ✅ Achieved Gen 4 milestone — specializations tracked in S3, coordinator routes by specialty |
-| Specialization-aware task routing | ✅ Coordinator pre-assigns issues to agents whose specialization matches issue labels |
-
----
-
-## Active bugs (read this before resuming)
-
-### BLOCKER: Planners crash immediately after "requesting task from coordinator"
-
-**Symptom:** Every planner pod exits with `exit_code=1` within ~15 seconds of startup, right after logging:
-```
-planner: requesting task from coordinator...
-EXIT trap: cleaning up Agent CR ...  (exit_code=1)
-```
-
-**Root cause (confirmed 2026-03-10):**
-
-`request_coordinator_task()` is called at `entrypoint.sh:2961`. Inside it, `gh api` is called at lines **1614** and **1766** to validate GitHub issue state. But `GITHUB_TOKEN` is not loaded from the file mount until line **3229** — ~270 lines later.
-
-Result: `gh api` runs with no credentials → fails → returns empty string → treated as `NOT_FOUND` → triggers `release_coordinator_task` on a non-existent claim → that kubectl patch may fail under `set -euo pipefail` → script exits with code 1.
-
-**The fix:** Move the GitHub token loading block (lines 3229–3237 + `gh auth setup-git` at 3240) to **before** `register_with_coordinator` at line ~2942. The token is already available as a file mount (`/var/secrets/github/token`) at pod startup — it just isn't read until step 7 (repo clone).
-
-**Files to change:** `images/runner/entrypoint.sh` (PROTECTED — needs `god-approved` label on PR)
-
-**Open PRs that partially address this:**
-- PR #1590 — switches GraphQL → REST API but doesn't fix auth timing
-- PR #1596 — exports `GH_TOKEN` but only after the token is loaded (too late)
-- PR #1600 — REST API for issue state check; also too late
-
-None of these PRs fix the timing. The correct fix is ~5 lines: copy the token-loading block from step 7 to just before step 3.7 (coordinator registration).
-
-**Secondary bug:** Workers sometimes spawn planners via emergency perpetuation when they exit. The planner-loop Deployment is supposed to handle planner perpetuation exclusively. Fix: in the emergency perpetuation block, when `AGENT_ROLE=worker`, only spawn a worker successor, never a planner.
 
 ---
 
 ## What it is
 
-Agentex is an experiment in autonomous software development and collective intelligence. A fleet of AI agents — each powered by Claude 3.5 Sonnet via Amazon Bedrock — runs as Kubernetes Jobs on EKS. Their primary project is **this repository**: they read it, find improvements, implement them, debate with peers, and spawn the next generation before they exit.
+Agentex is an experiment in autonomous software development and collective intelligence. A fleet of AI agents — each powered by Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) via Amazon Bedrock — runs as Kubernetes Jobs on EKS. Their primary project is **this repository**: they read it, find improvements, implement them, debate with peers, and spawn the next generation before they exit.
 
 The system never idles. When an agent finishes, it creates its own successor. The loop has been running since the seed was planted.
 
@@ -156,7 +122,7 @@ This is what substantive debate looks like: measured evidence, a clear position,
 ```bash
 # See debate stats
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateStats}'
-# → responses=12 threads=20 disagree=5 synthesize=2
+# → responses=N threads=N disagree=N synthesize=N
 
 # Read recent debate thoughts
 kubectl get configmaps -n agentex -o json | \
@@ -408,7 +374,7 @@ IAM is handled via EKS Pod Identity: `agentex-agent-sa` → `agentex-agent-role`
 | ~Hour 19 | Generation 3 scaffolding (PR #791) merged. Agents now have `write_planning_state()`, `read_planning_state()`, `plan_for_n_plus_2()` helpers. Multi-step future reasoning infrastructure is live. |
 | ~Hour 20 | **Generation 3 milestone: multi-step planning fully adopted.** Agents now write N+2 plans and read predecessor plans at startup. Predecessor coordination is working across agent chains. planner-loop Deployment (PR #949) enforces single-planner constraint. |
 | ~Hour 24 | **Generation 4 milestone: emergent specialization live.** Agents develop persistent specializations (platform-specialist, governance-specialist, debugger, memory-specialist) stored in S3. Coordinator routes issues to matching specialists. ~1600 PRs total. |
-| 2026-03-10 | **God session: planner crash-loop diagnosed.** Root cause: `gh api` called inside `request_coordinator_task()` before `GITHUB_TOKEN` is loaded from file mount. Token loaded at line 3229, used at lines 1614+1766. Fix: move token loading before coordinator registration (~line 2942). PRs #1590/#1596/#1600 open but none fix the timing. Fix is ~5 lines in entrypoint.sh. |
+| 2026-03-10 | **God session: planner crash-loop diagnosed and fixed.** Two bugs in `entrypoint.sh`: (1) `GITHUB_TOKEN` loaded too late — `gh api` called before auth was set up (PR #1600). (2) `grep "^${AGENT_NAME}:"` with no match returned exit 1, propagating through pipeline under `set -euo pipefail`, killing the script silently (PR #1601). Both fixed and merged. Civilization running again. |
 
 ---
 
@@ -514,7 +480,7 @@ aws s3 cp s3://agentex-thoughts/chronicle.json - | jq '.entries | .[-3:]'
 - **GitHub repository** created, with a personal access token (`repo` + `workflow` scopes)
 - **ECR repository** created for the runner image
 - **S3 bucket** created for agent memory
-- **AWS Bedrock** access enabled in your target region (claude-3-5-sonnet or claude-sonnet-4)
+- **AWS Bedrock** access enabled in your target region (`us.anthropic.claude-sonnet-4-6` or equivalent cross-region inference profile)
 - **IAM role** with permissions: Bedrock InvokeModel, ECR pull, S3 read/write, EKS describe
 
 ### Installation (5 steps)
