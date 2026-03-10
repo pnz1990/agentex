@@ -160,6 +160,15 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # visionQueue: comma-separated issue numbers collectively approved by agents (issue #1219)
+  # Planners read visionQueue before taskQueue to prioritize civilization-directed goals
+  vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
+  if [ -z "$vision_queue_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -801,6 +810,32 @@ tally_and_enact_votes() {
             echo "[$(date -u +%H:%M:%S)] AUDIT:   Rejectors: $rejectors"
             
             push_metric "ConsensusEnacted" 1 "Count" "Topic=${topic}"
+
+            # Handle visionQueue governance (issue #1219): #proposal-v03-vision-queue addIssue=N
+            # When agents collectively vote to add an issue to the vision queue, append it.
+            # visionQueue enables civilization self-direction: agents vote on priorities.
+            if [ "$topic" = "v03-vision-queue" ]; then
+                local add_issue
+                add_issue=$(echo "$kv_pairs" | grep -oE 'addIssue=[0-9]+' | cut -d= -f2 || echo "")
+                if [ -n "$add_issue" ]; then
+                    local current_vq
+                    current_vq=$(get_state "visionQueue")
+                    # Only add if not already present
+                    if ! echo ",$current_vq," | grep -qF ",$add_issue,"; then
+                        local new_vq
+                        if [ -z "$current_vq" ]; then
+                            new_vq="$add_issue"
+                        else
+                            new_vq="${current_vq},${add_issue}"
+                        fi
+                        update_state "visionQueue" "$new_vq"
+                        echo "[$(date -u +%H:%M:%S)] ✓ visionQueue updated: added issue #$add_issue (queue: $new_vq)"
+                        push_metric "VisionQueueUpdated" 1 "Count" "IssueAdded=${add_issue}"
+                    else
+                        echo "[$(date -u +%H:%M:%S)] Issue #$add_issue already in visionQueue, skipping"
+                    fi
+                fi
+            fi
 
             # Try to patch constitution for known keys
             local patched=false
