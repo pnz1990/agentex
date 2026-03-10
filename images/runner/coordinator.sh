@@ -864,10 +864,12 @@ track_debate_activity() {
     thread_count=$(echo "$all_cm" | jq '[.[] | select(.parent != "" and .parent != null)] | length' 2>/dev/null || echo "0")
 
     # Find unresolved disagreements (debate thoughts with stance "disagree" that have no "synthesize" sibling)
+    # Issue #1096: Use case-insensitive regex to catch all disagreement patterns (disagree, DISAGREE, Disagree)
     local disagree_count
-    disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("disagree|DISAGREE"))] | length' 2>/dev/null || echo "0")
+    disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("disagree"; "i"))] | length' 2>/dev/null || echo "0")
+    # Issue #1096: Use case-insensitive regex to catch all synthesis patterns (synthesis, SYNTHESIS, Synthesis, synthesize, SYNTHESIZE, Synthesize)
     local synthesize_count
-    synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("synthesize|SYNTHESIZE|Synthesis"))] | length' 2>/dev/null || echo "0")
+    synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))] | length' 2>/dev/null || echo "0")
 
     echo "[$(date -u +%H:%M:%S)] Debate stats: responses=$debate_count threads=$thread_count disagree=$disagree_count synthesize=$synthesize_count"
 
