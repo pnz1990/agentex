@@ -695,18 +695,20 @@ tally_and_enact_votes() {
     thoughts_file=$(mktemp /tmp/agentex-thoughts-XXXXXX.json)
     trap "rm -f '$thoughts_file'" RETURN
 
-    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
-    # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
-    # (causes OOM kill — coordinator only has 512Mi limit)
-    # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
-    # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
-    kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote") | {
-            agent: (.data.agentRef // "unknown"),
-            content: (.data.content // ""),
-            type: (.data.thoughtType // ""),
-            ts: .metadata.creationTimestamp
-          }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
+     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+     # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
+     # (causes OOM kill — coordinator only has 512Mi limit)
+     # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
+     # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
+     # Issue #1248: Also include debate thoughts for vision-feature deliberation threshold check.
+     kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+         | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") | {
+             agent: (.data.agentRef // "unknown"),
+             content: (.data.content // ""),
+             type: (.data.thoughtType // ""),
+             parent: (.data.parentRef // ""),
+             ts: .metadata.creationTimestamp
+           }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
 
     local thought_count
     thought_count=$(jq 'length' "$thoughts_file" 2>/dev/null || echo 0)
@@ -817,6 +819,63 @@ tally_and_enact_votes() {
                 push_metric "GovernanceBlocked" 1 "Count" "Topic=${topic},Reason=GodProposalInsufficientVotes"
                 continue
             fi
+        fi
+
+        # ISSUE #1248: Vision-feature proposals require DELIBERATION — not just votes.
+        # Civilization goal-changes must be debated before they can be enacted.
+        # Enforcement: (1) reasoned votes (votes with reason= clause), (2) debate responses.
+        if [[ "$topic" == "vision-feature" || "$topic" == "vision-queue" ]]; then
+            # Count votes that include a reason= clause
+            local reasoned_votes
+            reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .content" \
+                "$thoughts_file" 2>/dev/null | grep -c "reason=" || true)
+            [ -z "$reasoned_votes" ] && reasoned_votes=0
+
+            # Count debate responses (thoughts of type "debate") that mention this topic or vision
+            local debate_responses
+            debate_responses=$(jq -r ".[] | select(.type == \"debate\" and (.content | (test(\"vision|$topic\"; \"i\") or test(\"DEBATE\"; \"\")))) | .agent" \
+                "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+            [ -z "$debate_responses" ] && debate_responses=0
+
+            local vision_threshold_met=true
+            local vision_block_reason=""
+
+            if [ "$reasoned_votes" -lt 2 ]; then
+                vision_threshold_met=false
+                vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= clause), found $reasoned_votes"
+            elif [ "$debate_responses" -lt 1 ]; then
+                vision_threshold_met=false
+                vision_block_reason="vision-feature requires at least 1 debate response, found $debate_responses"
+            fi
+
+            if [ "$vision_threshold_met" = false ]; then
+                echo "[$(date -u +%H:%M:%S)] VISION-FEATURE DELIBERATION BLOCK: $vision_block_reason"
+                echo "[$(date -u +%H:%M:%S)] Votes: approve=$approve_votes (reasoned=$reasoned_votes) debates=$debate_responses"
+                push_metric "GovernanceBlocked" 1 "Count" "Topic=${topic},Reason=InsufficientDeliberation"
+
+                # Post a nudge thought to signal agents must debate before this can pass
+                kubectl_with_timeout 10 apply -f - <<NUDGE_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-coordinator-nudge-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-loop
+  thoughtType: insight
+  confidence: 9
+  content: |
+    GOVERNANCE NUDGE: #proposal-${topic} has ${approve_votes} votes but needs deliberation.
+    Blocked: ${vision_block_reason}
+    To unblock: post a #vote-${topic} approve reason=<your reasoning> AND
+    engage in debate (thoughtType=debate) about this vision change.
+    Civilization goal-changes require deliberation, not just votes.
+NUDGE_EOF
+                continue
+            fi
+
+            echo "[$(date -u +%H:%M:%S)] Vision-feature deliberation check PASSED: reasoned_votes=$reasoned_votes debate_responses=$debate_responses"
         fi
 
         # Enact if threshold reached
