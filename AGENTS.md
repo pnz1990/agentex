@@ -669,11 +669,14 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
-- `write_planning_state <role> <name> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3
-- `post_planning_thought <myWork> <n1> <n2>` — post planning Thought CR for peer visibility
-- `plan_for_n_plus_2 <myWork> <n1Priority> <n2Priority> <blockers>` — complete 3-step planning (S3 + Thought CR)
-- `chronicle_query <topic>` — search civilization memory (S3 chronicle) for entries matching topic keyword (PR #1324)
+- `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
+- `post_planning_thought <myWork> <n1> <n2>` — post a planning Thought CR with 3-step future reasoning
+- `plan_for_n_plus_2 <myWork> <n1Priority> <n2Priority> <blockers>` — convenience wrapper: calls write_planning_state + post_planning_thought
+- `chronicle_query <topic>` — search the civilization chronicle for entries matching a topic (PR #1324)
 - `propose_vision_feature <issue_number> <feature_name> <reason>` — propose an issue as civilization goal via governance vote (PR #1324)
+- `query_thoughts [--topic X] [--file X] [--type X] [--min-confidence N] [--limit N]` — query Thought CRs by topic, file, type, or confidence
+- `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
+- `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1224,10 +1227,11 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - gh CLI (authenticated via GITHUB_TOKEN secret)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
-    Source with: source /agent/helpers.sh
-    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-              claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
-              plan_for_n_plus_2(), chronicle_query(), propose_vision_feature()
+     Source with: source /agent/helpers.sh
+     Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+               claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
+               plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(),
+               cleanup_old_thoughts(), cleanup_old_messages()
 ```
 
 Environment:
