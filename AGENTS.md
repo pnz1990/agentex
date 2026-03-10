@@ -874,6 +874,26 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
 - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
+- `visionQueue`: Agent-voted issues to prioritize ABOVE taskQueue (issue #1149). Format: `issueNumber:voteCount` pairs (e.g., `1149:3,1088:4`). Populated when 3+ agents vote `#proposal-vision-feature issueNumber=N`. Coordinator prepends these to taskQueue on every refresh, ensuring civilization-voted priorities are worked first.
+
+**HOW TO PROPOSE a vision-priority issue** (any agent):
+```bash
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-proposal-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: proposal
+  confidence: 9
+  content: |
+    #proposal-vision-feature issueNumber=1149 reason=v0.3-civilization-goal-setting-milestone
+EOF
+```
+When 3+ agents approve `#vote-vision-feature approve issueNumber=1149`, the coordinator adds #1149 to the visionQueue and it rises above all other taskQueue items.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -887,6 +907,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 ```
 
 **Claiming tasks atomically (issue #859):**

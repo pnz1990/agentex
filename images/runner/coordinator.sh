@@ -160,6 +160,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # visionQueue: agent-voted issue numbers to prioritize ABOVE the taskQueue (issue #1149)
+  # Format: comma-separated "issueNumber:voteCount" pairs, e.g., "1149:3,1088:4"
+  # Populated when 3+ agents vote #proposal-vision-feature issueNumber=N
+  # Coordinator reads visionQueue before taskQueue so vision-aligned issues get priority
+  vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
+  if [ -z "$vision_queue_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -358,12 +369,30 @@ refresh_task_queue() {
         # duplicate work. Deduplication improves coordinator efficiency and reduces queue bloat.
         sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
 
+        # Issue #1149: Prepend visionQueue items BEFORE taskQueue so agent-voted issues get priority
+        # visionQueue contains issues that 3+ agents voted to prioritize via governance
+        # Format: "issueNumber:voteCount" pairs; extract just the issue numbers
+        local vision_queue
+        vision_queue=$(get_state "visionQueue")
+        if [ -n "$vision_queue" ]; then
+            # Extract issue numbers from "issueNumber:voteCount" pairs
+            local vision_issues
+            vision_issues=$(echo "$vision_queue" | tr ',' '\n' | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+            if [ -n "$vision_issues" ]; then
+                # Prepend vision issues, then deduplicate (vision issues appear first)
+                sorted_issues="${vision_issues},${sorted_issues}"
+                # Deduplicate while preserving first occurrence (vision items stay at front)
+                sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
+                echo "[$(date -u +%H:%M:%S)] VISION QUEUE: Prepended vision-voted issues: $vision_issues"
+            fi
+        fi
+
         # Issue #977: Replace queue with fresh open issues from GitHub.
         # Old merge strategy (sorted_issues + current_queue) caused closed issues
         # to persist in the queue indefinitely. Since the queue is driven entirely
         # by GitHub open issues, we simply replace with the latest sorted list.
         update_state "taskQueue" "$sorted_issues"
-        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted, deduplicated): $sorted_issues"
+        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted, vision-prepended, deduplicated): $sorted_issues"
     fi
 }
 
@@ -824,6 +853,34 @@ tally_and_enact_votes() {
                     esac
                 done <<< "$kv_pairs"
                 patch_data="${patch_data}}"
+
+                # Issue #1149: vision-feature topic adds voted issue to visionQueue
+                # Agents propose: #proposal-vision-feature issueNumber=1149
+                # When 3+ approve, coordinator adds it to visionQueue with vote count
+                # Format: "issueNumber:voteCount" pairs, coordinator reads this BEFORE taskQueue
+                if [ "$topic" = "vision-feature" ]; then
+                    local vision_issue
+                    vision_issue=$(echo "$kv_pairs" | grep -oE 'issueNumber=[0-9]+' | cut -d= -f2 || echo "")
+                    if [ -n "$vision_issue" ]; then
+                        local current_vq
+                        current_vq=$(get_state "visionQueue")
+                        local new_entry="${vision_issue}:${approve_votes}"
+                        # Only add if not already in visionQueue
+                        if ! echo "$current_vq" | grep -q "^${vision_issue}:" && \
+                           ! echo "$current_vq" | grep -q ",${vision_issue}:"; then
+                            if [ -z "$current_vq" ]; then
+                                update_state "visionQueue" "$new_entry"
+                            else
+                                update_state "visionQueue" "${current_vq},${new_entry}"
+                            fi
+                            echo "[$(date -u +%H:%M:%S)] ✓ VISION QUEUE: Added issue #$vision_issue (${approve_votes} votes) to visionQueue"
+                            patched=true
+                        else
+                            echo "[$(date -u +%H:%M:%S)] VISION QUEUE: Issue #$vision_issue already in visionQueue, skipping"
+                            patched=true
+                        fi
+                    fi
+                fi
 
                 if [ "$patched" = true ]; then
                     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
