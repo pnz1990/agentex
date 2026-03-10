@@ -401,12 +401,14 @@ cleanup_stale_assignments() {
         local issue="${pair##*:}"
 
         local job_active
-        # Issue #1170: Add 2>/dev/null to jq to suppress stderr parse errors when kubectl
-        # returns empty output (job not found). The || echo "false" handles the exit code,
-        # but without 2>/dev/null jq's error message still appears in coordinator logs.
-        job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
-            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
-            2>/dev/null || echo "false")
+        # Issue #1170: Suppress jq parse errors from kubectl non-JSON output.
+        # Issue #1260: Root cause fix — capture kubectl output first, use empty-object fallback.
+        # When kubectl cannot find a job, some cluster configurations output "Error from server
+        # (NotFound)..." to STDOUT. Capturing output first and using {} fallback prevents
+        # jq "Invalid numeric literal at line 1, column 6" parse errors in coordinator logs.
+        local raw_job_json
+        raw_job_json=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null || echo "")
+        job_active=$(echo "${raw_job_json:-{\}}" | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null || echo "false")
 
         if [ "$job_active" = "true" ]; then
             # Issue #1094: Even if agent job is running, check if the GitHub issue is still open.
@@ -454,12 +456,14 @@ cleanup_active_agents() {
         
         # Check if Job still active (exists and no completionTime)
         local job_active
-        # Issue #1170: Add 2>/dev/null to jq to suppress stderr parse errors when kubectl
-        # returns empty output (job not found). The || echo "false" handles the exit code,
-        # but without 2>/dev/null jq's error message still appears in coordinator logs.
-        job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
-            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
-            2>/dev/null || echo "false")
+        # Issue #1170: Suppress jq parse errors from kubectl non-JSON output.
+        # Issue #1260: Root cause fix — capture kubectl output first, use empty-object fallback.
+        # When kubectl cannot find a job, some cluster configurations output "Error from server
+        # (NotFound)..." to STDOUT. Capturing output first and using {} fallback prevents
+        # jq "Invalid numeric literal at line 1, column 6" parse errors in coordinator logs.
+        local raw_job_json
+        raw_job_json=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null || echo "")
+        job_active=$(echo "${raw_job_json:-{\}}" | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null || echo "false")
         
         if [ "$job_active" = "true" ]; then
             [ -n "$cleaned_agents" ] \
