@@ -1,6 +1,7 @@
 {{- /*
 agentex-constitution ConfigMap — god-owned constants.
 Agents READ these values. Agents do NOT modify this file or the ConfigMap.
+Full field reference: docs/constitution.md
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -16,59 +17,58 @@ metadata:
   annotations:
     agentex/description: "God-owned constants. Do not modify without god approval."
 data:
-  # Maximum concurrent active Jobs. God sets this. Agents read it.
-  circuitBreakerLimit: {{ .Values.civilization.circuitBreakerLimit | quote }}
-
-  # Minimum approve votes required for governance decisions
-  voteThreshold: {{ .Values.civilization.voteThreshold | quote }}
-
-  # Daily Bedrock cost budget in USD
-  dailyCostBudgetUSD: {{ .Values.civilization.dailyCostBudgetUSD | quote }}
-
-  # Model to use for all agents (cross-region inference prefix required)
-  agentModel: {{ .Values.agent.model | quote }}
-
-  # S3 bucket for agent memory persistence
-  s3Bucket: {{ required "vision.s3Bucket is required" .Values.vision.s3Bucket | quote }}
-
-  # ECR registry base URL for agent container images
-  ecrRegistry: {{ required "vision.ecrRegistry is required" .Values.vision.ecrRegistry | quote }}
-
-  # AWS region where the EKS cluster and Bedrock run
-  awsRegion: {{ required "vision.awsRegion is required" .Values.vision.awsRegion | quote }}
-
-  # Kubernetes cluster name
-  clusterName: {{ required "vision.clusterName is required" .Values.vision.clusterName | quote }}
+  # --- REQUIRED: portability fields (new god must set these) ---
 
   # GitHub repository for issue tracking and PRs
   githubRepo: {{ required "vision.githubRepo is required" .Values.vision.githubRepo | quote }}
 
-  # Current civilization generation (god increments this)
-  civilizationGeneration: {{ .Values.civilization.generation | quote }}
+  # AWS region where the EKS cluster and Bedrock run
+  awsRegion: {{ required "vision.awsRegion is required" .Values.vision.awsRegion | quote }}
 
-  # Job TTL for completed agent pods
-  jobTTLSeconds: {{ .Values.civilization.jobTTLSeconds | quote }}
+  # ECR registry base URL for agent container images
+  ecrRegistry: {{ required "vision.ecrRegistry is required" .Values.vision.ecrRegistry | quote }}
 
-  # Minimum vision score for agent work
+  # S3 bucket for agent memory persistence
+  s3Bucket: {{ required "vision.s3Bucket is required" .Values.vision.s3Bucket | quote }}
+
+  # Kubernetes cluster name
+  clusterName: {{ required "vision.clusterName is required" .Values.vision.clusterName | quote }}
+
+  # --- SAFETY AND GOVERNANCE ---
+
+  # Maximum concurrent active Jobs. God sets this. Agents read it.
+  # Do NOT hardcode this value in agent code — always read from constitution.
+  circuitBreakerLimit: {{ .Values.civilization.circuitBreakerLimit | quote }}
+
+  # Minimum approve votes required for governance decisions
+  # Coordinator re-reads this on every tally cycle — no restart needed after change.
+  voteThreshold: {{ .Values.civilization.voteThreshold | quote }}
+
+  # Minimum vision score for agent work (governance-patchable)
   minimumVisionScore: {{ .Values.civilization.minimumVisionScore | quote }}
 
-  # Minimum generations before agents may work on vision features
-  visionUnlockGeneration: "10"
+  # --- AGENT RUNTIME ---
 
-  # Guidance for agents on vision score prioritization
-  visionScoreGuidance: |
-    Prioritize work with vision score >=5. Score <5 work is permitted
-    but MUST be justified in Report CR blockers field. Emergency work (score=1-3)
-    always allowed without justification when system is in crisis.
+  # Model to use for all agents (cross-region inference prefix required)
+  # Update if the model is unavailable in the new god's region.
+  agentModel: {{ .Values.agent.model | quote }}
 
-  # Security mandate — agents must check for CVEs and act on them
-  securityPosture: |
-    Security is a first-class concern. Agents MUST check GitHub code scanning
-    alerts on each planner run. If count > 0, file a GitHub issue with label
-    "security" summarizing the top alerts. Security issues have coordinator
-    priority score = 9.
+  # Current civilization generation (god increments this to mark new eras)
+  civilizationGeneration: {{ .Values.civilization.generation | quote }}
 
-  # God's current directive to the civilization
+  # --- GOVERNANCE-PATCHABLE (agents can vote to change these) ---
+
+  # Job TTL for completed agent pods (governance-patchable, but RGDs currently hardcode 180s)
+  # NOTE: Patching this in the constitution does NOT dynamically update running Jobs.
+  jobTTLSeconds: {{ .Values.civilization.jobTTLSeconds | quote }}
+
+  # Daily Bedrock cost budget in USD
+  # NOTE: Stored in constitution but NOT currently enforced by coordinator.sh.
+  dailyCostBudgetUSD: {{ .Values.civilization.dailyCostBudgetUSD | quote }}
+
+  # --- CIVILIZATION STEERING ---
+
+  # God's current directive to the civilization (injected into every agent's prompt)
   lastDirective: |
 {{ .Values.civilization.lastDirective | indent 4 }}
 

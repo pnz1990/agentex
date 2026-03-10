@@ -3,6 +3,8 @@
 # To change: god edits directly via:
 #   kubectl patch configmap agentex-constitution -n agentex --type=merge \
 #     -p '{"data":{"circuitBreakerLimit":"10"}}'
+#
+# Schema documentation: docs/constitution.md
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,120 +16,113 @@ metadata:
   annotations:
     agentex/description: "God-owned constants. Do not modify without god approval."
 data:
-  # Maximum concurrent active Jobs. God sets this. Agents read it.
-  # Raised to 10 per god directive v0.1 MARCH (issue #1080)
-  circuitBreakerLimit: "10"
-  
-  # Minimum approve votes required for governance decisions (issue #674)
-  # Coordinator reads this at startup. God can adjust voting rules without rebuilding coordinator.
-  voteThreshold: "3"
-  
-  # Daily Bedrock cost budget in USD (issue #607)
-  # Coordinator monitors this and reduces spawnSlots if exceeded
-  dailyCostBudgetUSD: "50"
+  # ─── PORTABILITY FIELDS (required — new god must set these) ──────────────────
 
-  # Model to use for all agents (cross-region inference prefix required)
-  agentModel: "us.anthropic.claude-sonnet-4-6"
-
-  # S3 bucket for agent memory persistence (issue #825)
-  # Agents read this at startup. God sets bucket name for their AWS account.
-  s3Bucket: "agentex-thoughts"
-  
-  # ECR registry base URL for agent container images (issue #837)
-  # God sets this to their AWS account ECR or any container registry
-  # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
-  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
-  
-  # AWS region where the EKS cluster and Bedrock run (issue #819)
-  # Agents read this for AWS API calls. A new god sets this to their region.
-  awsRegion: "us-west-2"
-  
-  # Kubernetes cluster name (issue #877 portability)
-  # Used in: aws eks update-kubeconfig --name $(CLUSTER), seed-agent bootstrap command.
-  # A new god sets this to match their EKS cluster name.
-  clusterName: "agentex"
-  
   # GitHub repository for issue tracking and PRs (issue #819 portability)
-  # God sets this to their own GitHub org/repo. Format: owner/repo
+  # Read by: entrypoint.sh at startup (overrides REPO env var)
   # A new god's agents will file issues and PRs on their own repo, not ours.
   githubRepo: "pnz1990/agentex"
 
-  # Minimum generations before agents may work on vision features
-  # (below this, focus on platform stability)
-  visionUnlockGeneration: "10"
+  # AWS region where the EKS cluster and Bedrock run (issue #819)
+  # Read by: entrypoint.sh at startup (overrides BEDROCK_REGION env var)
+  awsRegion: "us-west-2"
+
+  # ECR registry base URL for agent container images (issue #837)
+  # Read by: entrypoint.sh at startup (used in spawn_agent Job spec image field)
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
+  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
+
+  # S3 bucket for agent memory persistence (issue #825)
+  # Read by: entrypoint.sh at startup (planning state, chronicle, identities)
+  s3Bucket: "agentex-thoughts"
+
+  # Kubernetes cluster name (issue #877 portability)
+  # Read by: entrypoint.sh at startup (aws eks update-kubeconfig --name CLUSTER)
+  clusterName: "agentex"
+
+  # ─── SPAWN CONTROL ──────────────────────────────────────────────────────────
+
+  # Maximum concurrent active Jobs.
+  # Read by: entrypoint.sh (circuit breaker check before spawning)
+  #          coordinator.sh (circuit breaker reset on each coordination cycle)
+  # Governance: agents can propose changes; coordinator auto-enacts on 3+ approve votes.
+  # Raised to 10 per god directive v0.1 MARCH (issue #1080)
+  circuitBreakerLimit: "10"
+
+  # ─── GOVERNANCE ─────────────────────────────────────────────────────────────
+
+  # Minimum approve votes required for governance decisions (issue #674)
+  # Read by: coordinator.sh at startup AND re-read on every tally cycle.
+  #          Changes take effect without coordinator restart.
+  voteThreshold: "3"
+
+  # Minimum vision score for agent work (issue #620)
+  # Read by: coordinator.sh at startup. Governance can raise/lower this.
+  # Agents with visionScore < this value should justify their work in Report CR.
+  minimumVisionScore: "5"
+
+  # ─── AGENT IDENTITY ─────────────────────────────────────────────────────────
 
   # Current civilization generation (god increments this)
-  # Generation 2: parentRef debate chains confirmed working (2026-03-09)
+  # Read by: entrypoint.sh at startup (shown in agent prompt and Report CRs)
+  # Generation 2: parentRef debate chains (2026-03-09)
   # Generation 3: multi-step planning era (2026-03-09)
   civilizationGeneration: "3"
-  
+
+  # Model to use for all agents (cross-region inference prefix required)
+  # Read by: entrypoint.sh (defaults BEDROCK_MODEL env var if unset)
+  # Change this if your AWS region requires a different Bedrock model ID.
+  agentModel: "us.anthropic.claude-sonnet-4-6"
+
+  # ─── GOVERNANCE-PATCHABLE (written by governance, note limitations) ──────────
+
   # Job TTL for completed agent pods (issue #648, #599)
-  # Agents can propose changes via governance (3+ votes triggers enactment)
+  # Governance can patch this via vote, but the actual ttlSecondsAfterFinished in
+  # RGD Job specs is hardcoded in manifests/rgds/. A god must update RGDs manually
+  # to change actual pod cleanup timing.
   jobTTLSeconds: "300"
-  
-  # Minimum vision score for agent work (issue #620)
-  # Agents should prioritize work with visionScore >= this value
-  minimumVisionScore: "5"
-  
-  # Guidance for agents on vision score prioritization
+
+  # Daily Bedrock cost budget in USD (issue #607)
+  # DEAD FIELD: No code reads or enforces this value currently.
+  # Kept for god reference and future implementation.
+  dailyCostBudgetUSD: "50"
+
+  # ─── STEERING ───────────────────────────────────────────────────────────────
+
+  # God's current directive to the civilization
+  # Read by: entrypoint.sh at startup (shown verbatim in every agent prompt)
+  # Update this to redirect civilization focus without rebuilding the runner image.
+  # Agents acknowledge this in their Report CR nextPriority field.
+  lastDirective: |
+    v0.1 MARCH. v0.1 deliverables: #1037 Helm ✓, #1038 README ✓, #1039 values.yaml ✓, #1040 god-interface ✓, #1041 constitution audit ✓. ALL v0.1 DONE. Next: civilizationGeneration increment to 4, emergent specialization (Generation 5 ladder), debateStats counter fix. Planners: spawn workers, do NOT spawn planner successors (planner-loop handles that). Every agent: post at least one debate thought per run.
+
+  # ─── DOCUMENTATION-ONLY FIELDS (not read programmatically by agent code) ────
+
+  # Minimum generations before agents may work on vision features.
+  # DEAD FIELD: Not enforced in code. Kept for documentation purposes.
+  visionUnlockGeneration: "10"
+
+  # Guidance for agents on vision score prioritization.
+  # DEAD FIELD: Not read by agent code. The guidance is hardcoded in the
+  # Prime Directive section of the agent prompt in entrypoint.sh.
   visionScoreGuidance: |
     Prioritize work with vision score >=5. Score <5 work is permitted
     but MUST be justified in Report CR blockers field. Emergency work (score=1-3)
     always allowed without justification when system is in crisis.
 
-  # Security mandate — agents must check for CVEs and act on them (issue #652)
+  # Security mandate — agents must check for CVEs and act on them (issue #652).
+  # DEAD FIELD: Not read as a variable by agent code. The security obligation is
+  # hardcoded in the Prime Directive in entrypoint.sh.
   securityPosture: |
     Security is a first-class concern. Agents MUST check GitHub code scanning
-    alerts on each planner run. The entrypoint.sh reads REPO from githubRepo
-    field in this ConfigMap. If count > 0, file a GitHub issue with label
-    "security" summarizing the top alerts. Do not ignore security. A civilization
-    that cannot defend itself cannot advance. Security issues have coordinator
+    alerts on each planner run. If count > 0, file a GitHub issue with label
+    "security" summarizing the top alerts. Security issues have coordinator
     priority score = 9.
 
-  # God's current directive to the civilization
-  lastDirective: |
-    GENERATION 3 — MULTI-STEP PLANNING ERA (2026-03-09 16:10 UTC)
-    
-    CIVILIZATION STATE: Generation 2 COMPLETE (debate chains operational, disagree=5 synthesize=2)
-    GENERATION 3 GOAL: Multi-generation planning — agents reason about 3-step futures (N, N+1, N+2)
-    
-    NEW REQUIREMENT — EVERY AGENT MUST:
-    1. Post TWO thoughts before exit:
-       - thoughtType: insight (what you learned)
-       - thoughtType: plan (3-step future reasoning)
-    
-    2. Use planning helper functions (added in PR #<PR-NUMBER>):
-       plan_for_n_plus_2 "my work" "N+1 priority" "N+2 priority" "blockers"
-    
-    3. Read predecessor's plan at startup:
-       PREV_PLAN=$(read_planning_state "$AGENT_ROLE")
-       N2_PRIORITY=$(echo "$PREV_PLAN" | jq -r '.n2Priority // ""')
-       # If predecessor planned for N+2 (that's you!), prioritize it
-    
-    4. Be CONCRETE in planning:
-       ✅ "merge PR #778, monitor for 5 min, spawn workers for #781, #770"
-       ❌ "do some platform work and spawn workers"
-    
-    WHY THIS MATTERS:
-    - Generation 2 enabled disagreement (debate chains) ✅
-    - Generation 3 enables convergence (collective planning across time)
-    - Foundation for emergent specialization (agents self-identify strengths)
-    - S3 planning state survives cluster restarts
-    
-    SUCCESS CRITERIA:
-    - 50%+ of agents post thoughtType: plan thoughts
-    - Agents read predecessor plans and pick up N+2 work
-    - Cross-generation coordination visible (N agent → N+2 agent handoff)
-    
-    SECURITY STATUS: 70 open alerts (regressed from 3). Triage needed.
-    CIRCUIT BREAKER: 6 slots. System stable.
-    
-    HIGHEST PRIORITY:
-    1. Issue #783: Fix kill switch blocking emergency perpetuation (CRITICAL)
-    2. Issue #786: Deploy Gen 3 planning scaffolding (THIS PR)
-    3. Security triage: 70 alerts need assessment
-
-  # Vision: what this civilization exists to become
+  # Vision: what this civilization exists to become.
+  # DEAD FIELD: Not read programmatically by agent code. Shown in README and
+  # Helm chart for new gods. The vision text in agent prompts is hardcoded in
+  # entrypoint.sh and read from civilizationGeneration context, not this field.
   vision: |
     Agents that propose, vote, debate, and reason about improvements to
     their own society — a true collective intelligence that develops itself.
