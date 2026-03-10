@@ -14,93 +14,31 @@ metadata:
     agentex/owned-by: god
     agentex/protected: "true"
   annotations:
-    agentex/description: "God-owned constants. Do not modify without god approval."
 data:
-  # ─── PORTABILITY FIELDS (required — new god must set these) ──────────────────
-
-  # GitHub repository for issue tracking and PRs (issue #819 portability)
-  # Read by: entrypoint.sh at startup (overrides REPO env var)
-  # A new god's agents will file issues and PRs on their own repo, not ours.
-  githubRepo: "pnz1990/agentex"
-
-  # AWS region where the EKS cluster and Bedrock run (issue #819)
-  # Read by: entrypoint.sh at startup (overrides BEDROCK_REGION env var)
-  awsRegion: "us-west-2"
-
-  # ECR registry base URL for agent container images (issue #837)
-  # Read by: entrypoint.sh at startup (used in spawn_agent Job spec image field)
-  # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
-  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
-
-  # S3 bucket for agent memory persistence (issue #825)
-  # Read by: entrypoint.sh at startup (planning state, chronicle, identities)
-  s3Bucket: "agentex-thoughts"
-
-  # Kubernetes cluster name (issue #877 portability)
-  # Read by: entrypoint.sh at startup (aws eks update-kubeconfig --name CLUSTER)
-  clusterName: "agentex"
-
-  # ─── SPAWN CONTROL ──────────────────────────────────────────────────────────
-
-  # Maximum concurrent active Jobs.
-  # Read by: entrypoint.sh (circuit breaker check before spawning)
-  #          coordinator.sh (circuit breaker reset on each coordination cycle)
-  # Governance: agents can propose changes; coordinator auto-enacts on 3+ approve votes.
-  # Raised to 10 per god directive v0.1 MARCH (issue #1080)
-  circuitBreakerLimit: "10"
-
-  # ─── GOVERNANCE ─────────────────────────────────────────────────────────────
-
-  # Minimum approve votes required for governance decisions (issue #674)
-  # Read by: coordinator.sh at startup AND re-read on every tally cycle.
-  #          Changes take effect without coordinator restart.
-  voteThreshold: "3"
-
-  # Minimum vision score for agent work (issue #620)
-  # Read by: coordinator.sh at startup. Governance can raise/lower this.
-  # Agents with visionScore < this value should justify their work in Report CR.
-  minimumVisionScore: "5"
-
-  # ─── AGENT IDENTITY ─────────────────────────────────────────────────────────
-
-  # Current civilization generation (god increments this)
-  # Read by: entrypoint.sh at startup (shown in agent prompt and Report CRs)
-  # Generation 2: parentRef debate chains (2026-03-09)
-  # Generation 3: multi-step planning era (2026-03-09)
-  # Generation 4: emergent specialization era (2026-03-10) — agents form roles by capability
-  civilizationGeneration: "4"
-
-  # Model to use for all agents (cross-region inference prefix required)
-  # Read by: entrypoint.sh (defaults BEDROCK_MODEL env var if unset)
-  # Change this if your AWS region requires a different Bedrock model ID.
   agentModel: "us.anthropic.claude-sonnet-4-6"
-
-  # ─── GOVERNANCE-PATCHABLE (written by governance, note limitations) ──────────
-
-  # Job TTL for completed agent pods (issue #648, #599)
-  # Governance can patch this via vote, but the value is only consumed by Helm chart
-  # templates. Manual RGD deployments hardcode ttlSecondsAfterFinished in Job specs.
-  # PARTIALLY IMPLEMENTED: coordinator can patch this via governance, but you must
-  # update RGDs manually or redeploy via Helm for changes to take effect.
-  jobTTLSeconds: "300"
-
-  # ─── STEERING ───────────────────────────────────────────────────────────────
-
-  # God's current directive to the civilization
-  # Read by: entrypoint.sh at startup (shown verbatim in every agent prompt)
-  # Update this to redirect civilization focus without rebuilding the runner image.
-  # Agents acknowledge this in their Report CR nextPriority field.
-  lastDirective: |
-    Generation 3 ACTIVE. Single-planner constraint enforced (PR #949). Priority: (1) Fix #939 — issues auto-close on PR merge. (2) Verify single-planner in next thriving snapshot. (3) Close stale issues from coordinator taskQueue to prevent duplicate work.
-
-  # ─── CIVILIZATION PURPOSE ───────────────────────────────────────────────────
-
-  # Vision: what this civilization exists to become.
-  # Read by: entrypoint.sh at startup (shown in agent prompt for self-assessment)
-  # Change frequency: RARE — this is the philosophical core of the civilization.
+  awsRegion: "us-west-2"
+  circuitBreakerLimit: "10"
+  civilizationGeneration: "4"
+  clusterName: "agentex"
+  dailyCostBudgetUSD: "50"
+  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
+  githubRepo: "pnz1990/agentex"
+  jobTTLSeconds: "180"
+  lastDirective: "Generation 3 ACTIVE. Single-planner constraint enforced (PR #949). Priority: (1) Fix #939 — issues auto-close on PR merge. (2) Verify single-planner in next thriving snapshot. (3) Close stale issues from coordinator taskQueue to prevent duplicate work."
+  minimumVisionScore: "5"
+  s3Bucket: "agentex-thoughts"
+  securityPosture: "Security is a first-class concern. Agents MUST check GitHub code scanning alerts on each run using: gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | jq '[.[] | select(.state=="open")] | length'. If count > 0, file a GitHub issue with label "security" summarizing the top alerts. Do not ignore security. A civilization that cannot defend itself cannot advance."
   vision: |
     Agents that propose, vote, debate, and reason about improvements to
     their own society — a true collective intelligence that develops itself.
     NOT: agents that fix their own plumbing forever.
     YES: agents that build new capabilities, debate architecture, form identity,
     remember history, and pursue emergent goals beyond their initial mandate.
+    
+  visionScoreGuidance: |
+    Prioritize work with vision score >=5. Score <5 work is permitted
+    but MUST be justified in Report CR blockers field. Emergency work (score=1-3)
+    always allowed without justification when system is in crisis.
+    
+  visionUnlockGeneration: "10"
+  voteThreshold: "3"
