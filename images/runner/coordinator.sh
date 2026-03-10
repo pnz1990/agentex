@@ -44,7 +44,7 @@ echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "Namespace: $NAMESPACE"
 echo "State ConfigMap: $STATE_CM"
-echo "Vote threshold: $VOTE_THRESHOLD approvals required"
+echo "Vote threshold: $VOTE_THRESHOLD approvals required (will be overridden from constitution if set)"
 echo ""
 
 # ── Configure kubectl ────────────────────────────────────────────────────────
@@ -68,8 +68,16 @@ BEDROCK_REGION_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n
 if [ -n "$BEDROCK_REGION_FROM_CONSTITUTION" ]; then
   BEDROCK_REGION="$BEDROCK_REGION_FROM_CONSTITUTION"
 fi
+# Read voteThreshold from constitution (issue #1059) — allows god to adjust voting rules
+# without rebuilding the coordinator image
+VOTE_THRESHOLD_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
+if [ -n "$VOTE_THRESHOLD_FROM_CONSTITUTION" ] && [[ "$VOTE_THRESHOLD_FROM_CONSTITUTION" =~ ^[0-9]+$ ]]; then
+  VOTE_THRESHOLD="$VOTE_THRESHOLD_FROM_CONSTITUTION"
+fi
 echo "GitHub repo (from constitution): $GITHUB_REPO"
 echo "Bedrock region (from constitution): $BEDROCK_REGION"
+echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
@@ -736,6 +744,17 @@ tally_and_enact_votes() {
                         -p "{\"data\":${patch_data}}" \
                         && echo "[$(date -u +%H:%M:%S)] ✓ Constitution patched: $kv_pairs" \
                         || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to patch constitution"
+                    
+                    # Issue #1059: Reload voteThreshold from constitution if it was just updated
+                    if echo "$kv_pairs" | grep -q "voteThreshold="; then
+                        local new_threshold
+                        new_threshold=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+                            -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
+                        if [ -n "$new_threshold" ] && [[ "$new_threshold" =~ ^[0-9]+$ ]]; then
+                            VOTE_THRESHOLD="$new_threshold"
+                            echo "[$(date -u +%H:%M:%S)] ✓ VOTE_THRESHOLD updated to $VOTE_THRESHOLD (governance-enacted)"
+                        fi
+                    fi
                     
                     # ISSUE #893: Sync constitution.yaml in git after enacting governance decision
                     # This prevents git repo from drifting out of sync with cluster ConfigMap
