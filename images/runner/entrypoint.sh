@@ -3036,11 +3036,20 @@ fi
 # Announce this agent's presence so the coordinator knows who is active.
 register_with_coordinator
 
-# ── 3.7.5. Coordinator health check and auto-restart (issue #755) ────────────
+# ── 3.7.5. Coordinator health check and auto-restart (issue #755, #1721) ────────────
 # Self-healing: if coordinator heartbeat is stale (> 5 min), restart it.
-# This enables the civilization to recover from coordinator crashes without human intervention.
-log "Checking coordinator health..."
-restart_coordinator_if_unhealthy
+# Issue #1721: Restrict coordinator restarts to planners/architects ONLY.
+# Workers are short-lived implementers — they should not be responsible for
+# coordinator health. With 7+ concurrent workers each checking heartbeat at startup,
+# workers amplify the coordinator restart storm that issue #1559's 120s cooldown
+# was meant to prevent. Planners are the right role: the planner-loop Deployment
+# ensures a planner is always running to handle coordinator health recovery.
+if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "architect" ] || [ "$AGENT_ROLE" = "god-delegate" ]; then
+  log "Checking coordinator health (role=${AGENT_ROLE} is authorized to restart coordinator)..."
+  restart_coordinator_if_unhealthy
+else
+  log "Skipping coordinator health check (role=${AGENT_ROLE} — only planners/architects restart coordinator, issue #1721)"
+fi
 
 # ── 3.8. Claim task from coordinator (planners and workers) ──────────────────
 # Agents query the coordinator for an assigned issue instead of picking
