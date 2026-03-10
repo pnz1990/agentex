@@ -342,6 +342,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"preClaimTimestamps":""}}' 2>/dev/null || true
   fi
 
+  # routingCyclesWithZeroSpec (issue #1568): counter tracking consecutive routing cycles where
+  # specializedAssignments=0. When it reaches 5, coordinator escalates with a blocker thought
+  # AND files a GitHub issue to ensure the regression is visible and self-reported.
+  # Reset to 0 when specializedAssignments increments (routing is working).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("routingCyclesWithZeroSpec")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing routingCyclesWithZeroSpec (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -2748,17 +2758,91 @@ route_tasks_by_specialization() {
 
         echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION: specializedAssignments=0 — $blocker_reason"
         push_metric "V02RoutingBlocker" 1 "Count" "Component=Coordinator"
-        post_coordinator_thought \
+
+        # Issue #1568: Track consecutive routing cycles with zero specialization.
+        # Increment counter; escalate with blocker thought + GitHub issue after 5 cycles.
+        # This ensures routing regressions are self-reported within ~35 minutes.
+        local zero_cycles
+        zero_cycles=$(get_state "routingCyclesWithZeroSpec")
+        [[ "$zero_cycles" =~ ^[0-9]+$ ]] || zero_cycles=0
+        zero_cycles=$((zero_cycles + 1))
+        update_state "routingCyclesWithZeroSpec" "$zero_cycles"
+        echo "[$(date -u +%H:%M:%S)] routingCyclesWithZeroSpec: $zero_cycles (escalation threshold: 5)"
+
+        if [ "$zero_cycles" -ge 5 ]; then
+            # Escalate: post BLOCKER thought (high priority) AND file GitHub issue
+            echo "[$(date -u +%H:%M:%S)] ESCALATING: specializedAssignments=0 for $zero_cycles consecutive routing cycles — filing issue"
+            push_metric "V02RoutingEscalation" 1 "Count" "Component=Coordinator"
+
+            post_coordinator_thought \
+"BLOCKER: v0.2 ROUTING REGRESSION (issue #1568 — $zero_cycles consecutive cycles).
+specializedAssignments=0 for $zero_cycles routing cycles (~$((zero_cycles * 7)) minutes).
+Blocker: $blocker_reason
+Threshold: SPECIALIZATION_ROUTING_THRESHOLD=$SPECIALIZATION_ROUTING_THRESHOLD
+Active agents: $agents_checked checked, $agents_with_spec with specialization data
+This is an automated escalation — v0.2 routing has failed for too long without self-healing.
+See coordinator-state.routingCyclesWithZeroSpec for cycle count." \
+                "blocker"
+
+            # File GitHub issue for durable tracking (escalate to god-observer and planners)
+            # Only file if we have GitHub access and haven't filed recently (throttle: every 10 cycles)
+            if [ "$((zero_cycles % 10))" -eq 5 ] || [ "$zero_cycles" -eq 5 ]; then
+                local escalation_issue
+                escalation_issue=$(gh issue create \
+                    --repo "${GITHUB_REPO}" \
+                    --title "bug: specializedAssignments=0 for ${zero_cycles} consecutive routing cycles — v0.2 regression" \
+                    --label "bug,self-improvement" \
+                    --body "## Auto-filed by coordinator (issue #1568 — routing cycle escalation)
+
+### Problem
+\`specializedAssignments\` has been 0 for **${zero_cycles} consecutive routing cycles** (~$((zero_cycles * 7)) minutes).
+
+This means the v0.2 milestone criterion (coordinator routes at least 1 task based on specialization) has regressed.
+
+### Root Cause Diagnosis
+${blocker_reason}
+
+### Threshold Status
+- SPECIALIZATION_ROUTING_THRESHOLD: ${SPECIALIZATION_ROUTING_THRESHOLD}
+- Active agents checked: ${agents_checked}
+- Agents with specialization data: ${agents_with_spec}
+
+### Fix
+Investigate why routing is not firing. Common causes:
+1. Workers claim tasks before routing runs (issue #1474)
+2. Specialization data missing from S3 (issue #1536)
+3. Label cache stale (issue #1442)
+
+Filed automatically by coordinator after ${zero_cycles} cycles with specializedAssignments=0 (issue #1568)." \
+                    2>/dev/null || echo "")
+                if [ -n "$escalation_issue" ]; then
+                    echo "[$(date -u +%H:%M:%S)] v0.2 escalation issue filed: $escalation_issue"
+                else
+                    echo "[$(date -u +%H:%M:%S)] WARNING: Failed to file escalation issue (GitHub API unavailable)"
+                fi
+            fi
+        else
+            # Not yet at escalation threshold — post regular insight thought
+            post_coordinator_thought \
 "v0.2 MILESTONE VALIDATION (issue #1145): specializedAssignments=0 after routing cycle.
 Blocker: $blocker_reason
 Threshold: SPECIALIZATION_ROUTING_THRESHOLD=$SPECIALIZATION_ROUTING_THRESHOLD (1 label match = score 3, triggers routing)
 Active agents: $agents_checked checked, $agents_with_spec with specialization data
 To unblock: Workers must complete labeled GitHub issues so update_specialization() builds their history.
-v0.2 criterion: coordinator routes at least 1 task based on agent specialization." \
-            "insight"
+v0.2 criterion: coordinator routes at least 1 task based on agent specialization.
+Consecutive zero cycles: $zero_cycles/5 (escalates to blocker at 5 cycles, ~35 min — issue #1568)" \
+                "insight"
+        fi
     else
         echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION PASSED: specializedAssignments=$total_specialized (routing has fired)"
         push_metric "V02RoutingSuccess" "$total_specialized" "Count" "Component=Coordinator"
+        # Issue #1568: Reset cycle counter when routing succeeds
+        local cur_zero_cycles
+        cur_zero_cycles=$(get_state "routingCyclesWithZeroSpec")
+        if [ -n "$cur_zero_cycles" ] && [ "$cur_zero_cycles" != "0" ]; then
+            update_state "routingCyclesWithZeroSpec" "0"
+            echo "[$(date -u +%H:%M:%S)] routingCyclesWithZeroSpec reset to 0 (routing succeeded)"
+        fi
     fi
 }
 
