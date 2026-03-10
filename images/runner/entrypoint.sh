@@ -2877,7 +2877,7 @@ If claim fails (returns 1), pick a different issue — another agent already cla
        elif [ "${IDENTITY_WITH_SPEC}" = "0" ]; then
          ROUTING_BLOCKER="Agent identities exist (${IDENTITY_COUNT} files) but none have specializationLabelCounts > 0. Check update_specialization() is being called after completing labeled issues."
        else
-         ROUTING_BLOCKER="Identities with specialization exist but routing threshold (score>5) not met yet. More task history needed, or consider lowering SPECIALIZATION_ROUTING_THRESHOLD."
+          ROUTING_BLOCKER="Identities with specialization exist but routing threshold (score>SPECIALIZATION_ROUTING_THRESHOLD=2) not met yet. Check: (1) are issue labels matching agent specializationLabelCounts? (2) is routing firing before workers pre-claim tasks? See issue #1474."
        fi
 
         log "v0.2 routing status: not yet firing. Blocker: ${ROUTING_BLOCKER}"
