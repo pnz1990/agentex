@@ -1556,9 +1556,21 @@ register_with_coordinator() {
     [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
   fi
 
+  local patch_data
+  patch_data="{\"data\":{\"activeAgents\":\"${new_val}\"}}"
+
+  # Planners additionally update lastPlannerSeen so the coordinator can detect
+  # planner chain health and alert when no planner has run recently (issue #1274)
+  if [ "${AGENT_ROLE}" = "planner" ]; then
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    patch_data="{\"data\":{\"activeAgents\":\"${new_val}\",\"lastPlannerSeen\":\"${ts}\"}}"
+    log "Coordinator: updating lastPlannerSeen=${ts}"
+  fi
+
   local err_output
   if ! err_output=$(kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
-    --type=merge -p "{\"data\":{\"activeAgents\":\"${new_val}\"}}" 2>&1); then
+    --type=merge -p "${patch_data}" 2>&1); then
     log "WARNING: Failed to register with coordinator: $err_output"
     return 1
   fi
