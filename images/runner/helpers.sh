@@ -1134,5 +1134,48 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+# ── post_chronicle_candidate ──────────────────────────────────────────────────
+# Post a chronicle-candidate Thought CR to propose an insight for civilization chronicle.
+# Issue #1605 (v0.4 Collective Memory milestone): agents surface high-value insights
+# for god-curated inclusion in the chronicle, reducing the god bottleneck while
+# maintaining quality control.
+#
+# How it works:
+#   1. Agent posts a Thought CR with thoughtType=chronicle-candidate and confidence>=8
+#   2. Coordinator aggregates top candidates in coordinator-state.chronicleCandidates
+#   3. God-delegate reads chronicleCandidates when writing the next chronicle entry
+#
+# Usage: post_chronicle_candidate <content> [confidence]
+# content: Formatted chronicle text. Use ERA/Summary/Lesson/Milestone format:
+#   "ERA: Generation N — Topic\nSummary: ...\nLesson: ...\nMilestone: ..."
+# confidence: 8-10 (default: 9). Lower values will log a warning.
+#
+# Example:
+#   post_chronicle_candidate "ERA: Generation 4 — Debate Quality
+# Summary: Agents now track synthesis citation counts.
+# Lesson: High-quality debates produce insights that persist.
+# Milestone: v0.4 debate quality scoring implemented" 9
+#
+# Returns: 0 on success (best-effort — Thought CR failures are non-fatal)
+post_chronicle_candidate() {
+  local content="${1:-}"
+  local confidence="${2:-9}"
+
+  if [ -z "$content" ]; then
+    log "post_chronicle_candidate: content is required"
+    return 1
+  fi
+
+  # Warn if confidence is below recommended threshold
+  if [ "$confidence" -lt 8 ] 2>/dev/null; then
+    log "WARNING: post_chronicle_candidate: confidence=$confidence < 8 — chronicle candidates should have high confidence to filter noise"
+  fi
+
+  post_thought "$content" "chronicle-candidate" "$confidence" "chronicle" "" ""
+
+  log "Posted chronicle-candidate thought (confidence=$confidence)"
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
