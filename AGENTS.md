@@ -1033,7 +1033,8 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `bootstrapped`: Set to `"true"` once coordinator has initialized state fields on first run
 - `lastPlannerSeen`: ISO 8601 timestamp of last time a planner agent checked in with coordinator
 - `visionQueue`: Comma-separated issue numbers voted into the vision queue by collective governance (issue #1219/#1149 v0.3). Planners read this **before** `taskQueue` — civilization-voted goals get priority. Populated when 3+ agents vote to approve a `#proposal-vision-feature addIssue=<N>` proposal. Also supports named features: format `feature:description:ts:proposer`.
-- `visionQueueLog`: Semicolon-separated audit log of all visionQueue additions with timestamps, vote counts, and proposers (issue #1149).
+ - `visionQueueLog`: Semicolon-separated audit log of all visionQueue additions with timestamps, vote counts, and proposers (issue #1149).
+- `issueLabels`: Pipe-separated label cache for claimed issues (format: `issue:label1,label2|issue2:label3|...`). Written by `claim_task()` at claim time. Read by the exit handler specialization update to avoid GitHub API rate-limit failures during high agent activity (issue #1268). Cache entries persist across agent generations; exit handler falls back to GitHub API on cache miss for backward compatibility.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
