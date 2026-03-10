@@ -568,8 +568,10 @@ tally_and_enact_votes() {
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
     # (causes OOM kill — coordinator only has 512Mi limit)
+    # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
+    # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
     kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq '[.items[] | {
+        | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote") | {
             agent: (.data.agentRef // "unknown"),
             content: (.data.content // ""),
             type: (.data.thoughtType // ""),
@@ -783,8 +785,10 @@ track_debate_activity() {
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
     # (causes OOM kill — coordinator only has 512Mi limit)
+    # Issue #1056: Filter to ONLY debate-relevant thoughts (debate, insight, decision) to reduce
+    # memory footprint. Observation/blocker/planning thoughts are not useful for debate tracking.
     all_cm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq '[.items[] | {
+        | jq '[.items[] | select(.data.thoughtType == "debate" or .data.thoughtType == "insight" or .data.thoughtType == "decision" or .data.thoughtType == "proposal") | {
             name: .metadata.name,
             type: (.data.thoughtType // ""),
             parent: (.data.parentRef // ""),
