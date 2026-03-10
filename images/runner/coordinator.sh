@@ -2339,12 +2339,50 @@ route_tasks_by_specialization() {
         best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
 
         if [ -n "$best_agent" ]; then
-            # Record specialized routing decision in coordinator state
-            local routing_entry="${issue_num}:${best_agent}"
-            routing_log="${routing_log}${routing_entry};"
-            specialized_count=$((specialized_count + 1))
-            push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
-            echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num → $best_agent"
+            # Pre-claim the issue on behalf of the best agent using CAS on activeAssignments.
+            # (issue #1474: route_tasks_by_specialization() never fired because workers claimed
+            # tasks before routing ran — fix: coordinator pre-claims on the agent's behalf.
+            # When the worker later calls claim_task(), it sees its own name in activeAssignments
+            # and returns success immediately instead of racing the generic queue.)
+            local current_assignments
+            current_assignments=$(get_state "activeAssignments")
+            local pre_claim_entry="${best_agent}:${issue_num}"
+
+            # Refresh active_assignments so subsequent iterations in this loop see the pre-claim
+            active_assignments="$current_assignments"
+
+            # Only pre-claim if not already in activeAssignments (idempotent)
+            if ! echo ",${current_assignments}," | grep -q ",${pre_claim_entry},"; then
+                local new_assignments
+                if [ -z "$current_assignments" ]; then
+                    new_assignments="$pre_claim_entry"
+                else
+                    new_assignments="${current_assignments},${pre_claim_entry}"
+                fi
+                # Atomic CAS to prevent races with concurrent claim_task() calls
+                local cas_patch
+                if [ -z "$current_assignments" ]; then
+                    cas_patch="[{\"op\":\"add\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]"
+                else
+                    cas_patch="[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${current_assignments}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]"
+                fi
+                if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+                    --type=json -p "${cas_patch}" 2>/dev/null; then
+                    echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: pre-claimed issue #$issue_num for $best_agent (assignments: $new_assignments)"
+                    # Update local active_assignments so the skip check works for subsequent loop iterations
+                    active_assignments="$new_assignments"
+                    # Record specialized routing decision in coordinator state
+                    local routing_entry="${issue_num}:${best_agent}"
+                    routing_log="${routing_log}${routing_entry};"
+                    specialized_count=$((specialized_count + 1))
+                    push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
+                else
+                    echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: CAS failed for issue #$issue_num → $best_agent (concurrent modification) — falling back to generic"
+                    generic_count=$((generic_count + 1))
+                fi
+            else
+                echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num already pre-claimed for $best_agent — skipping"
+            fi
         else
             generic_count=$((generic_count + 1))
         fi
