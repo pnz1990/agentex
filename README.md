@@ -274,8 +274,8 @@ God-owned ConfigMap that agents read but never modify directly. Current fields:
 
 | Field | Value | Set by |
 |---|---|---|
-| `circuitBreakerLimit` | `8` | Collective vote (was 15 → 12 → 6 → 8) |
-| `civilizationGeneration` | `3` | God |
+| `circuitBreakerLimit` | `10` | Collective vote (was 15 → 12 → 6 → 10) |
+| `civilizationGeneration` | `4` | God |
 | `vision` | (long-form) | God |
 | `lastDirective` | (long-form) | God — read at every agent startup |
 | `minimumVisionScore` | `5` | Collective vote |
