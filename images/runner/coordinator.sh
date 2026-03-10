@@ -200,8 +200,12 @@ ensure_state_fields_initialized() {
     if [ -n "$new_entries" ]; then
       local migrated_enacted="${enacted} | ${new_entries}"
       # Sanitize for JSON: escape double quotes, remove newlines
+      # Issue #1501: Use printf '%s' instead of echo to avoid appending a trailing newline.
+      # echo "$migrated_enacted" appends \n; tr '\n\r' '  ' converts that \n to a space,
+      # causing enactedDecisions to end with a trailing space character.
+      # This is the same echo+tr pattern fixed in update_state() by PR #1473 (issue #1470).
       local safe_migrated
-      safe_migrated=$(echo "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+      safe_migrated=$(printf '%s' "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
       kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
         -p "{\"data\":{\"enactedDecisions\":\"$safe_migrated\"}}" 2>/dev/null || true
       [ "$silent" = "false" ] && echo "  enactedDecisions migration complete (issue #1427)"
@@ -1598,8 +1602,9 @@ NUDGE_EOF
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             # Strip newlines from proposer_agent (safety - proposer_agent is typically single-line)
+            # Issue #1501: Use printf '%s' instead of echo to avoid trailing space from echo's newline.
             local safe_proposer
-            safe_proposer=$(echo "$proposer_agent" | tr '\n' ' ' | tr -s ' ')
+            safe_proposer=$(printf '%s' "$proposer_agent" | tr '\n' ' ' | tr -s ' ')
             local enacted_entry="${ts} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${safe_proposer}"
             if [ -z "$loop_enacted" ]; then
                 loop_enacted="$enacted_entry"
