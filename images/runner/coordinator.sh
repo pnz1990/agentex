@@ -100,58 +100,80 @@ else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
 fi
 
-# ── Initialize coordinator-state fields (issue #940) ─────────────────────────
-# After coordinator restart, some fields may be missing or null. Initialize them
-# to prevent jq parse errors and governance tally loop crashes.
-echo "Initializing coordinator-state fields..."
-for field in activeAgents activeAssignments decisionLog; do
-  val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
-  if [ -z "$val" ]; then
-    echo "  Initializing $field (was empty/null)"
+# ── ensure_state_fields_initialized() ────────────────────────────────────────
+# Checks and lazily initializes all coordinator-state fields that may be missing.
+# Called at startup AND periodically in the main loop (issue #1178) to handle
+# new fields added by PRs without requiring a coordinator restart.
+#
+# Why periodic?: The coordinator Deployment runs for days/weeks. When new state
+# fields are added (e.g., specializedAssignments by #1113, unresolvedDebates by #1111),
+# they are only present in the startup block. Without periodic re-check, these fields
+# remain null forever in long-running coordinators, silently breaking v0.2 features.
+ensure_state_fields_initialized() {
+  local verbose="${1:-false}"  # Pass "verbose" to log every field check
+
+  # Basic agent tracking fields
+  for field in activeAgents activeAssignments decisionLog; do
+    val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+    if [ -z "$val" ]; then
+      [ "$verbose" = "verbose" ] && echo "  Initializing $field (was empty/null)"
+      kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+    fi
+  done
+
+  # debateStats needs a valid structured value (not just empty string)
+  debate_stats=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)
+  if [ -z "$debate_stats" ]; then
+    [ "$verbose" = "verbose" ] && echo "  Initializing debateStats (was empty/null)"
     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+      -p '{"data":{"debateStats":"responses=0 threads=0 disagree=0 synthesize=0"}}' 2>/dev/null || true
   fi
-done
 
-# debateStats needs a valid structured value (not just empty string)
-debate_stats=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)
-if [ -z "$debate_stats" ]; then
-  echo "  Initializing debateStats (was empty/null)"
-  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"debateStats":"responses=0 threads=0 disagree=0 synthesize=0"}}' 2>/dev/null || true
-fi
-
-# enactedDecisions needs preservation if exists, initialization if not
-enacted=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null)
-if [ -z "$enacted" ]; then
-  echo "  Initializing enactedDecisions (was empty/null)"
-  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
-fi
-
-# Initialize identity-based routing fields (issue #1113)
-for field in specializedAssignments genericAssignments lastSpecializedRouting lastRoutingDecisions; do
-  val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
-  if [ -z "$val" ]; then
-    echo "  Initializing $field (was empty/null)"
-    case "$field" in
-      specializedAssignments|genericAssignments)
-        kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-          -p "{\"data\":{\"$field\":\"0\"}}" 2>/dev/null || true ;;
-      *)
-        kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-          -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true ;;
-    esac
+  # enactedDecisions needs preservation if exists, initialization if not
+  enacted=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null)
+  if [ -z "$enacted" ]; then
+    [ "$verbose" = "verbose" ] && echo "  Initializing enactedDecisions (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
   fi
-done
 
-# unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
-unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
-if [ -z "$unresolved_debates_val" ]; then
-  echo "  Initializing unresolvedDebates (was empty/null)"
-  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
-fi
+  # Identity-based routing fields (issue #1113)
+  for field in specializedAssignments genericAssignments lastSpecializedRouting lastRoutingDecisions; do
+    val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+    if [ -z "$val" ]; then
+      [ "$verbose" = "verbose" ] && echo "  Initializing $field (was empty/null)"
+      case "$field" in
+        specializedAssignments|genericAssignments)
+          kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+            -p "{\"data\":{\"$field\":\"0\"}}" 2>/dev/null || true ;;
+        *)
+          kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+            -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true ;;
+      esac
+    fi
+  done
+
+  # unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
+  unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
+  if [ -z "$unresolved_debates_val" ]; then
+    [ "$verbose" = "verbose" ] && echo "  Initializing unresolvedDebates (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
+  fi
+
+  # lastDebateNudge: ISO timestamp, empty string default (issue #1111)
+  nudge_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.lastDebateNudge}' 2>/dev/null)
+  # lastDebateNudge is always unset initially — check for the field key being absent
+  # (jq would show null, kubectl jsonpath shows empty string)
+  # We only initialize if it truly needs a default (let coordinator logic set it normally)
+  # Note: lastDebateNudge being empty/null is fine — coordinator checks age, empty=never
+}
+
+# ── Initialize coordinator-state fields (issue #940, #1178) ──────────────────
+# Run at startup with verbose logging. Also called periodically in main loop (issue #1178).
+echo "Initializing coordinator-state fields..."
+ensure_state_fields_initialized "verbose"
 echo "Coordinator-state initialization complete"
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
@@ -1444,6 +1466,14 @@ while true; do
     # routing recommendations for the planner/god-delegate to act on.
     if [ $((iteration % 7)) -eq 0 ]; then
         route_tasks_by_specialization
+    fi
+
+    # Every 10 iterations (~5 min): lazily initialize any missing state fields (issue #1178)
+    # Handles new fields added by PRs without requiring coordinator restart.
+    # The coordinator can run for days/weeks — new fields from merged PRs must be
+    # initialized in-place or they remain null and silently break features.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        ensure_state_fields_initialized
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.
