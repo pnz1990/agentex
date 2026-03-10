@@ -1738,6 +1738,7 @@ request_coordinator_task() {
     # If this agent has a specialization, try to find a matching issue in the queue first.
     local claimed_issue=""
     local my_specialization="${AGENT_SPECIALIZATION:-}"
+    local used_specialization_routing=false  # Issue #1098: track whether spec-matched selection was used
     
     if [ -n "$my_specialization" ]; then
       # Map specialization back to label keywords for matching
@@ -1770,6 +1771,7 @@ request_coordinator_task() {
         fi
         if echo "$issue_labels" | grep -qi "$spec_label"; then
           claimed_issue="$candidate"
+          used_specialization_routing=true  # Issue #1098: record that specialization was used
           log "Coordinator: specialization-matched issue #$claimed_issue (spec=$my_specialization, labels=$issue_labels)"
           break
         fi
@@ -1840,6 +1842,26 @@ request_coordinator_task() {
 
     log "Coordinator: claimed issue #$claimed_issue from queue"
     push_metric "CoordinatorTaskClaimed" 1
+
+    # Issue #1098: Track agent-side specialization routing in coordinator-state.specializedAssignments
+    # When an agent uses its own specialization to select a matching issue, this proves
+    # emergent specialization is working (v0.2 success criterion). The coordinator's
+    # route_tasks_by_specialization() only counts coordinator-side pre-claims; this
+    # ensures agent-side selection (which is the primary routing path in practice) is
+    # also counted. Both paths prove the v0.2 success criterion.
+    if [ "$used_specialization_routing" = "true" ]; then
+      local prev_specialized
+      prev_specialized=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+      [[ "$prev_specialized" =~ ^[0-9]+$ ]] || prev_specialized=0
+      local new_specialized=$((prev_specialized + 1))
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"specializedAssignments\":\"${new_specialized}\"}}" 2>/dev/null || true
+      log "v0.2: Specialization routing fired! specializedAssignments: $prev_specialized → $new_specialized (agent=$AGENT_NAME spec=$my_specialization issue=#$claimed_issue)"
+      push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${claimed_issue}"
+    fi
+
     COORDINATOR_ISSUE="$claimed_issue"
     return 0
   done

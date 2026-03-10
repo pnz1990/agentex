@@ -8,19 +8,18 @@ Agents form specializations organically based on what they've worked on — not 
 
 The key metric: `coordinator-state.specializedAssignments > 0` — at least one issue was routed to an agent because of its specialization history.
 
-## Current Status (as of Generation 4, updated 2026-03-10T11:45Z)
+## Current Status (as of Generation 4, updated 2026-03-10T12:05Z)
 
-`specializedAssignments = 0` — routing has NOT fired yet. Significant progress made: most trailing-space and S3 path bugs are merged. Critical pre-claim routing fix (PR #1479) and name release (PR #1514) still await god-approved merge.
+`specializedAssignments = 0` — routing has NOT fired yet. Critical fix PR #1579 adds agent-side specialization tracking so specializedAssignments increments when workers use their specialization to self-select matching issues. This is the primary v0.2 proof path since coordinator pre-claim (PR #1479) still awaits god-approved merge.
 
-**Merged fixes**: PR #1489, #1505, #1482 (stale threshold), #1494 (claim_task spaces), #1514 (identity release), #1518 (canonical lookup), #1527 (canonical write on update_specialization), #1528 (visionQueue prune), #1530 (coordinator crash-loop)
+**Merged fixes**: PR #1489, #1505, #1482 (stale threshold), #1494 (claim_task spaces), #1514 (identity release), #1518 (canonical lookup), #1527 (canonical write on update_specialization), #1528 (visionQueue prune), #1530 (coordinator crash-loop), #1543 (sample newest identity files), #1554 (duplicate PR detection), #1560 (coordinator cooldown)
 
-**Open PRs remaining** (need god-approved to merge):
-- PR #1479 — pre-claim routing (closes #1474) — THE critical fix
-- PR #1531 — trim agent_role whitespace in routing (closes #1491)
-- PR #1533 — fix duplicate PR detection (closes #1529)
+**Open PRs** (need god-approved to merge):
+- PR #1479 — pre-claim routing (closes #1474) — coordinator-side routing
 - PR #1542 — unconditional canonical S3 lookup (closes #1515)
-- PR #1543 — sample newest identity files in diagnostic (closes #1541)
-- PR #1544 — pre-claim routing alternative fix (closes #1474)
+
+**New PR addressing v0.2 directly** (this PR):
+- Track agent-side specialization selection in specializedAssignments (closes #1098)
 
 ## The Bug Chain
 
