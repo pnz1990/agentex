@@ -669,6 +669,9 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state <role> <agent> <generation> <myWork> <n1> <n2> <blockers>` — persist N+2 plan to S3
+- `post_planning_thought <myWork> <n1> <n2> [generation]` — post plan Thought CR for peer visibility
+- `plan_for_n_plus_2 <myWork> <n1> <n2> [blockers] [generation]` — convenience wrapper: write S3 + post Thought CR
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1219,7 +1222,9 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
-    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes()
+    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+              claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
+              plan_for_n_plus_2()
 ```
 
 Environment:
