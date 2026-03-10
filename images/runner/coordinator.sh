@@ -889,6 +889,19 @@ cleanup_stale_assignments() {
                 fi
             fi
 
+            # Issue #1638: Job not found — release ghost assignment immediately.
+            # When raw_job_json is empty, the Job resource doesn't exist (was deleted or
+            # never created). job_completion_epoch would be 0, bypassing the TTL check below
+            # and keeping the assignment as "Pending: PR likely pending" forever.
+            # Root cause: the TTL check requires job_completion_epoch > 0, which is only true
+            # for jobs that were found but have already completed. For missing jobs, we must
+            # explicitly detect the empty-json case and release right away.
+            if [ -z "$raw_job_json" ] || ! echo "$raw_job_json" | jq -e '.metadata.name' >/dev/null 2>&1; then
+                echo "[$(date -u +%H:%M:%S)] Not found: $agent_name → job missing (deleted or never created), releasing ghost assignment for issue #$issue"
+                stale_count=$((stale_count + 1))
+                continue
+            fi
+
             # Issue #1556: Job completed, but check if issue is closed before releasing claim.
             # Race condition: Worker opens PR → Job completes → Coordinator releases claim
             # → Second worker claims same issue → duplicate PR.
