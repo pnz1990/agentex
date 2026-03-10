@@ -636,6 +636,7 @@ query_thoughts() {
 # to prevent cluster clutter and kubectl performance degradation.
 # Issue #1020: increased list timeout from 10s to 60s (6000+ CRs take 10+ seconds to list)
 # Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
+# Issue #1044: batch deletion (50 names/call) instead of O(n) individual API calls
 # Should be called periodically by planners
 cleanup_old_thoughts() {
   local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
@@ -673,17 +674,26 @@ cleanup_old_thoughts() {
     log "No old thoughts to clean up"
     return 0
   fi
-  
-  local count=0
-  for thought_name in $old_thoughts; do
-    if kubectl_with_timeout 10 delete thought.kro.run "$thought_name" -n "$NAMESPACE" 2>/dev/null; then
-      count=$((count + 1))
+
+  local count
+  count=$(echo "$old_thoughts" | wc -w)
+  log "Found $count thoughts eligible for cleanup. Running batch deletion..."
+
+  # Issue #1044: batch deletion — pass up to 50 names per kubectl call instead of 1-at-a-time.
+  # One-at-a-time deletion (~1-2s/call) with 3000+ thoughts would take hours;
+  # batching 50 names per call reduces to ~60 kubectl calls total.
+  local deleted=0
+  while IFS= read -r batch; do
+    [ -z "$batch" ] && continue
+    # shellcheck disable=SC2086
+    if kubectl_with_timeout 60 delete thoughts.kro.run -n "$NAMESPACE" $batch 2>/dev/null; then
+      deleted=$((deleted + $(echo "$batch" | wc -w)))
     fi
-  done
-  
-  if [ $count -gt 0 ]; then
-    log "Cleaned up $count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
-    post_thought "Cleaned up $count thoughts (tiered TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
+  done < <(echo "$old_thoughts" | xargs -n50 echo)
+
+  if [ "$deleted" -gt 0 ]; then
+    log "Cleaned up $deleted thoughts older than TTL (blockers/observations: 2h, others: 24h)"
+    post_thought "Cleaned up $deleted thoughts (tiered TTL: blockers/observations 2h, others 24h). Batch deletion reduced O(n) API calls to O(n/50)." "observation" 7 "maintenance"
   fi
 }
 
