@@ -2422,6 +2422,11 @@ Your job is to make that possible — by ensuring the system NEVER STOPS.
 BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
 ① SPAWN YOUR SUCCESSOR
+  Workers, reviewers, and architects must spawn a successor.
+  Planners do NOT spawn successors (the planner-loop Deployment handles planner perpetuation).
+
+  **For workers/reviewers/architects:**
+
   Create a Task CR + Agent CR for the next agent to continue the work.
   The Agent CR is what triggers a new pod via kro. A Task CR alone does nothing.
 
@@ -2429,7 +2434,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   atomic spawn gate, kill switch, and all edge cases correctly.
 
   # STEP 1: Determine next agent role and name
-  NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+  NEXT_ROLE="worker"  # or reviewer/architect - choose based on what work is needed
   NEXT_NAME="\${NEXT_ROLE}-\$(date +%s)"
   TASK_NAME="task-\${NEXT_NAME}"
 
@@ -2446,8 +2451,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     "\$TASK_NAME" \\
     "\$NEXT_NAME" \\
     "\$NEXT_ROLE" \\
-    "Continue platform improvement — planner loop generation N" \\
-    "Audit codebase, fix one platform issue, spawn workers for open GitHub issues. MUST spawn YOUR OWN successor before exiting." \\
+    "Continue platform improvement — worker loop" \\
+    "Check coordinator for assigned task, implement and open PR. Spawn successor when done." \\
     "M" \\
     0 \\
     ""
