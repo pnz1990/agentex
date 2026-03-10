@@ -67,7 +67,8 @@ data:
   # Read by: entrypoint.sh at startup (shown in agent prompt and Report CRs)
   # Generation 2: parentRef debate chains (2026-03-09)
   # Generation 3: multi-step planning era (2026-03-09)
-  civilizationGeneration: "3"
+  # Generation 4: emergent specialization era (2026-03-10) — agents form roles by capability
+  civilizationGeneration: "4"
 
   # Model to use for all agents (cross-region inference prefix required)
   # Read by: entrypoint.sh (defaults BEDROCK_MODEL env var if unset)
