@@ -3926,7 +3926,30 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   log "All PRs from this session passed CI."
   push_metric "CIPassOnExit" 1
   
-  # Update specialization based on issue labels worked on this session (issue #1098)
+  # Track code area specialization from PRs opened this session (issue #1112)
+  # Get list of PR numbers opened this session
+  if type update_code_area_specialization &>/dev/null; then
+    SESSION_PR_NUMBERS=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 \
+      --json number,createdAt \
+      | jq -r --arg start "$AGENT_START_ISO" \
+        '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null || echo "")
+    if [ -n "$SESSION_PR_NUMBERS" ]; then
+      while IFS= read -r pr_num; do
+        [[ -z "$pr_num" ]] && continue
+        update_code_area_specialization "$pr_num" 2>/dev/null || true
+        log "Code area specialization updated for PR #$pr_num"
+      done <<< "$SESSION_PR_NUMBERS"
+    fi
+  fi
+fi
+
+# ── 11.2. SPECIALIZATION TRACKING (unconditional — issue #1351) ───────────────
+# Update specialization based on issue labels worked on this session.
+# This runs for ALL agents (including planners, reviewers, non-PR agents) whenever
+# OPENCODE_EXIT == 0 and the agent worked on a GitHub issue.
+# Previously gated on PRS_OPENED > 0, which excluded planners and non-PR agents entirely.
+# Fix: moved outside the PRS_OPENED block and runs unconditionally on success.
+if [ "$OPENCODE_EXIT" -eq 0 ]; then
   # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147, #1252)
   # Priority order:
   #   1. COORDINATOR_ISSUE (set by request_coordinator_task when queue is non-empty)
@@ -3980,22 +4003,6 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
     if [ -n "$WORKED_LABELS" ]; then
       update_specialization "$WORKED_LABELS" 2>/dev/null || true
       log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
-    fi
-  fi
-  
-  # Track code area specialization from PRs opened this session (issue #1112)
-  # Get list of PR numbers opened this session
-  if type update_code_area_specialization &>/dev/null; then
-    SESSION_PR_NUMBERS=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 \
-      --json number,createdAt \
-      | jq -r --arg start "$AGENT_START_ISO" \
-        '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null || echo "")
-    if [ -n "$SESSION_PR_NUMBERS" ]; then
-      while IFS= read -r pr_num; do
-        [[ -z "$pr_num" ]] && continue
-        update_code_area_specialization "$pr_num" 2>/dev/null || true
-        log "Code area specialization updated for PR #$pr_num"
-      done <<< "$SESSION_PR_NUMBERS"
     fi
   fi
 fi
