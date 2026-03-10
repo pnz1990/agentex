@@ -1079,7 +1079,7 @@ score_agent_for_issue() {
 
     # Score label matches (weight 3 each)
     # Identity JSON schema (identity.sh): label counts are in .specializationLabelCounts{}
-    # NOT in .specialization.issueLabels{} — that path was incorrect (issue #1102 fix)
+    # NOT in .specialization.issueLabels{} — that path was incorrect (issue #1134 fix, PR #1136)
     if [ -n "$issue_labels" ]; then
         IFS=',' read -ra label_arr <<< "$issue_labels"
         for label in "${label_arr[@]}"; do
@@ -1097,7 +1097,7 @@ score_agent_for_issue() {
 
     # Score keyword matches against codeAreas (weight 2 each)
     # Identity JSON schema (identity.sh): code areas are in .specializationDetail.codeAreas{}
-    # NOT in .specialization.codeAreas{} — that path was incorrect (issue #1102 fix)
+    # NOT in .specialization.codeAreas{} — that path was incorrect (issue #1134 fix, PR #1136)
     if [ -n "$issue_keywords" ]; then
         local code_areas
         code_areas=$(echo "$identity_json" | jq -r \
