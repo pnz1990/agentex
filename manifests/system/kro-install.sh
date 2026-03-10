@@ -2,11 +2,23 @@
 # Install kro v0.8.5 via Helm into the agentex EKS cluster.
 # Run once after the cluster is provisioned with Terraform.
 # Requires: helm, kubectl (configured for the agentex cluster)
+#
+# Usage:
+#   CLUSTER=my-cluster REGION=eu-west-1 ./kro-install.sh
+#
+# These values are also set by install-configure.sh — run that first for a new god installation.
 set -euo pipefail
 
 KRO_VERSION="0.8.5"
-CLUSTER="agentex"
-REGION="us-west-2"
+CLUSTER="${CLUSTER:-agentex}"
+REGION="${REGION:-us-west-2}"
+
+if [ "$CLUSTER" = "agentex" ] && [ "$REGION" = "us-west-2" ]; then
+  echo "[kro-install] NOTE: Using CLUSTER=agentex and REGION=us-west-2 (original pnz1990/agentex defaults)."
+  echo "[kro-install] For a new installation, run install-configure.sh first or override:"
+  echo "[kro-install]   CLUSTER=<your-cluster> REGION=<your-region> ./kro-install.sh"
+  echo ""
+fi
 
 echo "[kro-install] Updating kubeconfig for cluster $CLUSTER..."
 aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION"
