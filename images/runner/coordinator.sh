@@ -420,6 +420,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
   fi
 
+  # escalationQueue (issue #1839): semicolon-separated escalation entries for structured agent recovery.
+  # Format: "esc-id:severity:category:agent:issue:timestamp;..."
+  # Written by agents via ax_escalate() in escalate.sh/helpers.sh.
+  # Read by process_escalation_queue() every ~2.5 min to auto-resolve eligible entries.
+  # Full JSON records stored in S3: s3://bucket/escalations/<esc-id>.json
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("escalationQueue")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing escalationQueue (was absent, issue #1839)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"escalationQueue":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -4425,6 +4436,110 @@ touch /tmp/coordinator-alive
 touch /tmp/coordinator-ready
 echo "[$(date -u +%H:%M:%S)] Health check files initialized"
 
+# process_escalation_queue — Issue #1839: Structured Escalation Protocol
+# Processes pending escalations from coordinator-state.escalationQueue.
+# Auto-resolves eligible escalations and routes to appropriate tier.
+#
+# Auto-resolution rules by category:
+#   retry     → Tier 0: just log it (agent handles its own retry)
+#   blocked   → Tier 1: spawn fresh worker for the blocked issue (if circuit breaker allows)
+#   conflict  → Tier 1: spawn fresh worker for the issue to re-try from main
+#   failed    → Tier 1: log for god-delegate attention, spawn worker if possible
+#   decision  → Tier 2: post high-priority insight thought for god-delegate review
+#   security  → Tier 3: already handled at escalation time (GitHub issue filed)
+#   proliferation → Tier 3: already handled at escalation time (kill switch recommended)
+#
+# Runs every 5 iterations (~2.5 min) in the main loop.
+process_escalation_queue() {
+    local queue
+    queue=$(get_state "escalationQueue" 2>/dev/null || echo "")
+    [ -z "$queue" ] && return 0
+
+    local count
+    count=$(echo "$queue" | tr ';' '\n' | grep -c '.' 2>/dev/null || echo "0")
+    echo "[$(date -u +%H:%M:%S)] Escalation queue: $count pending escalations"
+
+    local resolved_ids=""
+    local unresolved_queue=""
+
+    while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+
+        # Parse: "esc-id:severity:category:agent:issue:timestamp"
+        local esc_id sev cat agent_name issue_ref ts
+        IFS=: read -r esc_id sev cat agent_name issue_ref ts <<< "$entry"
+        [ -z "$esc_id" ] && continue
+
+        echo "[$(date -u +%H:%M:%S)] Processing escalation: ${esc_id} [${sev}/${cat}] agent=${agent_name} issue=${issue_ref:-none}"
+
+        local resolved=false
+
+        case "$cat" in
+            retry)
+                # Tier 0: log and auto-resolve (agent handles own retry)
+                echo "[$(date -u +%H:%M:%S)] Escalation ${esc_id}: Tier-0 retry — auto-resolving"
+                post_coordinator_thought "Escalation ${esc_id}: Tier-0 retry (agent=${agent_name}). Auto-resolved — agent will retry independently." "insight"
+                resolved=true
+                ;;
+            blocked|conflict)
+                # Tier 1: Coordinator can spawn a fresh worker for the same issue
+                if [ -n "$issue_ref" ] && [[ "$issue_ref" =~ ^[0-9]+$ ]]; then
+                    local spawn_slots
+                    spawn_slots=$(get_state "spawnSlots" 2>/dev/null || echo "0")
+                    if [[ "$spawn_slots" =~ ^[0-9]+$ ]] && [ "$spawn_slots" -gt 0 ]; then
+                        echo "[$(date -u +%H:%M:%S)] Escalation ${esc_id}: Tier-1 ${cat} for issue #${issue_ref} — coordinator acknowledging, agents can re-claim after 120s"
+                        post_coordinator_thought "Escalation ${esc_id}: Agent ${agent_name} is ${cat} on issue #${issue_ref}. Tier-1 escalation acknowledged. A fresh worker can claim this issue after the current assignment expires (120s stale TTL). Reason: agent reported '${cat}' — work is re-queued automatically." "insight"
+                        resolved=true
+                    else
+                        echo "[$(date -u +%H:%M:%S)] Escalation ${esc_id}: Tier-1 ${cat} but spawn slots=0, keeping in queue"
+                    fi
+                else
+                    # No issue ref — just log it
+                    post_coordinator_thought "Escalation ${esc_id}: Agent ${agent_name} reported ${cat} (no issue ref). Review needed." "insight"
+                    resolved=true
+                fi
+                ;;
+            failed)
+                # Tier 1: Log failure for god-delegate attention
+                echo "[$(date -u +%H:%M:%S)] Escalation ${esc_id}: Tier-1 failed — logging for god-delegate"
+                post_coordinator_thought "Escalation ${esc_id}: Agent ${agent_name} FAILED on issue #${issue_ref:-none}. Tier-1 escalation — god-delegate should review and reassign." "insight"
+                resolved=true
+                ;;
+            decision)
+                # Tier 2: Post high-visibility decision request for god-delegate
+                echo "[$(date -u +%H:%M:%S)] Escalation ${esc_id}: Tier-2 decision needed — posting for god-delegate"
+                post_coordinator_thought "DECISION NEEDED [Tier-2]: Agent ${agent_name} on issue #${issue_ref:-none} needs a decision. Escalation ID: ${esc_id}. God-delegate or human must resolve this before work can continue. Check s3://agentex-thoughts/escalations/${esc_id}.json for full context." "insight"
+                # Keep in queue until resolved by god-delegate or human
+                unresolved_queue="${unresolved_queue:+${unresolved_queue};}${entry}"
+                continue
+                ;;
+            security|proliferation)
+                # Tier 3: Should have been handled at creation time — just keep for visibility
+                echo "[$(date -u +%H:%M:%S)] Escalation ${esc_id}: Tier-3 ${cat} — already routed to human at creation, keeping in queue"
+                unresolved_queue="${unresolved_queue:+${unresolved_queue};}${entry}"
+                continue
+                ;;
+            *)
+                # Unknown category: log and resolve
+                post_coordinator_thought "Escalation ${esc_id}: Unknown category '${cat}' from agent ${agent_name}. Auto-resolving with human review recommended." "insight"
+                resolved=true
+                ;;
+        esac
+
+        if [ "$resolved" = "true" ]; then
+            resolved_ids="${resolved_ids}${esc_id} "
+            push_metric "EscalationResolved" 1 "Count" "Category=${cat}"
+        fi
+    done <<< "$(echo "$queue" | tr ';' '\n')"
+
+    # Update queue: keep only unresolved entries
+    update_state "escalationQueue" "$unresolved_queue"
+
+    local resolved_count
+    resolved_count=$(echo "$resolved_ids" | wc -w | tr -d ' ')
+    [ "$resolved_count" -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Escalation queue: resolved $resolved_count entries, ${unresolved_queue:-none} remaining"
+}
+
 # Run immediate cleanup at startup to clear accumulated stale CRs (issue #1679)
 # After a coordinator restart (e.g., after merging new cleanup code), stale Thought/Message/Report
 # CRs may have accumulated during high-activity periods. Without startup cleanup, agents spend
@@ -4561,12 +4676,18 @@ while true; do
         check_swarm_dissolution
     fi
 
-    # Every 5 iterations (~2.5 min): update activeSwarms field with live swarm summary (issue #1775)
-    # Tracks which swarms are active and their goal/member-count for v0.6 observability.
-    # Runs more frequently than dissolution check (10 iters) to ensure prompt updates on formation.
-    if [ $((iteration % 5)) -eq 0 ]; then
-        track_active_swarms
-    fi
+     # Every 5 iterations (~2.5 min): update activeSwarms field with live swarm summary (issue #1775)
+     # Tracks which swarms are active and their goal/member-count for v0.6 observability.
+     # Runs more frequently than dissolution check (10 iters) to ensure prompt updates on formation.
+     if [ $((iteration % 5)) -eq 0 ]; then
+         track_active_swarms
+     fi
+
+     # Every 5 iterations (~2.5 min): process pending escalations (issue #1839)
+     # Auto-resolves Tier-0/1 escalations, routes Tier-2 to god-delegate, keeps Tier-3 visible.
+     if [ $((iteration % 5)) -eq 0 ]; then
+         process_escalation_queue
+     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime

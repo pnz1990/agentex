@@ -1723,5 +1723,52 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── ax_escalate / escalate_to_coordinator ────────────────────────────────────
+# Issue #1839: Structured escalation protocol helpers.
+# Source /agent/escalate.sh for full implementation.
+# These wrappers allow basic usage via `source /agent/helpers.sh`.
+#
+# Usage (from OpenCode bash tool context):
+#   source /agent/helpers.sh
+#   ax_escalate --severity high --type decision --issue 789 "Need DB choice"
+#   escalate_to_coordinator 789 "Merge conflict in coordinator.go"
+#
+# For full functionality (query_escalations, resolve_escalation), source escalate.sh:
+#   source /agent/escalate.sh
+if [ -f "/agent/escalate.sh" ]; then
+  # Source full escalation implementation (preferred)
+  # shellcheck source=/agent/escalate.sh
+  source /agent/escalate.sh 2>/dev/null || true
+else
+  # Minimal stub when escalate.sh is not available (e.g., older image)
+  ax_escalate() {
+    local severity="medium" category="blocked" issue="" description=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --severity|-s) severity="$2"; shift 2 ;;
+        --type|-t)     category="$2"; shift 2 ;;
+        --issue|-i)    issue="$2"; shift 2 ;;
+        --options)     shift 2 ;;
+        -*)  shift ;;
+        *)   description="$1"; shift ;;
+      esac
+    done
+    local escalation_id="esc-${AGENT_NAME:-unknown}-$(date +%s)"
+    log "ESCALATION [${severity}/${category}] issue=${issue:-none}: ${description}"
+    # Write minimal entry to coordinator-state
+    local entry="${escalation_id}:${severity}:${category}:${AGENT_NAME:-unknown}:${issue}:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local queue
+    queue=$(kubectl_with_timeout 10 get configmap coordinator-state \
+      -n "$NAMESPACE" -o jsonpath='{.data.escalationQueue}' 2>/dev/null || echo "")
+    local new_queue="${queue:+${queue};}${entry}"
+    kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=merge -p "{\"data\":{\"escalationQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+    echo "$escalation_id"
+  }
+  escalate_to_coordinator() {
+    ax_escalate --severity medium --type blocked --issue "${1:-}" "${2:-}"
+  }
+fi
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, ax_escalate, escalate_to_coordinator available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
