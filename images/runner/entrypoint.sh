@@ -691,7 +691,7 @@ query_debate_outcomes() {
   debate_files=$(aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}')
   
   if [ -z "$debate_files" ]; then
-    log "No debate outcomes found in S3"
+    log "No debate outcomes found in S3" >&2
     echo "[]"
     return 0
   fi
@@ -730,7 +730,7 @@ query_debate_outcomes() {
   results="${results}]"
   
   echo "$results" | jq '.' 2>/dev/null || echo "[]"
-  log "Query returned $(echo "$results" | jq 'length' 2>/dev/null || echo 0) debate outcomes for topic: ${topic_filter:-all}"
+  log "Query returned $(echo "$results" | jq 'length' 2>/dev/null || echo 0) debate outcomes for topic: ${topic_filter:-all}" >&2
   return 0
 }
 
