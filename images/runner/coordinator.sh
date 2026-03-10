@@ -170,12 +170,15 @@ ensure_state_fields_initialized() {
       -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
   fi
 
-  # Issue #1240: Detect and fix negative spawnSlots during health check.
-  # A negative value permanently blocks all agent spawning — reset via reconciliation.
+  # spawnSlots: must be a non-negative integer (issue #1240 — negative value freezes civilization)
+  # If missing or non-numeric (includes negative values like "-1"), reset to 0 as a safe floor.
+  # reconcile_spawn_slots() (called separately) will correct 0 to the proper ground-truth value
+  # based on actual running jobs. We only floor here — full reconciliation happens in the main loop.
   spawn_slots_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.spawnSlots}' 2>/dev/null)
-  if [[ "$spawn_slots_val" =~ ^-[0-9]+$ ]]; then
-    [ "$silent" = "false" ] && echo "  WARNING: spawnSlots=$spawn_slots_val is negative — civilization frozen! Will reconcile (issue #1240)."
-    reconcile_spawn_slots
+  if [ -z "$spawn_slots_val" ] || ! [[ "$spawn_slots_val" =~ ^[0-9]+$ ]]; then
+    [ "$silent" = "false" ] && echo "  spawnSlots is invalid ('$spawn_slots_val') — flooring to 0; reconcile_spawn_slots will correct to ground truth (issue #1240)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"spawnSlots":"0"}}' 2>/dev/null || true
   fi
 
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
@@ -1755,28 +1758,32 @@ while true; do
     cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
         -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
     if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=6; fi
-    
-    # Count active jobs (fast check, only when needed)
-    current_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
-        2>/dev/null || echo "0")
-    
-    # Near capacity threshold: reconcile if within 3 slots of limit
-    near_capacity_threshold=$((cb_limit - 3))
 
-    # Issue #1240: Fast check for negative spawnSlots (civilization-freeze guard)
-    # Read raw value; if it looks like a negative number, trigger immediate reconciliation.
-    # This check is O(1) (single ConfigMap read) and runs every iteration.
-    current_slots_raw=$(get_state "spawnSlots")
-    if [[ "$current_slots_raw" =~ ^-[0-9]+$ ]]; then
-        echo "[$(date -u +%H:%M:%S)] EMERGENCY: spawnSlots=$current_slots_raw is negative — civilization frozen! Reconciling immediately (issue #1240)."
+    # Issue #1240: Fast-path negative spawnSlots check — every iteration (~30s).
+    # If spawnSlots is negative or non-numeric, it permanently blocks all spawning
+    # until a human patches the ConfigMap. Catch and reconcile immediately — do NOT
+    # wait for the 4-iteration (2 min) reconcile cycle.
+    spawn_slots_now=$(get_state "spawnSlots")
+    if [ -z "$spawn_slots_now" ] || ! [[ "$spawn_slots_now" =~ ^[0-9]+$ ]]; then
+        echo "[$(date -u +%H:%M:%S)] ALERT: spawnSlots='$spawn_slots_now' is invalid (negative or non-numeric) — reconciling immediately (issue #1240)"
+        push_metric "SpawnSlotsNegative" 1 "Count" "Component=Coordinator"
         reconcile_spawn_slots
-    elif [ "$current_active" -ge "$near_capacity_threshold" ]; then
-        # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
-        reconcile_spawn_slots
-    elif [ $((iteration % 4)) -eq 0 ]; then
-        # IDLE: reconcile every 4 iterations (~2 min) as before
-        reconcile_spawn_slots
+    else
+        # Count active jobs (fast check, only when needed)
+        current_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+            jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+            2>/dev/null || echo "0")
+        
+        # Near capacity threshold: reconcile if within 3 slots of limit
+        near_capacity_threshold=$((cb_limit - 3))
+        
+        if [ "$current_active" -ge "$near_capacity_threshold" ]; then
+            # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
+            reconcile_spawn_slots
+        elif [ $((iteration % 4)) -eq 0 ]; then
+            # IDLE: reconcile every 4 iterations (~2 min) as before
+            reconcile_spawn_slots
+        fi
     fi
 
     # Every 3 iterations (~1.5 min): tally votes and potentially enact
