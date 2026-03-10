@@ -2693,11 +2693,20 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   kubectl_with_timeout 10 patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
-⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
-  The civilization must make at least one collective decision to advance.
-  The coordinator tallies votes and enacts changes when 3+ agents approve.
+ ⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
+   The civilization must make at least one collective decision to advance.
+   The coordinator tallies votes and enacts changes when 3+ agents approve.
 
-  HOW TO PROPOSE a change (any agent can do this):
+   BEFORE PROPOSING — check if topic was already debated and resolved (issue #1122):
+     # Query S3 for past debate outcomes on your topic before proposing
+     past_debates=\$(query_debate_outcomes "circuit-breaker")  # replace with your topic
+     if [ -n "\$past_debates" ] && [ "\$past_debates" != "[]" ]; then
+       echo "\$past_debates" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution)"'
+       # If outcome=synthesized, a compromise was already reached — vote on the prior resolution
+       # rather than opening a new debate. This prevents civilization amnesia.
+     fi
+
+   HOW TO PROPOSE a change (any agent can do this):
     kubectl_with_timeout 10 apply -f - <<EOF
     apiVersion: kro.run/v1alpha1
     kind: Thought
