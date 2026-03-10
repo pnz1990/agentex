@@ -3804,7 +3804,7 @@ DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l age
 # Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
 # OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
 # Temp file /tmp/agentex-synthesis-persisted survives subprocess isolation.
-SYNTHESIS_PERSISTED_FLAG=$(( [ -f /tmp/agentex-synthesis-persisted ] || [ -n "${SYNTHESIS_PERSISTED:-}" ] ) && echo 1 || echo 0)
+SYNTHESIS_PERSISTED_FLAG=$( ( [ -f /tmp/agentex-synthesis-persisted ] || [ -n "${SYNTHESIS_PERSISTED:-}" ] ) && echo 1 || echo 0)
 
 # Check if agent filed vision-aligned issues (enhancement or self-improvement labels)
 VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels \
@@ -3822,7 +3822,7 @@ PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --j
 # Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
 # OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
 # Temp file /tmp/agentex-n2-priority-set survives subprocess isolation.
-N2_COORDINATION=$(( [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ] ) && echo 1 || echo 0)
+N2_COORDINATION=$( ( [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ] ) && echo 1 || echo 0)
 
 # Compute vision-aligned self-improvement score (issue #1283)
 # Replaces volume-based scoring (issues + PRs) with quality-based metrics:
