@@ -934,8 +934,40 @@ tally_and_enact_votes() {
         enacted=$(get_state "enactedDecisions")
         # Issue #940: null guard - treat empty/null as empty string
         [ -z "$enacted" ] && enacted=""
-        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
-        
+        # Issue #1398 fix: build decision_key using ONLY the keys defined in the canonical
+        # proposal (not ad-hoc keys introduced by informal vote content).
+        #
+        # Root cause: votes often contain extra keys like "limit=10", "Limit=10", "spawnSlots=1"
+        # that are not in the original proposal. When these get incorporated into kv_pairs via
+        # the majority-vote extraction, the resulting decision_key grows unboundedly and never
+        # matches manually-recorded entries or prior coordinator-generated entries.
+        #
+        # Fix: extract keys from the most-recent proposal, then look up their majority-voted
+        # values from the votes. Keys that only appear in votes (not proposals) are excluded
+        # from the decision_key. This gives a stable, predictable key across coordinator cycles.
+        #
+        # Also: normalize whitespace (tr '[:space:]' '_' | tr -s '_') to handle any embedded
+        # newlines that could survive into the key string.
+        local proposal_keys_only=""
+        if [ -n "$proposal_content" ]; then
+            local proposal_key_list
+            proposal_key_list=$(echo "$proposal_content" | grep "^#proposal-${topic}" | \
+                grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' | awk -F= '{print $1}' | \
+                grep -v "^reason$" | grep -v "^proposalRef$" | sort -u)
+            while IFS= read -r pk; do
+                [ -z "$pk" ] && continue
+                # Use majority-voted value for this key if available, else proposal value
+                local pk_val
+                pk_val=$(echo "$kv_pairs" | tr ' ' '\n' | grep "^${pk}=" | head -1 | cut -d= -f2-)
+                [ -z "$pk_val" ] && pk_val=$(echo "$proposal_content" | grep -oE "${pk}=[a-zA-Z0-9_.-]+" | head -1 | cut -d= -f2-)
+                [ -n "$pk_val" ] && proposal_keys_only="${proposal_keys_only:+$proposal_keys_only }${pk}=${pk_val}"
+            done <<< "$proposal_key_list"
+        fi
+        # If no proposal found, fall back to full kv_pairs (for backward compatibility)
+        local key_basis="${proposal_keys_only:-$kv_pairs}"
+        local decision_key
+        decision_key=$(printf '%s_%s' "$topic" "$key_basis" | tr '[:space:]' '_' | tr -s '_')
+
         if echo "$enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
             continue
@@ -1178,6 +1210,25 @@ NUDGE_EOF
                         fi
                     fi
                     
+                    # ISSUE #1398 FIX: Record enacted decision BEFORE sync_constitution_to_git().
+                    # Previously, enactedDecisions was written AFTER the sync, meaning that if the
+                    # coordinator restarted mid-sync (or sync returned early), the decision was never
+                    # recorded and the next coordinator cycle would re-enact it — creating another PR.
+                    # Writing the key BEFORE the sync ensures idempotency: even if sync fails or the
+                    # coordinator crashes, subsequent cycles will see the key and skip re-enactment.
+                    local ts_pre_sync
+                    ts_pre_sync=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    local pre_sync_entry="${ts_pre_sync} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${proposer_agent} voters=${approvers}"
+                    local enacted_now
+                    enacted_now=$(get_state "enactedDecisions")
+                    [ -z "$enacted_now" ] && enacted_now=""
+                    if [ -z "$enacted_now" ]; then
+                        update_state "enactedDecisions" "$pre_sync_entry"
+                    else
+                        update_state "enactedDecisions" "${enacted_now} | ${pre_sync_entry}"
+                    fi
+                    echo "[$(date -u +%H:%M:%S)] AUDIT: Decision pre-recorded in enactedDecisions (prevents re-enactment on restart)"
+
                     # ISSUE #893: Sync constitution.yaml in git after enacting governance decision
                     # This prevents git repo from drifting out of sync with cluster ConfigMap
                     sync_constitution_to_git "$kv_pairs" "$topic" "$approve_votes"
@@ -1304,17 +1355,25 @@ NUDGE_EOF
                 fi
             fi
 
-            # Record the enacted decision with full audit trail
+            # Record the enacted decision with full audit trail.
+            # Issue #1398: For patched=true cases, the key was already pre-recorded before
+            # sync_constitution_to_git() — check to avoid double-writing.
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            local enacted_entry="${ts} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${proposer_agent} voters=${approvers}"
-            if [ -z "$enacted" ]; then
-                update_state "enactedDecisions" "$enacted_entry"
+            local enacted_current
+            enacted_current=$(get_state "enactedDecisions")
+            [ -z "$enacted_current" ] && enacted_current=""
+            if ! echo "$enacted_current" | grep -qF "$decision_key"; then
+                local enacted_entry="${ts} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${proposer_agent} voters=${approvers}"
+                if [ -z "$enacted_current" ]; then
+                    update_state "enactedDecisions" "$enacted_entry"
+                else
+                    update_state "enactedDecisions" "${enacted_current} | ${enacted_entry}"
+                fi
+                echo "[$(date -u +%H:%M:%S)] AUDIT: Decision recorded in enactedDecisions log"
             else
-                update_state "enactedDecisions" "${enacted} | ${enacted_entry}"
+                echo "[$(date -u +%H:%M:%S)] AUDIT: Decision already pre-recorded in enactedDecisions (skipping duplicate write)"
             fi
-            
-            echo "[$(date -u +%H:%M:%S)] AUDIT: Decision recorded in enactedDecisions log"
 
             # Post verdict Thought CR
             local verdict_text
