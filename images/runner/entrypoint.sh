@@ -3542,37 +3542,73 @@ log "Auditing self-improvement work..."
 # Convert AGENT_START_TIME (Unix timestamp) to ISO 8601 for GitHub API
 AGENT_START_ISO=$(date -u -d "@$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
 
-# Check if agent created any GitHub issues during this run
-ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
+# ── 11.2. SELF-IMPROVEMENT AUDIT (VISION-ALIGNED METRICS) ────────────────────
+# Enacted governance: self-improvement-audit-metrics (issue #1283)
+# Replaces volume-based scoring with vision-aligned metrics to prevent gaming.
+#
+# Vision-aligned metrics:
+# 1. debate_participation_count: did agent post debate/synthesis responses?
+# 2. vision_issue_ratio: percentage of filed issues that are vision-aligned
+# 3. n2_coordination_usage: did agent call plan_for_n_plus_2() with meaningful content?
+#
+# Scoring: 0-10 scale
+# - debate participation: +4 points
+# - vision-aligned issue filing: +4 points
+# - N+2 coordination: +2 points
+
+# Count debate responses posted by this agent during this run
+DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null | \
+  jq --arg agent "$AGENT_NAME" --arg start "$AGENT_START_ISO" \
+  '[.items[] | select(.data.agentRef == $agent and .data.thoughtType == "debate" and .metadata.creationTimestamp >= $start)] | length' 2>/dev/null || echo "0")
+
+# Count vision-aligned issues filed by this agent during this run
+# Vision-aligned = has "enhancement" or "self-improvement" label
+VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels 2>/dev/null \
+  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start) | select(.labels | map(.name) | any(. == "enhancement" or . == "self-improvement"))] | length' 2>/dev/null || echo "0")
+
+# Check if agent used N+2 coordination (plan_for_n_plus_2 sets N2_PRIORITY_SET)
+N2_COORDINATION=$([ -n "${N2_PRIORITY_SET:-}" ] && echo 1 || echo 0)
+
+# Total issues and PRs (for detail reporting)
+ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt 2>/dev/null \
+  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
+PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt 2>/dev/null \
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Check if agent opened any PRs during this run
-PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
-  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
-
-# Compute self-improvement score
+# Compute vision-aligned self-improvement score
 SI_SCORE=0
 SI_DETAILS=""
 
-if [ "$ISSUES_CREATED" -gt 0 ] && [ "$PRS_OPENED" -gt 0 ]; then
-  SI_SCORE=10
-  SI_DETAILS="Full compliance: created $ISSUES_CREATED issue(s) and opened $PRS_OPENED PR(s)"
-elif [ "$ISSUES_CREATED" -gt 0 ]; then
-  SI_SCORE=7
-  SI_DETAILS="Partial compliance: created $ISSUES_CREATED issue(s) but no PR"
-elif [ "$PRS_OPENED" -gt 0 ]; then
-  SI_SCORE=5
-  SI_DETAILS="Partial compliance: opened $PRS_OPENED PR(s) but no new issue"
-else
-  SI_SCORE=2
-  SI_DETAILS="Low compliance: no issues or PRs created (may have worked on assigned issue)"
+if [ "$DEBATE_RESPONSES" -gt 0 ]; then
+  SI_SCORE=$((SI_SCORE + 4))
+  SI_DETAILS="${SI_DETAILS}debate=${DEBATE_RESPONSES} "
+fi
+
+if [ "$VISION_ISSUES" -gt 0 ]; then
+  SI_SCORE=$((SI_SCORE + 4))
+  SI_DETAILS="${SI_DETAILS}vision_issues=${VISION_ISSUES} "
+fi
+
+if [ "$N2_COORDINATION" -eq 1 ]; then
+  SI_SCORE=$((SI_SCORE + 2))
+  SI_DETAILS="${SI_DETAILS}n2_coord=yes "
+fi
+
+# Add context: total work output
+SI_DETAILS="${SI_DETAILS}(total: issues=${ISSUES_CREATED}, PRs=${PRS_OPENED})"
+
+# If score is 0, provide guidance
+if [ "$SI_SCORE" -eq 0 ]; then
+  SI_DETAILS="No vision-aligned work detected. Consider: debate participation, filing enhancement/self-improvement issues, using plan_for_n_plus_2(). ${SI_DETAILS}"
 fi
 
 # Post audit result as a thought for peer visibility
-post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
+post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Vision-aligned metrics (issue #1283)." "insight" "$SI_SCORE"
 
 # Push metrics to CloudWatch
 push_metric "SelfImprovementScore" "$SI_SCORE" "None"
+push_metric "DebateParticipation" "$DEBATE_RESPONSES" "Count"
+push_metric "VisionAlignedIssues" "$VISION_ISSUES" "Count"
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
@@ -3584,7 +3620,7 @@ if [ "$PRS_OPENED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_id
   update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
 fi
 
-log "Self-improvement audit complete: score=$SI_SCORE/10"
+log "Self-improvement audit complete: score=$SI_SCORE/10 (vision-aligned metrics)"
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
 # The agent who opened a PR has the most context to fix a CI failure.
