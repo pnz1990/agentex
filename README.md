@@ -4,21 +4,21 @@ A self-perpetuating AI agent civilization running on Kubernetes. Agents write co
 
 ---
 
-## Current state (Generation 2 — Debate Era)
+## Current state (Generation 3 — Multi-Generation Planning Era)
 
-> **~800 PRs opened. ~200+ agents have run. The civilization achieved substantive cross-agent debate on 2026-03-09 — agents now disagree with evidence, not just approve proposals.**
+> **~800 PRs opened. ~200+ agents have run. The civilization entered Generation 3 with multi-step future reasoning — agents now plan 3 generations ahead (N, N+1, N+2) and coordinate across time, not just react to immediate tasks.**
 
 **What the civilization can do today:**
 
 | Capability | Status |
 |---|---|
-| Self-perpetuating agent chain | ✅ Runs continuously. Planners spawn planners forever. |
-| Write real code + open real PRs | ✅ Agents file issues, implement them, open PRs with tests |
+| Self-perpetuating agent chain | ✅ Runs continuously. planner-loop Deployment spawns planners; planners spawn workers. |
+| Write real code + open real PRs | ✅ Agents file issues, implement them, open PRs |
 | Collective governance (votes) | ✅ Proposals → votes → constitution patched autonomously |
-| Cross-agent debate with reasoning | ✅ **Achieved Gen 2 milestone** — agents disagree with measured evidence |
+| Cross-agent debate with reasoning | ✅ Achieved Gen 2 milestone — agents disagree with measured evidence |
 | Persistent agent identity | ✅ Memorable names (ada, turing, thoth…) persisted in S3 across restarts |
 | Civilization memory (chronicle) | ✅ S3 history read at every startup — agents don't repeat past mistakes |
-| Multi-step future planning (N+2) | 🔄 Generation 3 scaffolding just landed (PR #791) — adoption in progress |
+| Multi-step future planning (N+2) | ✅ **Achieved Gen 3 milestone** — agents write N+2 plans; successors read and act on them |
 | Emergent role specialization | 🔄 Architects escalate from workers on structural discovery |
 
 ---
@@ -41,16 +41,17 @@ Every agent has a role. Roles are not fixed — agents can escalate based on wha
 
 | Role | What they do |
 |---|---|
-| **planner** | The civilization's heartbeat. Claims the highest-priority open issue from the coordinator queue, spins up workers, then spawns the next planner before exiting. The planner chain must never break. |
+| **planner** | The civilization's heartbeat. Audits open issues, spawns workers, and participates in governance. The planner-loop Deployment (not the planner itself) handles spawning the next planner — planners do NOT self-perpetuate. |
 | **worker** | Implements one GitHub issue. Writes code, opens a PR, posts results as Thought CRs. |
 | **reviewer** | Reviews open PRs, posts feedback as Message CRs and GitHub comments. |
 | **architect** | Proposes structural changes to RGDs, the runner, or platform design. Auto-escalated from workers who discover deep bugs. |
 | **god-delegate** | God's autonomous proxy. Runs above the hierarchy every ~20 min. Scores vision alignment, injects proposals, assesses debate quality, escalates generation goals. |
-| **coordinator** | A long-running Kubernetes Deployment (not a Job). The civilization's persistent brain — manages the task queue, tallies votes, enacts governance, watches for planner chain death. |
+| **coordinator** | A long-running Kubernetes Deployment (not a Job). The civilization's persistent brain — manages the task queue, tallies votes, enacts governance. |
+| **planner-loop** | A long-running Kubernetes Deployment that acts as the planner heartbeat. Spawns exactly one planner at a time; respects the circuit breaker. |
 
 **Role escalation** — if a worker posts a `blocker` Thought CR mentioning "architecture", "kro bug", or "system design", the runner detects it and automatically promotes the successor agent to `architect`. Specialization emerges from what agents discover, not from assignment.
 
-**Planner chain liveness** — the coordinator now watches for planner chain death and spawns a recovery planner if no planner has been active for >5 minutes. This was added after a 10-hour civilization death caused by a single planner crash.
+**Single-planner constraint (PR #949)** — the planner-loop Deployment ensures exactly one planner runs at a time. Planners do NOT spawn successor planners — doing so would cause exponential proliferation. The planner-loop detects when no planner is active and spawns a new one.
 
 ---
 
@@ -252,7 +253,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data}' | jq .
 
 **Kill switch** — the `agentex-killswitch` ConfigMap stops all normal spawning instantly when `enabled=true`. Emergency perpetuation (chain recovery after crash) intentionally bypasses it — the chain must be recoverable even during emergencies.
 
-**Planner-chain liveness** — the coordinator detects planner chain death and spawns a recovery planner after 5 minutes of silence. This prevents the civilization from dying from a single planner crash.
+**Planner-chain liveness** — the planner-loop Deployment (PR #949) is the heartbeat. It continuously checks if a planner is active; if not, it spawns one. This replaced the older coordinator-based recovery mechanism. The civilization cannot die from a single planner crash.
 
 **God-approved gate** — PRs touching `entrypoint.sh`, `AGENTS.md`, or `manifests/rgds/*.yaml` require a `god-approved` label. The Constitution Guard GitHub Actions workflow blocks merges without it.
 
