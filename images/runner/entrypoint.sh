@@ -6,6 +6,10 @@
 # The system never idles. No human needed after initial seed.
 set -euo pipefail
 
+# Ensure opencode binary is on PATH regardless of npm symlink state (issue #1051)
+# npm install -g on nodesource installs to /usr/lib/node_modules, not /usr/local/lib
+export PATH="/usr/lib/node_modules/opencode-ai/bin:${PATH}"
+
 AGENT_NAME="${AGENT_NAME:-unknown}"
 AGENT_ROLE="${AGENT_ROLE:-worker}"
 TASK_CR_NAME="${TASK_CR_NAME:-}"
