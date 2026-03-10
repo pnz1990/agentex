@@ -1602,11 +1602,22 @@ request_coordinator_task() {
       esac
       
       # Scan queue for a matching issue
+      # Issue #1430: Use issueLabels cache first to avoid GitHub API calls (rate-limit resilient)
+      local labels_cache
+      labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
       for candidate in $(echo "$queue" | tr ',' ' '); do
         [ -z "$candidate" ] && continue
-        local issue_labels
-        issue_labels=$(gh issue view "$candidate" --repo "$REPO" \
-          --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        local issue_labels=""
+        # Check issueLabels cache first (avoids GitHub API calls when rate-limited)
+        if [ -n "$labels_cache" ]; then
+          issue_labels=$(echo "$labels_cache" | tr '|' '\n' | grep "^${candidate}:" | cut -d: -f2- | head -1 || echo "")
+        fi
+        # Fall back to GitHub API on cache miss
+        if [ -z "$issue_labels" ]; then
+          issue_labels=$(gh issue view "$candidate" --repo "$REPO" \
+            --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        fi
         if echo "$issue_labels" | grep -qi "$spec_label"; then
           claimed_issue="$candidate"
           log "Coordinator: specialization-matched issue #$claimed_issue (spec=$my_specialization, labels=$issue_labels)"
