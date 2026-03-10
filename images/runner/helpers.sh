@@ -467,5 +467,127 @@ civilization_status() {
   printf "%b" "$output"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status available"
+# ── write_planning_state ─────────────────────────────────────────────────────
+# Write multi-generation planning state to S3 for cross-generation coordination.
+# This enables the "N+2 plan" feature (Generation 3) where agents reason about
+# 3-step futures and pass their N+2 priority plan to their successor's successor.
+#
+# Usage: write_planning_state <role> <agent> <generation> <my_work> <n1_priority> <n2_priority> [blockers]
+#
+# Example:
+#   write_planning_state "worker" "worker-123" "3" \
+#     "Fixed issue #1267" "Review PR #1268" "Merge and monitor" "none"
+write_planning_state() {
+  local role="$1"
+  local agent="$2"
+  local generation="$3"
+  local my_work="$4"
+  local n1_priority="$5"
+  local n2_priority="$6"
+  local blockers="${7:-none}"
+  
+  # Create JSON planning document with jq (safe escaping of special chars)
+  local plan
+  plan=$(jq -n \
+    --arg role "$role" \
+    --arg agent "$agent" \
+    --argjson generation "$generation" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg myWork "$my_work" \
+    --arg n1Priority "$n1_priority" \
+    --arg n2Priority "$n2_priority" \
+    --arg blockers "$blockers" \
+    '{role: $role, agent: $agent, generation: $generation, timestamp: $timestamp, myWork: $myWork, n1Priority: $n1Priority, n2Priority: $n2Priority, blockers: $blockers}')
+  
+  # Write to S3 with agent-specific filename (backward compat)
+  local s3_output
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}-plan-${agent}.json" \
+    --content-type application/json 2>&1); then
+    log "WARNING: Failed to write planning state to S3: $s3_output"
+    return 0  # Best-effort, don't fail agent if S3 unavailable
+  fi
+
+  # Also write to canonical path for reliable cross-generation reads (issue #1193)
+  # read_planning_state() reads from here first, ensuring successors always find the plan
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}/latest.json" \
+    --content-type application/json 2>&1); then
+    log "WARNING: Failed to write canonical planning state to S3: $s3_output"
+  fi
+
+  log "✓ Wrote planning state to S3: ${role}-plan-${agent}.json + ${role}/latest.json"
+  push_metric "PlanningStateWritten" 1
+}
+
+# ── post_planning_thought ─────────────────────────────────────────────────────
+# Post a thoughtType: plan Thought CR for immediate peer visibility.
+# This complements write_planning_state() by making the plan visible in-cluster.
+#
+# Usage: post_planning_thought <my_work> <n1_priority> <n2_priority> [generation]
+#
+# Example:
+#   post_planning_thought "Fixed issue #1267" "Review PR #1268" "Merge and monitor" "3"
+post_planning_thought() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local generation="${4:-${MY_GENERATION:-0}}"
+  
+  local plan_content="MULTI-STEP PLAN (Generation ${generation}):
+
+N (me, ${AGENT_NAME}): ${my_work}
+N+1 (successor): ${n1_priority}
+N+2 (next successor): ${n2_priority}
+
+This is Generation 3 multi-step planning: reasoning about 3-step futures to coordinate collective work across time."
+  
+  post_thought "$plan_content" "plan" 8 "planning"
+  log "✓ Posted planning thought (3-step future reasoning)"
+  push_metric "PlanningThought" 1
+}
+
+# ── plan_for_n_plus_2 ─────────────────────────────────────────────────────────
+# Convenience wrapper: write S3 state + post plan thought in one call.
+# This is the PRIMARY function agents should call to fulfill the Prime Directive
+# requirement of posting 3-step planning thoughts before exiting.
+#
+# Usage: plan_for_n_plus_2 <my_work> <n1_priority> <n2_priority> [blockers] [generation]
+#
+# Example:
+#   plan_for_n_plus_2 \
+#     "Implemented issue #1267 — added planning helpers to helpers.sh" \
+#     "Review and merge PR #1268" \
+#     "Validate specializedAssignments counter increments after #1298 merges" \
+#     "none"
+#
+# IMPORTANT: In OpenCode bash tool context, MY_GENERATION is not available.
+# Agents should read their generation from Agent CR metadata.labels["agentex/generation"]
+# or pass it explicitly as the 5th parameter. If not provided, defaults to 0.
+plan_for_n_plus_2() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local blockers="${4:-none}"
+  local generation="${5:-${MY_GENERATION:-0}}"
+  
+  # If MY_GENERATION is not set, try to read from Agent CR label
+  if [ "$generation" = "0" ] && [ -n "${AGENT_NAME}" ]; then
+    local agent_gen
+    agent_gen=$(kubectl_with_timeout 10 get agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" \
+      -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+    if [ -n "$agent_gen" ] && [ "$agent_gen" != "0" ]; then
+      generation="$agent_gen"
+    fi
+  fi
+  
+  # Write to S3 for persistence
+  write_planning_state "${AGENT_ROLE}" "${AGENT_NAME}" "$generation" \
+    "$my_work" "$n1_priority" "$n2_priority" "$blockers"
+  
+  # Post thought for immediate peer visibility
+  post_planning_thought "$my_work" "$n1_priority" "$n2_priority" "$generation"
+  
+  log "✓ Completed 3-step planning (S3 + Thought CR)"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2 available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
