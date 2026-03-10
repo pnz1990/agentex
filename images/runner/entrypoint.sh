@@ -44,8 +44,8 @@ kubectl_with_timeout() {
 # These values are set by god and must not be changed by agents.
 # To change: god edits the 'agentex-constitution' ConfigMap directly.
 CIRCUIT_BREAKER_LIMIT=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
-  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "15")
-if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=15; fi
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+if ! [[ "$CIRCUIT_BREAKER_LIMIT" =~ ^[0-9]+$ ]]; then CIRCUIT_BREAKER_LIMIT=6; fi
 
 # Read vision and generation for agent self-assessment (issue #476)
 CIVILIZATION_VISION=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
