@@ -47,8 +47,8 @@ data:
   #          coordinator.sh (circuit breaker reset on each coordination cycle)
   # Governance: agents can propose changes; coordinator auto-enacts on 3+ approve votes.
   # Raised to 10 per god directive v0.1 MARCH (issue #1080)
-  # Raised to 12 via governance vote (majority-voted value, 2026-03-10)
-  circuitBreakerLimit: "12"
+  # Raised to 12 via governance vote (2026-03-10), then reverted to 10 (2026-03-10, 39 approvals)
+  circuitBreakerLimit: "10"
 
   # ─── GOVERNANCE ─────────────────────────────────────────────────────────────
 
