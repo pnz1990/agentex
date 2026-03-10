@@ -2207,8 +2207,94 @@ restart_coordinator_if_unhealthy() {
       log "ERROR: Failed to restart coordinator deployment"
       post_thought "Coordinator heartbeat stale (${age}s old) but restart failed. Manual intervention may be needed." "blocker" 9
     fi
+   else
+     log "Coordinator heartbeat age: ${age}s (healthy, threshold: 300s)"
+   fi
+}
+
+# sync_coordinator_configmap_if_stale() - Auto-fix for issue #1682
+# Problem: CI update step fails due to IAM permissions, so coordinator-script ConfigMap
+# drifts behind git main. Coordinator Deployment mounts coordinator.sh from this ConfigMap,
+# NOT from the Docker image — stale ConfigMap means stale coordinator code indefinitely.
+#
+# Fix: Planners detect drift by comparing line counts (live ConfigMap vs git main),
+# and update the ConfigMap + restart the Deployment when drift is detected.
+# This is agent-side self-healing that doesn't require god intervention (IAM fix).
+#
+# Called by: planner startup block (section 3.8 cleanup code)
+# Cooldown: 300s — only one planner per 5 min should sync to avoid restart storms
+sync_coordinator_configmap_if_stale() {
+  local coordinator_file="${REPO_DIR:-/workspace/repo}/images/runner/coordinator.sh"
+  
+  # Repo must be cloned for this to work — skip if not available
+  if [ ! -f "$coordinator_file" ]; then
+    log "sync_coordinator_configmap: repo not yet cloned, skipping drift check"
+    return 0
+  fi
+
+  # Cooldown guard: only sync once per 300s to prevent restart storms from concurrent planners
+  local last_sync last_sync_ts sync_age now
+  now=$(date +%s)
+  last_sync=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastCoordinatorConfigMapSync}' 2>/dev/null || echo "")
+  if [ -n "$last_sync" ]; then
+    last_sync_ts=$(date -d "$last_sync" +%s 2>/dev/null || echo "0")
+    if [ "$last_sync_ts" -gt 0 ]; then
+      sync_age=$((now - last_sync_ts))
+      if [ "$sync_age" -lt 300 ]; then
+        log "sync_coordinator_configmap: cooldown active (last sync ${sync_age}s ago, cooldown 300s). Skipping."
+        return 0
+      fi
+    fi
+  fi
+
+  # Compare line counts: git main coordinator.sh vs live ConfigMap
+  local git_lines live_lines
+  git_lines=$(wc -l < "$coordinator_file" 2>/dev/null || echo "0")
+  live_lines=$(kubectl_with_timeout 10 get configmap coordinator-script -n "$NAMESPACE" \
+    -o jsonpath='{.data.coordinator\.sh}' 2>/dev/null | wc -l || echo "0")
+
+  log "sync_coordinator_configmap: git_lines=${git_lines} live_lines=${live_lines}"
+
+  if [ "${git_lines}" -eq 0 ]; then
+    log "sync_coordinator_configmap: could not read coordinator.sh line count, skipping"
+    return 0
+  fi
+
+  if [ "${live_lines}" -eq "${git_lines}" ]; then
+    log "sync_coordinator_configmap: coordinator.sh is up-to-date (${git_lines} lines). No sync needed."
+    return 0
+  fi
+
+  # Drift detected — update ConfigMap and restart Deployment
+  log "WARNING: coordinator.sh drift detected! ConfigMap=${live_lines} lines, git=${git_lines} lines. Syncing..."
+
+  # Record sync timestamp BEFORE acting (prevents concurrent planners from double-syncing)
+  local sync_ts
+  sync_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  if ! kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"lastCoordinatorConfigMapSync\":\"${sync_ts}\"}}" 2>/dev/null; then
+    log "WARNING: sync_coordinator_configmap: could not record sync timestamp. Proceeding anyway."
+  fi
+
+  # Update the ConfigMap from git main
+  if kubectl_with_timeout 30 create configmap coordinator-script \
+      --from-file=coordinator.sh="${coordinator_file}" \
+      -n "$NAMESPACE" --dry-run=client -o yaml 2>/dev/null | \
+      kubectl_with_timeout 30 apply --validate=false -f - 2>&1; then
+    log "✓ sync_coordinator_configmap: coordinator-script ConfigMap updated (${live_lines} → ${git_lines} lines)"
+    
+    # Restart deployment to pick up new ConfigMap
+    if kubectl_with_timeout 30 rollout restart deployment coordinator -n "$NAMESPACE" 2>&1; then
+      log "✓ sync_coordinator_configmap: coordinator deployment restarted to load updated script"
+      post_thought "Auto-synced coordinator-script ConfigMap (issue #1682): drift detected (ConfigMap=${live_lines} lines, git=${git_lines} lines). Updated ConfigMap and restarted coordinator deployment." "insight" 8
+    else
+      log "WARNING: sync_coordinator_configmap: ConfigMap updated but deployment restart failed"
+      post_thought "Auto-synced coordinator-script ConfigMap (issue #1682): updated ConfigMap (${live_lines}→${git_lines} lines) but deployment restart FAILED. Manual restart may be needed: kubectl rollout restart deployment coordinator -n agentex" "blocker" 8
+    fi
   else
-    log "Coordinator heartbeat age: ${age}s (healthy, threshold: 300s)"
+    log "ERROR: sync_coordinator_configmap: failed to update coordinator-script ConfigMap"
+    post_thought "coordinator-script ConfigMap drift detected (issue #1682): ${live_lines} lines in cluster vs ${git_lines} lines in git. Auto-update FAILED. Manual fix: kubectl create configmap coordinator-script --from-file=coordinator.sh=images/runner/coordinator.sh -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -" "blocker" 9
   fi
 }
 
@@ -3335,6 +3421,15 @@ gh auth setup-git
 mkdir -p "$WORKSPACE/repo"
 git clone "https://github.com/$REPO.git" "$WORKSPACE/repo" --depth=1
 cd "$WORKSPACE/repo"
+
+# ── 7.5. Coordinator script drift check (issue #1682) ────────────────────────
+# CI step that updates coordinator-script ConfigMap fails due to IAM issue (#1682).
+# Planners detect drift by comparing line counts and auto-update the ConfigMap.
+# REPO_DIR defaults to $WORKSPACE/repo (just cloned above).
+if [ "$AGENT_ROLE" = "planner" ]; then
+  log "Planner: checking coordinator-script ConfigMap for drift (issue #1682)..."
+  REPO_DIR="$WORKSPACE/repo" sync_coordinator_configmap_if_stale
+fi
 
 # ── 8. Configure OpenCode ─────────────────────────────────────────────────────
 mkdir -p "${HOME}/.config/opencode"
