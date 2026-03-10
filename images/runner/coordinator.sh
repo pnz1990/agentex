@@ -100,59 +100,71 @@ else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
 fi
 
-# ── Initialize coordinator-state fields (issue #940) ─────────────────────────
-# After coordinator restart, some fields may be missing or null. Initialize them
-# to prevent jq parse errors and governance tally loop crashes.
-echo "Initializing coordinator-state fields..."
-for field in activeAgents activeAssignments decisionLog; do
-  val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
-  if [ -z "$val" ]; then
-    echo "  Initializing $field (was empty/null)"
+# ── ensure_state_fields_initialized() (issue #940, #1178) ────────────────────
+# Initialize coordinator-state fields that may be missing or null.
+# Called at startup AND periodically in the main loop to handle fields added
+# after the coordinator was last restarted (issue #1178: hot-initialization).
+# Without periodic calls, new fields (e.g. specializedAssignments) are never
+# created in long-running coordinators, silently breaking dependent features.
+ensure_state_fields_initialized() {
+  local silent="${1:-false}"  # set to "true" to suppress output (for periodic calls)
+
+  [ "$silent" = "false" ] && echo "Initializing coordinator-state fields..."
+
+  for field in activeAgents activeAssignments decisionLog; do
+    val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+    if [ -z "$val" ]; then
+      [ "$silent" = "false" ] && echo "  Initializing $field (was empty/null)"
+      kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+    fi
+  done
+
+  # debateStats needs a valid structured value (not just empty string)
+  debate_stats=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)
+  if [ -z "$debate_stats" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing debateStats (was empty/null)"
     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+      -p '{"data":{"debateStats":"responses=0 threads=0 disagree=0 synthesize=0"}}' 2>/dev/null || true
   fi
-done
 
-# debateStats needs a valid structured value (not just empty string)
-debate_stats=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)
-if [ -z "$debate_stats" ]; then
-  echo "  Initializing debateStats (was empty/null)"
-  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"debateStats":"responses=0 threads=0 disagree=0 synthesize=0"}}' 2>/dev/null || true
-fi
-
-# enactedDecisions needs preservation if exists, initialization if not
-enacted=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null)
-if [ -z "$enacted" ]; then
-  echo "  Initializing enactedDecisions (was empty/null)"
-  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
-fi
-
-# Initialize identity-based routing fields (issue #1113)
-for field in specializedAssignments genericAssignments lastSpecializedRouting lastRoutingDecisions; do
-  val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
-  if [ -z "$val" ]; then
-    echo "  Initializing $field (was empty/null)"
-    case "$field" in
-      specializedAssignments|genericAssignments)
-        kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-          -p "{\"data\":{\"$field\":\"0\"}}" 2>/dev/null || true ;;
-      *)
-        kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-          -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true ;;
-    esac
+  # enactedDecisions needs preservation if exists, initialization if not
+  enacted=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null)
+  if [ -z "$enacted" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing enactedDecisions (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"enactedDecisions":""}}' 2>/dev/null || true
   fi
-done
 
-# unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
-unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
-if [ -z "$unresolved_debates_val" ]; then
-  echo "  Initializing unresolvedDebates (was empty/null)"
-  kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
-fi
-echo "Coordinator-state initialization complete"
+  # Initialize identity-based routing fields (issue #1113)
+  for field in specializedAssignments genericAssignments lastSpecializedRouting lastRoutingDecisions; do
+    val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+    if [ -z "$val" ]; then
+      [ "$silent" = "false" ] && echo "  Initializing $field (was empty/null)"
+      case "$field" in
+        specializedAssignments|genericAssignments)
+          kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+            -p "{\"data\":{\"$field\":\"0\"}}" 2>/dev/null || true ;;
+        *)
+          kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+            -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true ;;
+      esac
+    fi
+  done
+
+  # unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
+  unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
+  if [ -z "$unresolved_debates_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing unresolvedDebates (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
+  fi
+
+  [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
+}
+
+# Run at startup
+ensure_state_fields_initialized "false"
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
@@ -1444,6 +1456,15 @@ while true; do
     # routing recommendations for the planner/god-delegate to act on.
     if [ $((iteration % 7)) -eq 0 ]; then
         route_tasks_by_specialization
+    fi
+
+    # Every 10 iterations (~5 min): re-check and initialize any missing state fields (issue #1178)
+    # The coordinator runs continuously for days/weeks. When new code deploys and adds
+    # new state fields (e.g. specializedAssignments, unresolvedDebates), those fields are
+    # only initialized at coordinator startup. This periodic call ensures newly-added fields
+    # are lazily initialized even in long-running coordinators without requiring a restart.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        ensure_state_fields_initialized "true"
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.
