@@ -32,6 +32,13 @@ HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 
+# Read GitHub repo from constitution for portability (issue #819, #1006)
+# This must be set early — before kubectl is configured — because it is used
+# in score_issue(), refresh_task_queue(), and sync_constitution_to_git().
+# After kubectl is ready (inside the if block below), this is overridden with
+# the live constitution value. Until then, use the env var or the fallback.
+GITHUB_REPO="${REPO:-pnz1990/agentex}"  # overridden from constitution after kubectl ready
+
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
@@ -47,6 +54,22 @@ if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
     kubectl config set-context local --cluster=local --user=sa --namespace="$NAMESPACE"
     kubectl config use-context local
 fi
+
+# ── Read portability constants from constitution (issue #819, #1006) ─────────
+# These must be read after kubectl is configured so we can query the ConfigMap.
+# Override the pre-init fallback values with live constitution values.
+GITHUB_REPO_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.githubRepo}' 2>/dev/null || echo "")
+if [ -n "$GITHUB_REPO_FROM_CONSTITUTION" ]; then
+  GITHUB_REPO="$GITHUB_REPO_FROM_CONSTITUTION"
+fi
+BEDROCK_REGION_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "")
+if [ -n "$BEDROCK_REGION_FROM_CONSTITUTION" ]; then
+  BEDROCK_REGION="$BEDROCK_REGION_FROM_CONSTITUTION"
+fi
+echo "GitHub repo (from constitution): $GITHUB_REPO"
+echo "Bedrock region (from constitution): $BEDROCK_REGION"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
@@ -212,7 +235,7 @@ VISION_PRIORITY_LABELS=(
 score_issue() {
     local issue_number="$1"
     local labels
-    labels=$(gh issue view "$issue_number" --repo pnz1990/agentex \
+    labels=$(gh issue view "$issue_number" --repo "${GITHUB_REPO}" \
         --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
     
     local best_score=5
@@ -237,7 +260,7 @@ refresh_task_queue() {
     fi
 
     local issues_json
-    issues_json=$(gh issue list --repo pnz1990/agentex --state open --limit 50 \
+    issues_json=$(gh issue list --repo "${GITHUB_REPO}" --state open --limit 50 \
         --json number,labels,title 2>/dev/null) || true
 
     [ -z "$issues_json" ] && return 0
