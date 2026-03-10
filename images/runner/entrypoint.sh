@@ -4377,7 +4377,41 @@ if echo "$BLOCKER_THOUGHTS" | grep -qiE '(structural|architecture|RGD|kro.*bug|s
   log "ROLE ESCALATION TRIGGERED: Structural issue detected in blocker thoughts"
   ESCALATED_ROLE="architect"
   post_thought "Role escalation triggered: $AGENT_ROLE → architect (structural issue found)" "decision" 9
-  post_message "broadcast" "Role escalation: $AGENT_NAME discovered structural issue, next agent will be architect" "status"
+   post_message "broadcast" "Role escalation: $AGENT_NAME discovered structural issue, next agent will be architect" "status"
+fi
+
+# ── 11.6. SINGLE-PLANNER CONSTRAINT GUARDRAIL (issue #1660) ───────────────────
+# Planners must NOT spawn planner successors. The planner-loop Deployment handles
+# planner perpetuation exclusively. If OpenCode spawned a planner successor despite
+# the Prime Directive instructions, delete it here and release the spawn slot.
+# This prevents the exponential proliferation chain (1→35 planners observed 2026-03-10).
+if [ "${AGENT_ROLE}" = "planner" ]; then
+  # Find all successor Agent CRs spawned by this agent that have role=planner
+  PLANNER_SUCCESSORS=$(kubectl_with_timeout 10 get agents.kro.run -n "$NAMESPACE" \
+    -l "agentex/spawned-by=$AGENT_NAME" \
+    -o json 2>/dev/null | \
+    jq -r '.items[] | select(.spec.role == "planner") | .metadata.name' 2>/dev/null || true)
+
+  if [ -n "$PLANNER_SUCCESSORS" ]; then
+    PLANNER_SUCCESSOR_COUNT=$(echo "$PLANNER_SUCCESSORS" | wc -l | tr -d ' ')
+    log "SINGLE-PLANNER VIOLATION: This planner spawned $PLANNER_SUCCESSOR_COUNT planner successor(s). Deleting to enforce constraint."
+    post_thought "Single-planner constraint violation: $AGENT_NAME spawned $PLANNER_SUCCESSOR_COUNT planner successor(s). Deleting and releasing slots. OpenCode ignored the planner-loop constraint." "blocker" 9
+
+    for planner_successor in $PLANNER_SUCCESSORS; do
+      log "Deleting rogue planner successor: $planner_successor"
+      if kubectl_with_timeout 10 delete agent.kro.run "$planner_successor" -n "$NAMESPACE" --ignore-not-found 2>/dev/null; then
+        log "Deleted planner successor: $planner_successor. Releasing spawn slot."
+        release_spawn_slot || true
+      else
+        log "WARNING: Could not delete planner successor: $planner_successor (may not exist or already deleted)"
+      fi
+      # Also delete associated Task CR if it follows naming convention task-<agent-name>
+      local_task_name="task-${planner_successor}"
+      kubectl_with_timeout 10 delete configmap "${local_task_name}-spec" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+    done
+
+    log "Single-planner constraint enforced: $PLANNER_SUCCESSOR_COUNT planner successor(s) removed. Emergency perpetuation will spawn a worker instead."
+  fi
 fi
 
 # ── 12. EMERGENCY PERPETUATION ────────────────────────────────────────────────
