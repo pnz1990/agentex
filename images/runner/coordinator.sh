@@ -1978,6 +1978,11 @@ The civilization needs mediators, not just voters." \
 # IMPORTANT: If identity.sh changes these field names, update the jq paths in
 # score_agent_for_issue() below. Schema drift between identity.sh and this
 # function silently breaks routing (score always 0). See issues #1133, #1134.
+#
+# IMPORTANT (issue #1475): score_agent_for_issue() now accepts displayName as
+# 5th argument and looks up S3 by displayName first. This fixes the root cause
+# where specializedAssignments=0 because ephemeral agent_name has no history —
+# history accumulates under displayName (e.g., worker-deep-cipher) across generations.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Read S3 bucket for identities from constitution at runtime
@@ -1997,17 +2002,33 @@ update_identity_bucket_from_constitution() {
 #   $2 - issue_number
 #   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
 #   $4 - issue_keywords (space-separated keywords from title/body)
+#   $5 - display_name (optional: persistent identity name, e.g., worker-deep-cipher)
+#          If provided (and different from agent_name), look up S3 by displayName first
+#          to find specialization history accumulated across agent generations.
+#          Issue #1475: root cause fix — routing was always 0 because ephemeral agent_name
+#          had no S3 history; persistent displayName is where history lives.
 # Returns: integer score via stdout (0 if agent has no specialization data)
 score_agent_for_issue() {
     local agent_name="$1"
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    local display_name="${5:-$agent_name}"
 
-    # Read agent identity from S3
-    local identity_json
-    identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
-        --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    # Read agent identity from S3 — try displayName first (persistent across generations),
+    # then fall back to agent_name (current session, may be empty for new agents).
+    # Issue #1475: identity history accumulates under displayName (e.g., worker-deep-cipher),
+    # not under ephemeral agent_name (e.g., worker-1773115086).
+    local identity_json=""
+    if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${display_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    fi
+    # Fall back to agent_name if displayName lookup found nothing
+    if [ -z "$identity_json" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    fi
 
     if [ -z "$identity_json" ]; then
         echo "0"
@@ -2135,7 +2156,14 @@ find_best_agent_for_issue() {
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        local agent_role="${pair##*:}"
+        # Parse role from 2nd field (format: "agent_name:role" or "agent_name:role:displayName")
+        # Use cut for reliable field extraction regardless of number of colons.
+        local agent_role
+        agent_role=$(echo "$pair" | cut -d: -f2)
+        # Parse displayName from 3rd field (issue #1475 fix); fall back to agent_name if absent
+        local agent_display_name
+        agent_display_name=$(echo "$pair" | cut -d: -f3)
+        [ -z "$agent_display_name" ] && agent_display_name="$agent_name"
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
@@ -2147,10 +2175,11 @@ find_best_agent_for_issue() {
         fi
 
         local agent_score
+        # Pass displayName as 5th arg so score_agent_for_issue can look up persistent history
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+            "$issue_labels" "$issue_keywords" "$agent_display_name")
 
-        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
+        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name ($agent_display_name) on issue #$issue_number: $agent_score" >&2
 
         if [ "$agent_score" -gt "$best_score" ]; then
             best_score="$agent_score"
@@ -2286,13 +2315,27 @@ route_tasks_by_specialization() {
             local aname
             aname=$(echo "$pair" | cut -d: -f1)
             [ -z "$aname" ] && continue
+            # Issue #1475: also check displayName (3rd field) for persistent specialization history
+            local adisplay
+            adisplay=$(echo "$pair" | cut -d: -f3)
+            [ -z "$adisplay" ] && adisplay="$aname"
             agents_checked=$((agents_checked + 1))
 
-            local spec_data
-            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
-                --region "$BEDROCK_REGION" 2>/dev/null | \
-                jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
-                2>/dev/null || echo "")
+            local spec_data=""
+            # Try displayName first (persistent across generations)
+            if [ -n "$adisplay" ] && [ "$adisplay" != "$aname" ]; then
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${adisplay}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null | \
+                    jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                    2>/dev/null || echo "")
+            fi
+            # Fall back to agent_name if displayName found nothing
+            if [ -z "$spec_data" ]; then
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null | \
+                    jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                    2>/dev/null || echo "")
+            fi
             if [ -n "$spec_data" ]; then
                 agents_with_spec=$((agents_with_spec + 1))
             fi
