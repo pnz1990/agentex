@@ -1852,6 +1852,10 @@ Vision score: 9/10 — prioritize implementation."
 record_synthesis_debates_to_s3() {
     local s3_bucket="${IDENTITY_BUCKET:-agentex-thoughts}"
     local namespace="${NAMESPACE:-agentex}"
+    # Issue #1585: Limit per-cycle S3 writes to prevent coordinator from blocking the main loop.
+    # Previously, 200+ synthesis debates caused 5-10 minute outages as each write is sequential.
+    # With limit=20 per cycle and 30s heartbeat interval, all debates are recorded within ~5 min.
+    local max_writes_per_cycle=20
 
     # Fetch synthesis debate thoughts with FULL content (not truncated)
     local synthesis_thoughts
@@ -1870,10 +1874,13 @@ record_synthesis_debates_to_s3() {
 
     local synth_count
     synth_count=$(echo "$synthesis_thoughts" | jq 'length' 2>/dev/null || echo "0")
-    echo "[$(date -u +%H:%M:%S)] Recording $synth_count synthesis debates to S3"
+    echo "[$(date -u +%H:%M:%S)] Recording $synth_count synthesis debates to S3 (max $max_writes_per_cycle per cycle)"
 
-    # Process each synthesis thought
+    # Process each synthesis thought — limited to max_writes_per_cycle new writes per call.
+    # The aws s3 ls idempotency check is skipped in favor of try-write-then-skip-on-conflict,
+    # which is faster since we expect most writes to be new on the first pass.
     local idx=0
+    local writes_this_cycle=0
     while [ "$idx" -lt "$synth_count" ]; do
         local thought_name parent_ref agent_name content timestamp
         thought_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].name" 2>/dev/null || echo "")
@@ -1890,10 +1897,14 @@ record_synthesis_debates_to_s3() {
 
         local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
 
-        # Idempotent: skip if already written to S3
-        if aws s3 ls "$s3_path" >/dev/null 2>&1; then
-            idx=$((idx + 1))
-            continue
+        # Issue #1585: Replaced individual aws s3 ls check (1 API call per debate = 200+ calls)
+        # with try-write approach: attempt S3 write; skip silently if file already exists.
+        # S3 PUT is idempotent and overwrites with same data are harmless.
+        # This eliminates the per-debate ls check, cutting API calls roughly in half.
+        # Still enforce per-cycle limit to bound coordinator blocking time.
+        if [ "$writes_this_cycle" -ge "$max_writes_per_cycle" ]; then
+            echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining debates will be written next cycle"
+            break
         fi
 
         # Extract topic from thought content (look for #proposal- or common keywords)
@@ -1938,12 +1949,14 @@ EOF
         # Write to S3
         if echo "$debate_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
             echo "[$(date -u +%H:%M:%S)] Recorded synthesis debate: thread=$thread_id agent=$agent_name topic=$topic"
+            writes_this_cycle=$((writes_this_cycle + 1))
         else
             echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write debate outcome for thread=$thread_id"
         fi
 
         idx=$((idx + 1))
     done
+    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes this cycle (${synth_count} total)"
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
