@@ -16,7 +16,8 @@ spec:
     status:
       configMapName: ${messageConfigMap.metadata.name}
       read: ${messageConfigMap.data.read}
-      timestamp: ${messageConfigMap.metadata.creationTimestamp}
+      # timestamp replaced with string proxy — metadata.creationTimestamp is metav1.Time, causes kro deep-copy panic
+      timestamp: ${messageConfigMap.metadata.resourceVersion}
   resources:
     - id: messageConfigMap
       readyWhen:

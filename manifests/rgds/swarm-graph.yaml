@@ -57,7 +57,9 @@ spec:
     # The planner reads the goal, creates worker Tasks, and spawns sub-agents.
     - id: plannerAgent
       readyWhen:
-        - ${plannerAgent.status.completionTime != null}
+        # completionTime removed — metav1.Time causes kro deep-copy panic
+        # Use resourceVersion as a proxy for "resource exists and has been processed"
+        - ${plannerAgent.metadata.resourceVersion != ""}
       template:
         apiVersion: batch/v1
         kind: Job

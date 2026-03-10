@@ -18,7 +18,8 @@ spec:
       # phase and lastHeartbeat prevent kro breaking-change detection errors.
       # Real values are in coordinator-state ConfigMap, managed by coordinator.sh.
       phase: ${coordinatorDeployment.metadata.name}
-      lastHeartbeat: ${coordinatorDeployment.metadata.creationTimestamp}
+      # lastHeartbeat replaced with string proxy — metadata.creationTimestamp is metav1.Time, causes kro deep-copy panic
+      lastHeartbeat: ${coordinatorDeployment.metadata.resourceVersion}
   resources:
     # ── State ConfigMap ──────────────────────────────────────────────────────
     - id: coordinatorState

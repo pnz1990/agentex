@@ -22,6 +22,8 @@ spec:
       exitCode: integer | default=0
     status:
       configMapName: ${reportConfigMap.metadata.name}
+      # specialization kept as string proxy to prevent CRD breaking-change error
+      specialization: ${reportConfigMap.metadata.resourceVersion}
   
   resources:
     - id: reportConfigMap

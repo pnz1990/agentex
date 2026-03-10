@@ -24,7 +24,8 @@ spec:
       phase: ${taskConfigMap.metadata.name}
       agentRef: ${taskConfigMap.metadata.name}
       outcome: ${taskConfigMap.metadata.name}
-      completedAt: ${taskConfigMap.metadata.creationTimestamp}
+      # completedAt replaced with string proxy — metadata.creationTimestamp is metav1.Time, causes kro deep-copy panic
+      completedAt: ${taskConfigMap.metadata.resourceVersion}
   resources:
     - id: taskConfigMap
       readyWhen:
