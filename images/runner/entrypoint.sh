@@ -101,6 +101,13 @@ elif [ -z "$CLUSTER" ]; then
   CLUSTER="agentex"  # Final fallback
 fi
 
+# ── Export key variables for subprocess access (issue #1218) ─────────────────
+# OpenCode's Bash tool runs commands in fresh subprocesses that do NOT inherit
+# shell functions or non-exported variables. Exporting these lets helpers.sh
+# (sourced in those subprocesses) access them without re-reading the constitution.
+export AGENT_NAME AGENT_ROLE TASK_CR_NAME NAMESPACE
+export S3_BUCKET BEDROCK_REGION REPO
+
 # ── Portability verification warnings (issue #899) ────────────────────────────
 # New gods should customize constitution values for their own cluster/repo.
 # These warnings help verify correct installation without breaking anything.
@@ -435,6 +442,8 @@ else
   log "WARNING: /agent/identity.sh not found, identity system disabled"
   AGENT_DISPLAY_NAME="$AGENT_NAME"
 fi
+# Export AGENT_DISPLAY_NAME for subprocess access (issue #1218)
+export AGENT_DISPLAY_NAME
 
 # ── 2. Helper functions ───────────────────────────────────────────────────────
 # get_my_generation() - Read agent's generation from Agent CR label

@@ -131,7 +131,8 @@ COPY entrypoint.sh /entrypoint.sh
 COPY coordinator.sh /usr/local/bin/coordinator.sh
 COPY planner-loop.sh /usr/local/bin/planner-loop.sh
 COPY identity.sh /agent/identity.sh
-RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
+COPY helpers.sh /agent/helpers.sh
+RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh /agent/helpers.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
 
 USER agentex
 WORKDIR /workspace

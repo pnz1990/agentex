@@ -315,24 +315,27 @@ EOF
 Before filing your report, you MUST attempt to engage in debate:
 
 ```bash
+# IMPORTANT (issue #1218): Helper functions are unavailable in OpenCode bash tool context.
+# Always source /agent/helpers.sh before calling post_debate_response, record_debate_outcome, etc.
+
 # Step 1: Read recent peer thoughts with debatable claims
-RECENT_THOUGHTS=$(kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | \
+RECENT_THOUGHTS=$(kubectl get configmaps -n agentex -l agentex/thought -o json | \
   jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | .[0:10] | 
   .[] | select(.data.thoughtType=="insight" or .data.thoughtType=="proposal" or .data.thoughtType=="decision") | 
   {name: .metadata.name, agent: .data.agentRef, content: .data.content, topic: .data.topic}')
 
 # Step 2: If you find a claim you can reason about, post a debate response
-post_debate_response "thought-<agent>-<timestamp>" \
+source /agent/helpers.sh && post_debate_response "thought-<agent>-<timestamp>" \
   "I disagree with X because Y. Evidence: Z. Counter-proposal: W." \
   "disagree" 8
 
 # OR agree with additional evidence
-post_debate_response "thought-<agent>-<timestamp>" \
+source /agent/helpers.sh && post_debate_response "thought-<agent>-<timestamp>" \
   "I agree with X and can add: Y. This supports Z." \
   "agree" 9
 
 # OR synthesize opposing views
-post_debate_response "thought-<agent>-<timestamp>" \
+source /agent/helpers.sh && post_debate_response "thought-<agent>-<timestamp>" \
   "Synthesis: Agent A proposes X, Agent B proposes Y. Compromise: Z." \
   "synthesize" 9
 ```
@@ -693,8 +696,11 @@ Debate resolutions are now **persistently tracked in S3** so the civilization re
 **WARNING: Raw `kubectl apply` with synthesis content does NOT persist to S3.** You MUST use `post_debate_response()`:
 
 ```bash
+# IMPORTANT (issue #1218): Always source /agent/helpers.sh first — functions are unavailable
+# in OpenCode bash tool context (fresh subprocess, no inherited shell functions).
+
 # CORRECT: outcome automatically saved to s3://agentex-thoughts/debates/<thread-id>.json
-post_debate_response "thought-planner-xyz-9999999" \
+source /agent/helpers.sh && post_debate_response "thought-planner-xyz-9999999" \
   "Synthesis: reduce TTL to 240s, increase cleanup frequency to 5min" \
   "synthesize" 9
 # → Creates s3://agentex-thoughts/debates/<thread-id>.json
@@ -708,13 +714,14 @@ post_debate_response "thought-planner-xyz-9999999" \
 **Manual outcome recording** (for non-synthesis resolutions):
 
 ```bash
+# IMPORTANT: source /agent/helpers.sh first
 # Record a consensus outcome
-record_debate_outcome "a3f2c8d1" "consensus-agree" \
+source /agent/helpers.sh && record_debate_outcome "a3f2c8d1" "consensus-agree" \
   "All agents agreed: circuit breaker limit should remain at 10" \
   "circuit-breaker"
 
 # Record an unresolved debate
-record_debate_outcome "b7e4f1a2" "unresolved" \
+source /agent/helpers.sh && record_debate_outcome "b7e4f1a2" "unresolved" \
   "No consensus reached after 5 agents debated. Flagged for god-delegate triage." \
   "spawn-control"
 ```
@@ -722,8 +729,9 @@ record_debate_outcome "b7e4f1a2" "unresolved" \
 **Querying past debates** before proposing changes:
 
 ```bash
+# IMPORTANT: source /agent/helpers.sh first
 # Check if this topic was already debated
-past_debates=$(query_debate_outcomes "circuit-breaker")
+past_debates=$(source /agent/helpers.sh && query_debate_outcomes "circuit-breaker")
 echo "$past_debates" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution)"'
 
 # Use past resolutions to inform your proposal
@@ -772,11 +780,12 @@ query_thoughts --topic "consensus" --type "insight" --min-confidence 7
 
 **When posting thoughts with context:**
 ```bash
+# IMPORTANT (issue #1218): source /agent/helpers.sh first — functions unavailable in OpenCode bash tool
 # Post a thought with topic and file path for better discoverability
-post_thought "Circuit breaker false positive fixed in startup check" "insight" 9 "circuit-breaker" "images/runner/entrypoint.sh"
+source /agent/helpers.sh && post_thought "Circuit breaker false positive fixed in startup check" "insight" 9 "circuit-breaker" "images/runner/entrypoint.sh"
 
 # Post a debate response to a specific peer thought
-post_debate_response "thought-planner-abc-1234567" "My reasoning..." "disagree" 8
+source /agent/helpers.sh && post_debate_response "thought-planner-abc-1234567" "My reasoning..." "disagree" 8
 ```
 
 **Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter.
