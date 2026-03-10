@@ -1516,7 +1516,7 @@ credit_mentor_for_success() {
 # swarms with similar goals can learn from past experiences, key decisions, and
 # what was accomplished. This is the foundation of swarm institutional memory.
 #
-# Usage: write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions>
+# Usage: write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions> [goal_origin]
 #
 # Parameters:
 #   swarm_name      - Name of the swarm (e.g., "swarm-routing-fix")
@@ -1524,18 +1524,25 @@ credit_mentor_for_success() {
 #   members_csv     - Comma-separated list of member agent names
 #   tasks_completed - Number of tasks completed by this swarm
 #   key_decisions   - Free text summary of key decisions or findings (no quotes inside)
+#   goal_origin     - (optional) Origin of the swarm goal: "coordinator" (default) or "agent-proposed"
+#                     Set to "agent-proposed" when swarm was spawned from the vision queue to
+#                     enable v0.6 Criterion 3 tracking (emergentGoalCount >= 1).
 #
 # S3 location: s3://<bucket>/swarm-memories/<swarm-name>.json
 #
-# Example:
+# Example (coordinator-driven swarm):
 #   write_swarm_memory "swarm-routing-fix" "Fix coordinator routing regression" \
 #     "ada,turing,aristotle" 5 "Routing bug was in specialization score calculation"
+#
+# Example (vision-queue / agent-proposed swarm):
+#   write_swarm_memory "swarm-v06-test" "Test v0.6 milestone" "ada,turing" 3 "Criteria met" "agent-proposed"
 write_swarm_memory() {
   local swarm_name="${1:-}"
   local goal="${2:-unknown goal}"
   local members_csv="${3:-}"
   local tasks_completed="${4:-0}"
   local key_decisions="${5:-none recorded}"
+  local goal_origin="${6:-coordinator}"
 
   if [ -z "$swarm_name" ]; then
     log "write_swarm_memory: no swarm name provided — skipping"
@@ -1555,21 +1562,24 @@ write_swarm_memory() {
   safe_goal=$(echo "$goal" | sed 's/"/\\"/g' | tr '\n' ' ')
   local safe_decisions
   safe_decisions=$(echo "$key_decisions" | sed 's/"/\\"/g' | tr '\n' ' ')
+  local safe_origin
+  safe_origin=$(echo "$goal_origin" | sed 's/"/\\"/g' | tr -d '\n')
 
   local memory_json
-  memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"%s"}\n' \
+  memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","goalOrigin":"%s","dissolvedAt":"%s","recordedBy":"%s"}\n' \
     "$swarm_name" \
     "$safe_goal" \
     "$members_json" \
     "$tasks_completed" \
     "$safe_decisions" \
+    "$safe_origin" \
     "$timestamp" \
     "${AGENT_NAME:-unknown}")
 
   local s3_path="s3://${s3_bucket}/swarm-memories/${swarm_name}.json"
 
   if echo "$memory_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
-    log "write_swarm_memory: persisted swarm memory for ${swarm_name} to ${s3_path}"
+    log "write_swarm_memory: persisted swarm memory for ${swarm_name} to ${s3_path} (goalOrigin=${safe_origin})"
     return 0
   else
     log "WARNING: write_swarm_memory: failed to write swarm memory for ${swarm_name} to S3 (non-fatal)"

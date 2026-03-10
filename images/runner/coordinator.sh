@@ -3116,8 +3116,10 @@ Closes #1732"
 #   3. emergentGoalCount >= 1    — agent-proposed goals pursued by a swarm
 #   4. swarmMemoryCount >= 1     — swarm summaries written to S3 on dissolution
 #
-# Checks S3 swarm dissolution records (s3://agentex-thoughts/swarms/*.json)
+# Checks S3 swarm dissolution records (s3://agentex-thoughts/swarm-memories/*.json)
 # and activeSwarms field for live swarm data.
+# NOTE: Path is swarm-memories/ (not swarms/) to align with write_swarm_memory() in helpers.sh
+# which writes to s3://<bucket>/swarm-memories/<swarm-name>.json (issue #1799).
 #
 # State: coordinator-state.v06MilestoneStatus — set to "completed" on success
 #        coordinator-state.v06CriteriaStatus  — last check results (for observability)
@@ -3138,10 +3140,11 @@ check_v06_milestone() {
     local criteria_report=""
 
     # ── Read S3 swarm dissolution records ────────────────────────────────────
-    # Swarm summaries are written to s3://agentex-thoughts/swarms/*.json
+    # Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
     # by the swarm memory persistence feature (issue #1773).
+    # NOTE: Use swarm-memories/ path to match write_swarm_memory() in helpers.sh (issue #1799).
     local swarm_files
-    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarms/" \
+    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
         awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
 
@@ -3152,7 +3155,7 @@ check_v06_milestone() {
 
     for sfile in $swarm_files; do
         local sjson
-        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarms/${sfile}" - \
+        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$sjson" ] && continue
 

@@ -5381,12 +5381,16 @@ if [ -n "$SWARM_REF" ]; then
           # Issue #1773 v0.6: Persist swarm memory to S3 before dissolution
           # Read the swarm goal from the state ConfigMap for the memory record
           SWARM_GOAL=$(echo "$SWARM_STATE" | jq -r '.data.goal // "unknown goal"' 2>/dev/null || echo "unknown goal")
+          # Read goalOrigin from swarm state — "agent-proposed" if swarm came from visionQueue,
+          # "coordinator" otherwise (issue #1799: needed for v0.6 Criterion 3 tracking)
+          SWARM_ORIGIN=$(echo "$SWARM_STATE" | jq -r '.data.goalOrigin // "coordinator"' 2>/dev/null || echo "coordinator")
+          [ -z "$SWARM_ORIGIN" ] && SWARM_ORIGIN="coordinator"
           # Collect key decisions from recent swarm thoughts (best-effort)
           SWARM_DECISIONS=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l "agentex/thought,agentex/swarm=${SWARM_REF}" -o json 2>/dev/null | \
             jq -r '[.items[] | select(.data.thoughtType=="decision" or .data.thoughtType=="insight") | .data.content] | join("; ")' 2>/dev/null | \
             cut -c1-500 || echo "none recorded")
           [ -z "$SWARM_DECISIONS" ] && SWARM_DECISIONS="none recorded"
-          write_swarm_memory "$SWARM_REF" "$SWARM_GOAL" "$NEW_MEMBERS" "$TOTAL_TASKS" "$SWARM_DECISIONS"
+          write_swarm_memory "$SWARM_REF" "$SWARM_GOAL" "$NEW_MEMBERS" "$TOTAL_TASKS" "$SWARM_DECISIONS" "$SWARM_ORIGIN"
           
           # Broadcast dissolution message
           post_message "broadcast" "Swarm $SWARM_REF has disbanded after completing all tasks. Members: $NEW_MEMBERS. Total tasks: $TOTAL_TASKS." "status"
