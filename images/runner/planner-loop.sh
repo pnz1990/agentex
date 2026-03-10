@@ -311,6 +311,15 @@ while true; do
         push_metric "CircuitBreakerActive" 1 "Count"
     elif [ "$ACTIVE_PLANNERS" -gt 0 ]; then
         echo "[$(date -u +%H:%M:%S)] Planner already running. No spawn needed."
+        # Issue #1840: Update lastPlannerSeen while a planner Job is active.
+        # This prevents civilization_status() (PR #1813) from showing a false
+        # "STALE — planner chain may be broken" warning during the normal inter-Job
+        # window (60s spawn interval + 60-120s EKS startup latency = up to 180s stale).
+        # The planner-loop IS the civilization heartbeat — its confirmation that a
+        # planner is running is authoritative enough to keep lastPlannerSeen fresh.
+        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+            --type=merge -p "{\"data\":{\"lastPlannerSeen\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" \
+            2>/dev/null && echo "[$(date -u +%H:%M:%S)] Updated lastPlannerSeen (active planner confirmed)" || true
     else
         SHOULD_SPAWN=true
         SPAWN_REASON="no-active-planner"
@@ -324,6 +333,12 @@ while true; do
         
         if spawn_planner_job "$NAME" "$GEN" "$AGENT_MODEL"; then
             echo "[$(date -u +%H:%M:%S)] Planner spawned successfully"
+            # Issue #1840: Update lastPlannerSeen on successful planner spawn.
+            # The spawned Job will update it again when it registers, but this
+            # ensures freshness during the 60-120s EKS Job startup window.
+            kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+                --type=merge -p "{\"data\":{\"lastPlannerSeen\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" \
+                2>/dev/null && echo "[$(date -u +%H:%M:%S)] Updated lastPlannerSeen (planner spawned)" || true
         else
             echo "[$(date -u +%H:%M:%S)] Planner spawn failed — will retry next iteration"
         fi
