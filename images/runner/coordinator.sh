@@ -378,9 +378,12 @@ cleanup_stale_assignments() {
         local issue="${pair##*:}"
 
         local job_active
+        # Issue #1170: Add 2>/dev/null to jq to suppress stderr parse errors when kubectl
+        # returns empty output (job not found). The || echo "false" handles the exit code,
+        # but without 2>/dev/null jq's error message still appears in coordinator logs.
         job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
             | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
-            || echo "false")
+            2>/dev/null || echo "false")
 
         if [ "$job_active" = "true" ]; then
             # Issue #1094: Even if agent job is running, check if the GitHub issue is still open.
@@ -428,9 +431,12 @@ cleanup_active_agents() {
         
         # Check if Job still active (exists and no completionTime)
         local job_active
+        # Issue #1170: Add 2>/dev/null to jq to suppress stderr parse errors when kubectl
+        # returns empty output (job not found). The || echo "false" handles the exit code,
+        # but without 2>/dev/null jq's error message still appears in coordinator logs.
         job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
             | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
-            || echo "false")
+            2>/dev/null || echo "false")
         
         if [ "$job_active" = "true" ]; then
             [ -n "$cleaned_agents" ] \
