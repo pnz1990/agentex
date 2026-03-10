@@ -3543,6 +3543,83 @@ A specialist predecessor worked on issues of this type:
   fi
 fi
 
+# Issue #1645: Component Knowledge Graph Phase 3 — inject past debate context for relevant files.
+# When an agent has an assigned issue (#COORDINATOR_ISSUE), we extract file/component mentions
+# from the issue body and inject past debates about those components into the prompt.
+# This helps agents avoid architectural mistakes that were debated and resolved previously.
+# Only runs for workers with a coordinator-assigned numeric issue (planners self-select later).
+COMPONENT_CONTEXT_BLOCK=""
+if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n "${COORDINATOR_ISSUE:-}" ]; then
+  log "Issue #1645: Building component knowledge graph context for issue #${COORDINATOR_ISSUE}..."
+
+  # Fetch the issue body/title to extract file mentions (using REST API — rate-limit resilient)
+  local_issue_body=""
+  local_issue_title=""
+  issue_api_response=$(gh api "repos/${REPO}/issues/${COORDINATOR_ISSUE}" \
+    --jq '{body: .body, title: .title}' 2>/dev/null || echo "")
+
+  if [ -n "$issue_api_response" ] && [ "$issue_api_response" != "null" ]; then
+    local_issue_body=$(echo "$issue_api_response" | jq -r '.body // ""' 2>/dev/null || echo "")
+    local_issue_title=$(echo "$issue_api_response" | jq -r '.title // ""' 2>/dev/null || echo "")
+  fi
+
+  # Extract *.sh and *.yaml file mentions from the issue content
+  local_components_raw=""
+  if [ -n "$local_issue_body" ] || [ -n "$local_issue_title" ]; then
+    combined_text="${local_issue_title} ${local_issue_body}"
+    # Extract common agentex file names (.sh, .yaml, .yml, .json patterns)
+    # Also capture bare component names like "coordinator", "entrypoint", "helpers"
+    local_components_raw=$(echo "$combined_text" | \
+      grep -oE '\b(coordinator\.sh|entrypoint\.sh|helpers\.sh|identity\.sh|planner-loop\.sh|agent-graph\.yaml|task-graph\.yaml|message-graph\.yaml|thought-graph\.yaml|report-graph\.yaml|swarm-graph\.yaml|coordinator-graph\.yaml|planner-loop-graph\.yaml)\b' | \
+      sort -u | head -5 || true)
+  fi
+
+  # Build context from knowledge graph if we found relevant components
+  if [ -n "$local_components_raw" ]; then
+    component_context_parts=""
+    while IFS= read -r component; do
+      [ -z "$component" ] && continue
+      # Inline knowledge graph query (S3 read — same logic as query_debate_outcomes_by_component in helpers.sh)
+      component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+      component_index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+      component_debates="[]"
+      if aws s3 ls "$component_index_path" --region "$BEDROCK_REGION" >/dev/null 2>&1; then
+        component_index_json=$(aws s3 cp "$component_index_path" - --region "$BEDROCK_REGION" 2>/dev/null || echo "{}")
+        if [ -n "$component_index_json" ] && [ "$component_index_json" != "{}" ]; then
+          component_debates=$(echo "$component_index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]")
+        fi
+      fi
+      if [ -n "$component_debates" ] && [ "$component_debates" != "[]" ]; then
+        debate_count=$(echo "$component_debates" | jq 'length' 2>/dev/null || echo "0")
+        if [ "${debate_count:-0}" -gt 0 ]; then
+          formatted_debates=$(echo "$component_debates" | \
+            jq -r '.[] | "  [\(.timestamp | split("T")[0])] \(.outcome): \(.resolution | split("\n")[0] | .[0:120])"' \
+            2>/dev/null | head -5 || echo "")
+          if [ -n "$formatted_debates" ]; then
+            component_context_parts="${component_context_parts}
+### ${component} (${debate_count} past debate(s))
+${formatted_debates}"
+          fi
+        fi
+      fi
+    done <<< "$local_components_raw"
+
+    if [ -n "$component_context_parts" ]; then
+      COMPONENT_CONTEXT_BLOCK="
+═══════════════════════════════════════════════════════
+COMPONENT KNOWLEDGE GRAPH (issue #1645 — past debates about files you will modify)
+═══════════════════════════════════════════════════════
+Past debates about files mentioned in issue #${COORDINATOR_ISSUE}:
+${component_context_parts}
+
+These debates reflect past architectural decisions. Review before making changes.
+Query more: source /agent/helpers.sh && query_debate_outcomes_by_component <file>
+═══════════════════════════════════════════════════════"
+      log "Issue #1645: Injected component knowledge graph context (components: $(echo "$local_components_raw" | tr '\n' ' '))"
+    fi
+  fi
+fi
+
 # Role-specialized context block (issue #881)
 # Each role gets different guidance to reduce noise and increase specialization.
 # Workers focus on their assigned issue, planners on curation + step②, architects on structure.
@@ -4054,6 +4131,8 @@ ${PEER_BLOCK}
 ${PREDECESSOR_BLOCK}
 
 ${MENTORSHIP_BLOCK}
+
+${COMPONENT_CONTEXT_BLOCK}
 
 ${ROLE_CONTEXT}
 
