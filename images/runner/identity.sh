@@ -380,6 +380,18 @@ update_identity_stats() {
   else
     echo "[identity] WARNING: Could not save updated stats to S3"
   fi
+
+  # Issue #1523: Also update canonical file so accumulated stats persist across agent restarts.
+  # Stats (tasksCompleted, issuesFiled, prsMerged) written here must be reflected in canonical
+  # so that cross-generation inheritance (via save_identity_with_inheritance) picks up the latest data.
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical stat: $stat_name (canonical: $canonical_path)"
+    else
+      echo "[identity] WARNING: Could not update canonical stat (non-fatal)"
+    fi
+  fi
 }
 
 #######################################
@@ -458,6 +470,22 @@ update_specialization() {
   else
     echo "[identity] WARNING: Could not save specialization update to S3"
   fi
+
+  # Issue #1523: Also update canonical file so cross-generation inheritance picks up
+  # the latest specialization data. update_specialization() is called at session END
+  # (after agent completes a labeled issue). Without updating canonical here, the next
+  # session that claims this display name will inherit stale canonical (empty spec)
+  # instead of the accumulated data just written to per-session file.
+  # save_identity() at session START reads per-session and writes canonical, but
+  # update_specialization() runs AFTER save_identity() — so canonical must be updated here.
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical specialization: $canonical_path"
+    else
+      echo "[identity] WARNING: Could not update canonical specialization (non-fatal)"
+    fi
+  fi
 }
 
 #######################################
@@ -518,6 +546,16 @@ update_code_area_specialization() {
   else
     echo "[identity] WARNING: Could not save code area update to S3"
   fi
+
+  # Issue #1523: Also update canonical file so code area data persists across restarts.
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical code areas: $canonical_path"
+    else
+      echo "[identity] WARNING: Could not update canonical code areas (non-fatal)"
+    fi
+  fi
 }
 
 #######################################
@@ -559,6 +597,16 @@ update_debate_specialization() {
     echo "[identity] Updated debate specialization: synthesisCount incremented"
   else
     echo "[identity] WARNING: Could not save debate specialization update to S3"
+  fi
+
+  # Issue #1523: Also update canonical file so debate synthesis data persists across restarts.
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical debate specialization: $canonical_path"
+    else
+      echo "[identity] WARNING: Could not update canonical debate specialization (non-fatal)"
+    fi
   fi
 }
 
