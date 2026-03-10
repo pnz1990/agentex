@@ -3547,12 +3547,16 @@ route_tasks_by_specialization() {
             # Without this, workers race to claim tasks BEFORE routing runs and
             # find nothing left to route, keeping specializedAssignments = 0 forever.
             local new_pre_assignments
-            local cur_assignments
-            cur_assignments=$(get_state "activeAssignments")
-            if [ -z "$cur_assignments" ]; then
+            # Issue #1867: Use the local active_assignments variable (not a fresh ConfigMap
+            # read) to build new_pre_assignments. A fresh get_state() call here may return
+            # stale data that doesn't include earlier pre-claims made in this same routing
+            # cycle, causing the same worker to be pre-claimed for multiple issues.
+            # The local active_assignments is updated after each successful pre-claim above,
+            # so it correctly tracks all assignments made in this cycle.
+            if [ -z "$active_assignments" ]; then
                 new_pre_assignments="${best_agent}:${issue_num}"
             else
-                new_pre_assignments="${cur_assignments},${best_agent}:${issue_num}"
+                new_pre_assignments="${active_assignments},${best_agent}:${issue_num}"
             fi
             if update_state "activeAssignments" "$new_pre_assignments"; then
                 # Update local variable so subsequent iterations see the new assignment
