@@ -683,9 +683,34 @@ sync_constitution_to_git() {
         fi
     done <<< "$(echo "$kv_pairs" | tr ' ' '\n')"
     
-    # Check if there are changes
-    if ! git diff --quiet "$constitution_file"; then
-        git add "$constitution_file"
+    # Issue #1408: Also update chart/values.yaml so Helm installs reflect governance decisions.
+    # chart/values.yaml uses the same 2-space-indented "  key: value" format for governed keys.
+    local chart_values_file="chart/values.yaml"
+    while IFS= read -r pair || [ -n "$pair" ]; do
+        [ -z "$pair" ] && continue
+        [[ "$pair" != *"="* ]] && continue
+        local key="${pair%%=*}"
+        local value="${pair#*=}"
+        # Skip meta-keys
+        local is_meta=false
+        for mk in $meta_keys; do
+            [ "$key" = "$mk" ] && is_meta=true && break
+        done
+        "$is_meta" && continue
+        # Update chart/values.yaml if the key exists there (governance keys: circuitBreakerLimit, etc.)
+        if grep -q "^  ${key}: " "$chart_values_file" 2>/dev/null; then
+            local escaped_value
+            escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
+            sed -i "s/^  ${key}: .*$/  ${key}: \"${escaped_value}\"/" "$chart_values_file"
+            echo "[$(date -u +%H:%M:%S)] ✓ Updated chart/values.yaml: ${key}=${value}"
+        fi
+    done <<< "$(echo "$kv_pairs" | tr ' ' '\n')"
+
+    # Check if there are changes (either file)
+    if ! git diff --quiet "$constitution_file" || ! git diff --quiet "$chart_values_file"; then
+        # Stage all changed governance files
+        git diff --quiet "$constitution_file" || git add "$constitution_file"
+        git diff --quiet "$chart_values_file" || git add "$chart_values_file"
         
         # Build commit message
         local commit_msg="chore: sync constitution.yaml with enacted governance decision
@@ -697,6 +722,8 @@ Vote count: ${approve_votes} approvals (threshold: ${VOTE_THRESHOLD})
 This commit syncs the git repo with the cluster ConfigMap after
 governance enactment. Without this sync, fresh installs would revert
 the civilization's collective decisions.
+
+Also updates chart/values.yaml so Helm installs reflect enacted decisions (issue #1408).
 
 Fixes #893"
         
@@ -737,9 +764,11 @@ ${kv_pairs}
 - Enactment timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 **Why this matters:**
-Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization.
+Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` or \`helm install agentex ./chart\` would revert collective decisions made by the civilization.
 
-**Related:** Issue #893, Issue #891 (constitution drift detection)
+**Files updated:** \`manifests/system/constitution.yaml\`, \`chart/values.yaml\` (issue #1408)
+
+**Related:** Issue #893, Issue #891 (constitution drift detection), Issue #1408 (Helm chart sync)
 
 **Auto-merge eligible:** This is a data sync PR (not protected file) reflecting already-enacted governance. Safe to merge immediately." \
                     --head "$branch_name" \
@@ -759,7 +788,7 @@ Without this sync, the git repo drifts from cluster state. Fresh installs using 
             return 1
         fi
     else
-        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml (already synced)"
+        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml or chart/values.yaml (already synced)"
     fi
     
     cd / && rm -rf "$workspace"
