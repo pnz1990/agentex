@@ -440,6 +440,13 @@ refresh_task_queue() {
     local scored_issues=""
     local numbers
     
+    # Issue #1442: Accumulate labels for issueLabels cache bulk-write after scoring loop.
+    # The coordinator already fetches labels from the bulk gh issue list response (no extra
+    # API calls). Pre-populating the cache here means claim_task() and update_specialization()
+    # find labels without needing per-issue GitHub API calls — fixing specialization routing
+    # under rate-limit conditions (root cause of specializedAssignments=0).
+    local new_issue_labels_cache=""
+
     # Issue #960 fix: Always include unlabeled issues in the queue to prevent starvation.
     # Strategy: Query ALL open issues, then filter out meta-issues only.
     # This ensures queue is never empty when actionable work exists.
@@ -459,6 +466,15 @@ refresh_task_queue() {
         local labels
         labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
 
+        # Issue #1442: Accumulate label data for issueLabels cache (only for labeled issues)
+        if [ -n "$labels" ]; then
+            if [ -z "$new_issue_labels_cache" ]; then
+                new_issue_labels_cache="${num}:${labels}"
+            else
+                new_issue_labels_cache="${new_issue_labels_cache}|${num}:${labels}"
+            fi
+        fi
+
         local best_score=5
         for entry in "${VISION_PRIORITY_LABELS[@]}"; do
             local label="${entry%%:*}"
@@ -469,6 +485,45 @@ refresh_task_queue() {
         done
         scored_issues="${scored_issues}${best_score}:${num}\n"
     done
+
+    # Issue #1442: Bulk-write accumulated labels to issueLabels cache.
+    # Merge with existing cache: fresh entries overwrite stale ones for the same issue;
+    # entries for issues not in current scan (e.g. claimed/active) are preserved.
+    # No extra GitHub API calls — labels come from the bulk gh issue list already fetched above.
+    if [ -n "$new_issue_labels_cache" ]; then
+        local existing_cache
+        existing_cache=$(get_state "issueLabels" 2>/dev/null || echo "")
+        local merged_cache="$new_issue_labels_cache"
+        if [ -n "$existing_cache" ]; then
+            # Append existing entries for issue numbers NOT already in the fresh cache
+            # (preserves labels for claimed/active issues not in current queue scan)
+            local fresh_issue_nums
+            fresh_issue_nums=$(echo "$new_issue_labels_cache" | tr '|' '\n' | cut -d: -f1 | sort)
+            local preserved_entries=""
+            while IFS='|' read -ra existing_entries; do
+                for entry in "${existing_entries[@]}"; do
+                    [ -z "$entry" ] && continue
+                    local entry_issue="${entry%%:*}"
+                    if ! echo "$fresh_issue_nums" | grep -qx "$entry_issue"; then
+                        if [ -z "$preserved_entries" ]; then
+                            preserved_entries="$entry"
+                        else
+                            preserved_entries="${preserved_entries}|${entry}"
+                        fi
+                    fi
+                done
+            done <<< "$existing_cache"
+            if [ -n "$preserved_entries" ]; then
+                merged_cache="${merged_cache}|${preserved_entries}"
+            fi
+        fi
+        # Limit cache size to avoid ConfigMap bloat (keep most recent 100 entries)
+        merged_cache=$(echo "$merged_cache" | tr '|' '\n' | head -100 | tr '\n' '|' | sed 's/|$//')
+        update_state "issueLabels" "$merged_cache"
+        local cached_count
+        cached_count=$(echo "$new_issue_labels_cache" | tr '|' '\n' | wc -l | tr -d ' ')
+        echo "[$(date -u +%H:%M:%S)] Issue #1442: Pre-populated issueLabels cache for $cached_count labeled issues"
+    fi
 
     if [ -n "$scored_issues" ]; then
         # Sort by score descending, extract issue numbers
