@@ -1994,11 +1994,17 @@ record_synthesis_debates_to_s3() {
 
     local synth_count
     synth_count=$(echo "$synthesis_thoughts" | jq 'length' 2>/dev/null || echo "0")
-    echo "[$(date -u +%H:%M:%S)] Recording $synth_count synthesis debates to S3 (max $max_writes_per_cycle per cycle)"
+    echo "[$(date -u +%H:%M:%S)] Checking $synth_count synthesis debates for S3 persistence (max $max_writes_per_cycle new writes per cycle)"
 
-    # Process each synthesis thought — limited to max_writes_per_cycle new writes per call.
-    # The aws s3 ls idempotency check is skipped in favor of try-write-then-skip-on-conflict,
-    # which is faster since we expect most writes to be new on the first pass.
+    # Issue #1625: Prefetch all existing debate thread IDs with a SINGLE S3 LIST call before the loop.
+    # Previous approach (issue #1606 fix) made one aws s3 ls per debate inside the loop —
+    # with 250+ debates that is still ~250 LIST API calls per 2.5-minute cycle (~144,000/day, ~$0.07/day).
+    # Fix: one prefix LIST outside the loop, then grep for membership (zero API calls per debate).
+    # S3 LIST cost: $0.0004/1000 calls → 576 prefix LIST calls/day = ~$0.0002/day (negligible).
+    local existing_thread_ids=""
+    existing_thread_ids=$(aws s3 ls "s3://${s3_bucket}/debates/" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null \
+        | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
+
     local idx=0
     local writes_this_cycle=0
     local skipped_existing=0
@@ -2018,13 +2024,9 @@ record_synthesis_debates_to_s3() {
 
         local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
 
-        # Issue #1606: Add idempotency check — skip S3 write if file already exists.
-        # Previous approach (issue #1585) removed the per-debate aws s3 ls check in favor of
-        # try-write, claiming "S3 PUT is idempotent." But idempotent ≠ "should always be called."
-        # Without this check, 250+ debates are rewritten every 2.5-minute coordinator cycle,
-        # generating ~145,000 S3 PUTs/day ($0.72/day) and blocking coordinator for 12+ min/cycle.
-        # Fix: check S3 before writing, skip if already present (same as track_debate_activity).
-        if aws s3 ls "$s3_path" --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+        # Issue #1625: Check membership in prefetched list (no S3 API call per debate).
+        # The existing_thread_ids list was fetched once above — grep for the thread_id in it.
+        if echo " $existing_thread_ids " | grep -qF " ${thread_id} "; then
             # Already written — skip (no count increment)
             skipped_existing=$((skipped_existing + 1))
             idx=$((idx + 1))
@@ -2085,7 +2087,7 @@ EOF
 
         idx=$((idx + 1))
     done
-    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes this cycle, $skipped_existing already-existing skipped (${synth_count} total)"
+    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes, $skipped_existing already-persisted skipped, 1 prefix LIST call (${synth_count} total synthesis debates)"
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
@@ -2194,6 +2196,11 @@ track_debate_activity() {
             [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))]
             | .[] | [.name, .parent, .agent] | @tsv' 2>/dev/null || true)
 
+        # Issue #1625: Prefetch existing thread IDs with a single prefix LIST (not per-file ls).
+        local existing_tda_thread_ids=""
+        existing_tda_thread_ids=$(aws s3 ls "s3://${IDENTITY_BUCKET}/debates/" --region "$BEDROCK_REGION" 2>/dev/null \
+            | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
+
         local s3_written=0
         while IFS=$'\t' read -r thought_name parent_ref agent_name; do
             [ -z "$thought_name" ] && continue
@@ -2203,8 +2210,8 @@ track_debate_activity() {
             local thread_id="$parent_ref"
             local s3_path="s3://${IDENTITY_BUCKET}/debates/${thread_id}.json"
 
-            # Skip if already written to S3 (idempotent)
-            if aws s3 ls "$s3_path" --region "$BEDROCK_REGION" >/dev/null 2>&1; then
+            # Issue #1625: Check against prefetched list (no S3 API call per debate)
+            if echo " $existing_tda_thread_ids " | grep -qF " ${thread_id} "; then
                 continue
             fi
 
