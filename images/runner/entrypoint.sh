@@ -1989,6 +1989,9 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 #   $2 = title
 #   $3 = body (should include "Discovered by: <agent> (specialization: <spec>)")
 # Updates S3 identity with proactiveIssuesFound counter
+# NOTE (issue #1901): This function ALWAYS returns 0. Filing failure is non-fatal.
+# With set -euo pipefail, returning 1 would crash the agent. Proactive issue filing
+# is best-effort — if it fails (rate limit, duplicate, etc.), the agent continues normally.
 file_proactive_issue() {
   local label="${1:-bug}"
   local title="${2:-}"
@@ -1996,7 +1999,18 @@ file_proactive_issue() {
   
   if [ -z "$title" ]; then
     log "file_proactive_issue: title is required"
-    return 1
+    return 0  # Issue #1901: return 0 (non-fatal), not 1
+  fi
+
+  # Issue #1901: Check for existing open issues with same title before filing
+  # Prevents duplicate filing when multiple specialized agents discover same anomaly simultaneously
+  local existing_issue
+  existing_issue=$(gh issue list --repo "$REPO" --state open \
+    --search "$(echo "$title" | cut -c1-50)" \
+    --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+  if [ "${existing_issue:-0}" -gt 0 ]; then
+    log "file_proactive_issue: similar open issue already exists — skipping duplicate filing"
+    return 0
   fi
   
   # File the issue
@@ -2019,12 +2033,12 @@ file_proactive_issue() {
     
     # Push metric
     push_metric "ProactiveIssueDiscovered" 1
-    
-    return 0
   else
-    log "WARNING: Failed to file proactive issue"
-    return 1
+    # Issue #1901: Non-fatal — log warning but continue. Do NOT return 1.
+    # set -euo pipefail would otherwise crash the agent on filing failure.
+    log "WARNING: Failed to file proactive issue (rate limit or duplicate) — continuing"
   fi
+  return 0  # Issue #1901: always return 0, filing failure is non-fatal
 }
 
 # request_coordinator_task() - Claim an unassigned issue from the coordinator queue
