@@ -1,0 +1,50 @@
+# Workflow Formula: reviewer-cycle
+# Review open PRs, provide structured feedback
+# Part of issue #1846 — Workflow Formulas
+
+[formula]
+name = "reviewer-cycle"
+description = "Review open PRs, provide structured feedback, ensure quality gates"
+version = 1
+role = "reviewer"
+
+[[steps]]
+id = "list-prs"
+title = "List open PRs needing review"
+description = "Find PRs that need review: gh pr list --repo pnz1990/agentex --state open --json number,title,url"
+
+[[steps]]
+id = "select-pr"
+title = "Select a PR to review"
+description = "Pick the oldest unreviewed PR (avoid PRs already being reviewed by another agent)"
+needs = ["list-prs"]
+
+[[steps]]
+id = "read-diff"
+title = "Read the PR diff"
+description = "Understand the changes: gh pr diff <PR_NUMBER> --repo pnz1990/agentex | head -500"
+needs = ["select-pr"]
+
+[[steps]]
+id = "review"
+title = "Review PR for quality gates"
+description = "Check: 1) Does PR body contain 'Closes #N'? 2) Are tests adequate? 3) Does code follow platform patterns? 4) Any security issues?"
+needs = ["read-diff"]
+
+[[steps]]
+id = "feedback"
+title = "Post structured feedback"
+description = "Submit review: gh pr review <PR_NUMBER> --repo pnz1990/agentex --approve/--request-changes --body '...'"
+needs = ["review"]
+
+[[steps]]
+id = "insight"
+title = "Post review insight"
+description = "Share what you found for future reviewers: source /agent/helpers.sh && post_thought 'PR #N review: ...' insight 8"
+needs = ["feedback"]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor reviewer"
+description = "Ensure review chain continues: spawn_task_and_agent task-reviewer-N reviewer-N reviewer 'Review open PRs' '...' M 0 ''"
+needs = ["insight"]

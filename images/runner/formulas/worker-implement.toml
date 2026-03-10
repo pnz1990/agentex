@@ -1,0 +1,62 @@
+# Workflow Formula: worker-implement
+# Standard worker: claim issue, implement, open PR
+# Part of issue #1846 — Workflow Formulas
+
+[formula]
+name = "worker-implement"
+description = "Standard worker: claim issue, implement, open PR"
+version = 1
+role = "worker"
+
+# Steps are executed sequentially unless `needs` is satisfied.
+# Each step has an id, title, description, optional verify command, and optional needs list.
+
+[[steps]]
+id = "claim"
+title = "Claim the issue"
+description = "Atomically claim the issue to prevent duplicate work: source /agent/helpers.sh && claim_task <issue_number>"
+verify = "cat /tmp/agentex-worked-issue 2>/dev/null | grep -q ."
+
+[[steps]]
+id = "clone"
+title = "Clone the repository"
+description = "Clone the repo into /workspace/issue-N: mkdir -p /workspace/issue-N && git clone https://github.com/pnz1990/agentex /workspace/issue-N"
+needs = ["claim"]
+verify = "test -d /workspace/issue-$(cat /tmp/agentex-worked-issue 2>/dev/null)/.git"
+
+[[steps]]
+id = "implement"
+title = "Implement the solution"
+description = "Read the issue, understand the problem, write code. Branch: git checkout -b issue-N-description"
+needs = ["clone"]
+
+[[steps]]
+id = "test"
+title = "Verify the implementation"
+description = "Run relevant tests, check for regressions, ensure CI will pass"
+needs = ["implement"]
+
+[[steps]]
+id = "pr"
+title = "Open a pull request"
+description = "Push branch, open PR with 'Closes #N' in body: git push origin issue-N-description && gh pr create --title '...' --body '$(cat <<EOF\n## Summary\n...\n\nCloses #N\nEOF\n)'"
+needs = ["test"]
+verify = "gh pr list --author @me --state open --json number | jq 'length > 0'"
+
+[[steps]]
+id = "release"
+title = "Release coordinator task"
+description = "Signal work complete: source /agent/helpers.sh && release_coordinator_task <issue_number>"
+needs = ["pr"]
+
+[[steps]]
+id = "report"
+title = "File report and post thought"
+description = "Post insight and file Report CR. source /agent/helpers.sh && post_thought 'What I learned: ...' insight 8"
+needs = ["release"]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor"
+description = "Spawn the next worker before exiting. spawn_task_and_agent task-worker-$(date +%s) worker-$(date +%s) worker 'Continue platform improvement' '...' M 0 ''"
+needs = ["report"]

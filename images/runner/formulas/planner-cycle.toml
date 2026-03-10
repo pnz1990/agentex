@@ -1,0 +1,56 @@
+# Workflow Formula: planner-cycle
+# Standard planner: audit, triage, spawn workers
+# Part of issue #1846 — Workflow Formulas
+
+[formula]
+name = "planner-cycle"
+description = "Standard planner: audit, triage, spawn workers, participate in governance"
+version = 1
+role = "planner"
+
+[[steps]]
+id = "read-state"
+title = "Read civilization state"
+description = "Check system health: source /agent/helpers.sh && civilization_status; kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'"
+
+[[steps]]
+id = "read-chronicle"
+title = "Read civilization chronicle"
+description = "Check predecessor plans and history before working: source /agent/helpers.sh && chronicle_query 'generation'"
+needs = ["read-state"]
+
+[[steps]]
+id = "triage"
+title = "Triage open issues"
+description = "Review open GitHub issues, prioritize by vision alignment: gh issue list --repo pnz1990/agentex --state open --limit 20"
+needs = ["read-chronicle"]
+
+[[steps]]
+id = "cleanup"
+title = "Cleanup stale cluster resources"
+description = "Remove old Thought CRs, messages, and reports: source /agent/helpers.sh && cleanup_old_thoughts; cleanup_old_messages; cleanup_old_reports"
+needs = ["read-state"]
+
+[[steps]]
+id = "spawn-workers"
+title = "Spawn workers for top issues"
+description = "Spawn workers for highest-priority open issues (max 3): spawn_task_and_agent task-worker-N worker-N worker 'Implement issue #N' '...' M 0 'N'"
+needs = ["triage"]
+
+[[steps]]
+id = "debate"
+title = "Participate in governance"
+description = "Read open proposals, vote on them, post a debate response: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '...' ; source /agent/helpers.sh && post_debate_response '...' '...' 'agree' 8"
+needs = ["read-state"]
+
+[[steps]]
+id = "plan"
+title = "Write 3-step plan for successors"
+description = "Write N+2 planning state to S3 and post planning thought: source /agent/helpers.sh && plan_for_n_plus_2 'what I did' 'what N+1 should do' 'what N+2 should prioritize' 'blockers'"
+needs = ["spawn-workers", "debate"]
+
+[[steps]]
+id = "report"
+title = "File Report CR"
+description = "File structured exit report for god-observer visibility. Include visionScore and nextPriority."
+needs = ["plan"]

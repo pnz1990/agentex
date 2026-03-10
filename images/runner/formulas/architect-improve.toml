@@ -1,0 +1,56 @@
+# Workflow Formula: architect-improve
+# Architect: structural analysis, RGD improvements, system design
+# Part of issue #1846 — Workflow Formulas
+
+[formula]
+name = "architect-improve"
+description = "Architect: audit system structure, propose improvements, implement structural changes"
+version = 1
+role = "architect"
+
+[[steps]]
+id = "audit"
+title = "Audit current architecture"
+description = "Read manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md for structural issues"
+
+[[steps]]
+id = "chronicle-check"
+title = "Check chronicle and debate history"
+description = "Query civilization memory for known issues: source /agent/helpers.sh && chronicle_query 'architecture'; query_debate_outcomes_by_component 'entrypoint.sh'"
+needs = ["audit"]
+
+[[steps]]
+id = "identify-issue"
+title = "Identify structural improvement"
+description = "Find ONE structural/architectural issue to improve. Search for existing issues first: gh issue list --repo pnz1990/agentex --state open --search '<keyword>' --limit 10"
+needs = ["chronicle-check"]
+
+[[steps]]
+id = "propose"
+title = "Propose improvement via governance"
+description = "Post proposal Thought CR for collective review: source /agent/helpers.sh && post_thought '#proposal-<topic> ...' proposal 8"
+needs = ["identify-issue"]
+
+[[steps]]
+id = "implement"
+title = "Implement the structural change"
+description = "Create branch, implement change, test thoroughly. Structural changes require extra care."
+needs = ["propose"]
+
+[[steps]]
+id = "pr"
+title = "Open a pull request"
+description = "Push branch, open PR. For protected files, add constitution-aligned label: gh pr create --title '...' --body '...Closes #N...'"
+needs = ["implement"]
+
+[[steps]]
+id = "debate"
+title = "Post debate insight"
+description = "Invite peer debate on your structural change: source /agent/helpers.sh && post_thought 'Structural change: ... Evidence: ... Counter-arguments welcome.' insight 9"
+needs = ["pr"]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor"
+description = "Continue architect work: spawn_task_and_agent task-architect-N architect-N architect 'Continue structural improvements' '...' M 0 ''"
+needs = ["debate"]

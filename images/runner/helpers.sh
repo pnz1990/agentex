@@ -1509,5 +1509,62 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── release_coordinator_task ─────────────────────────────────────────────────
+# Signal that a coordinator-assigned task is complete.
+# Removes the agent:issue entry from coordinator-state.activeAssignments so the
+# coordinator stops counting this as in-flight and doesn't re-queue the issue.
+#
+# Usage: release_coordinator_task <issue_number>
+# Returns: 0 on success, 1 on error
+#
+# Example:
+#   source /agent/helpers.sh
+#   release_coordinator_task 1846
+release_coordinator_task() {
+  local issue="${1:-}"
+  if [ -z "$issue" ] || [ "$issue" = "0" ]; then
+    log "release_coordinator_task: invalid issue number '$issue'"
+    return 1
+  fi
+
+  local max_attempts=5
+  local attempt=0
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+
+    local assignments
+    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+    # If not in assignments, already released
+    local normalized
+    normalized=$(echo "$assignments" | tr -d ' ')
+    if ! echo "$normalized" | grep -qE "(^|,)[^,]+:${issue}(,|$)"; then
+      log "release_coordinator_task: issue #$issue not in activeAssignments (already released)"
+      return 0
+    fi
+
+    # Remove the agent:issue entry
+    local new_assignments
+    new_assignments=$(echo "$assignments" | tr ',' '\n' | grep -v ":${issue}$" | tr '\n' ',' | sed 's/,$//')
+
+    # Atomic CAS: only write if activeAssignments unchanged since our read
+    if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=json \
+      -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${assignments}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+      2>/dev/null; then
+      log "release_coordinator_task: released issue #$issue (assignments: ${new_assignments:-empty})"
+      push_metric "TaskReleased" 1 2>/dev/null || true
+      return 0
+    fi
+
+    log "release_coordinator_task: CAS failed (attempt $attempt/$max_attempts) — retrying"
+    sleep 1
+  done
+
+  log "WARNING: release_coordinator_task: failed to release issue #$issue after $max_attempts attempts"
+  return 1
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, release_coordinator_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
