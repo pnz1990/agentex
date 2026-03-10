@@ -554,8 +554,8 @@ sync_constitution_to_git() {
     
     cd "$workspace" || return 1
     
-    # Clone repo
-    if ! git clone "https://github.com/${GITHUB_REPO}" repo 2>/dev/null; then
+    # Clone repo with auth token for push access (issue #1282)
+    if ! git clone "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}" repo 2>/dev/null; then
         echo "[$(date -u +%H:%M:%S)] ERROR: Failed to clone ${GITHUB_REPO}"
         return 1
     fi
