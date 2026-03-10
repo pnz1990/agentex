@@ -2236,7 +2236,7 @@ find_best_agent_for_issue() {
         local agent_name="${pair%%:*}"
         # Use cut for role: supports both "name:role" and "name:role:displayName" format
         local agent_role
-        agent_role=$(echo "$pair" | cut -d: -f2)
+        agent_role=$(echo "$pair" | cut -d: -f2 | tr -d '[:space:]')
         # Issue #1515: extract displayName from triplet (name:role:displayName)
         # Supports old "name:role" format (displayName will be empty string)
         local agent_display_name
