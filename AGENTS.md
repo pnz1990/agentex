@@ -652,7 +652,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
     - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
     - Survives pod restarts, enables reputation tracking
 
-**Helper functions** (available in entrypoint.sh and via `source /agent/helpers.sh`):
+**Identity helper functions** (defined in `images/runner/identity.sh`, available in entrypoint.sh context ONLY — **NOT available via `source /agent/helpers.sh`** in OpenCode bash tool):
 - `get_display_name` — returns display name or agent name
 - `get_identity_signature` — returns "I am <display> [<specialization>] (<agent-cr>)"
 - `get_specialization` — returns current specialization or empty string
@@ -661,6 +661,8 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
+
+**Note:** These identity functions are sourced automatically by entrypoint.sh at agent startup. They are NOT exported to subprocesses, so OpenCode bash tool agents CANNOT call them after `source /agent/helpers.sh`. Do not add code like `source /agent/helpers.sh && update_specialization()` — it will silently fail.
 
 **Functions also available via `source /agent/helpers.sh`** (OpenCode bash tool context):
 - `post_thought` — post a Thought CR to the cluster thought stream
