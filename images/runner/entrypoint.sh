@@ -2300,6 +2300,50 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      log "Planner: reading unresolved debate threads from coordinator..."
      UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+
+     # Issue #1145: v0.2 milestone validation — verify specialization routing fires in production
+     # Check specializedAssignments counter. If still 0, diagnose why routing hasn't fired.
+     log "Planner: validating v0.2 specialization routing..."
+     SPECIALIZED_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+       -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+     SPECIALIZED_ASSIGNMENTS="${SPECIALIZED_ASSIGNMENTS:-0}"
+     LAST_ROUTING=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+       -o jsonpath='{.data.lastRoutingDecisions}' 2>/dev/null || echo "")
+
+     if [ "${SPECIALIZED_ASSIGNMENTS}" = "0" ] || [ -z "${SPECIALIZED_ASSIGNMENTS}" ]; then
+       log "WARNING: v0.2 specialization routing has not fired yet (specializedAssignments=0)"
+
+       # Check how many agent S3 identity files exist
+       IDENTITY_COUNT=$(aws s3 ls "s3://${S3_BUCKET}/identities/" \
+         --region "$BEDROCK_REGION" 2>/dev/null | wc -l || echo "0")
+       IDENTITY_WITH_SPEC=0
+       if [ "${IDENTITY_COUNT:-0}" -gt 0 ]; then
+         # Sample up to 5 identity files to check for specialization data
+         for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
+             --region "$BEDROCK_REGION" 2>/dev/null | awk '{print $4}' | head -5); do
+           spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
+             --region "$BEDROCK_REGION" 2>/dev/null | \
+             jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
+           if [ "${spec_count:-0}" -gt 0 ]; then
+             IDENTITY_WITH_SPEC=$((IDENTITY_WITH_SPEC + 1))
+           fi
+         done
+       fi
+
+       if [ "${IDENTITY_COUNT:-0}" = "0" ]; then
+         ROUTING_BLOCKER="No agent identity files in S3 yet. Agents build specialization history by completing labeled issues. Routing will fire once history accumulates."
+       elif [ "${IDENTITY_WITH_SPEC}" = "0" ]; then
+         ROUTING_BLOCKER="Agent identities exist (${IDENTITY_COUNT} files) but none have specializationLabelCounts > 0. Check update_specialization() is being called after completing labeled issues."
+       else
+         ROUTING_BLOCKER="Identities with specialization exist but routing threshold (score>5) not met yet. More task history needed, or consider lowering SPECIALIZATION_ROUTING_THRESHOLD."
+       fi
+
+       log "v0.2 routing status: not yet firing. Blocker: ${ROUTING_BLOCKER}"
+       post_thought "v0.2 validation: specialization routing NOT yet firing (specializedAssignments=${SPECIALIZED_ASSIGNMENTS:-0}). Diagnosis: ${ROUTING_BLOCKER} [identityFiles=${IDENTITY_COUNT:-0}, withSpec=${IDENTITY_WITH_SPEC}]. Monitor coordinator-state.specializedAssignments each planner generation." "insight" 7
+     else
+       log "v0.2 specialization routing confirmed: ${SPECIALIZED_ASSIGNMENTS} specialized assignment(s). Last: ${LAST_ROUTING:-unknown}"
+       post_thought "v0.2 VALIDATED: specialization routing fired ${SPECIALIZED_ASSIGNMENTS} times. Recent: ${LAST_ROUTING:-none}. Identity-based task routing is operational." "insight" 9
+     fi
    fi
 fi
 
