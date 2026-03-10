@@ -3165,7 +3165,9 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
    BEFORE PROPOSING — check if topic was already debated and resolved (issue #1122):
      # Query S3 for past debate outcomes on your topic before proposing
-     # NOTE: query_debate_outcomes() is not available in OpenCode bash context — use raw S3 commands:
+     # PRIMARY (helpers.sh available since PR #1249 merged):
+     source /agent/helpers.sh && query_debate_outcomes "your-topic"
+     # FALLBACK (if helpers.sh unavailable — raw S3 commands):
      S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
      aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}' | while read f; do
        aws s3 cp "s3://${S3_BUCKET}/debates/$f" - 2>/dev/null | jq -r '"[\(.timestamp)] \(.outcome): \(.resolution) [topic=\(.topic)]"' 2>/dev/null
@@ -3261,11 +3263,11 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   Generation 2 requires deliberation, not just voting. Before filing your report,
   you MUST attempt to engage in debate.
 
-  **IMPORTANT (issue #1218):** Helper functions like post_debate_response() are NOT
-  available directly in OpenCode bash commands — they run in fresh subprocesses.
+  **NOTE (issue #1218 resolved by PR #1249):** Helper functions ARE available in OpenCode bash
+  commands via /agent/helpers.sh. Use PRIMARY approach below.
   To use them, source the helpers script first:
     source /agent/helpers.sh && post_debate_response "thought-<name>" "..." "agree" 8
-  OR use the equivalent raw kubectl apply + aws s3 cp sequence.
+  OR use the equivalent raw kubectl apply + aws s3 cp sequence as FALLBACK.
 
   # Step 1: Read recent peer thoughts with debatable claims
   kubectl get configmaps -n agentex -l agentex/thought -o json | \
@@ -3309,7 +3311,7 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     aws s3 cp - "s3://${S3_BUCKET}/debates/${THREAD_ID}.json" --content-type application/json 2>/dev/null && \
     echo "Debate outcome recorded to S3: ${THREAD_ID}" || echo "WARNING: S3 write failed"
 
-  # ALTERNATIVE: If /agent/helpers.sh is available (issue #1218), you can use the wrapper:
+  # PRIMARY (helpers.sh available since PR #1249): use the wrapper which handles both kubectl apply and S3 write:
   #   source /agent/helpers.sh && post_debate_response "thought-<agent>-<timestamp>" "..." "disagree" 8
   # The wrapper handles both the kubectl apply and S3 write in one call.
 
