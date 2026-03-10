@@ -2897,25 +2897,44 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      LAST_ROUTING=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
        -o jsonpath='{.data.lastRoutingDecisions}' 2>/dev/null || echo "")
 
-     if [ "${SPECIALIZED_ASSIGNMENTS}" = "0" ] || [ -z "${SPECIALIZED_ASSIGNMENTS}" ]; then
-       log "WARNING: v0.2 specialization routing has not fired yet (specializedAssignments=0)"
+      if [ "${SPECIALIZED_ASSIGNMENTS}" = "0" ] || [ -z "${SPECIALIZED_ASSIGNMENTS}" ]; then
+        log "WARNING: v0.2 specialization routing has not fired yet (specializedAssignments=0)"
 
-       # Check how many agent S3 identity files exist
-       IDENTITY_COUNT=$(aws s3 ls "s3://${S3_BUCKET}/identities/" \
-         --region "$BEDROCK_REGION" 2>/dev/null | wc -l || echo "0")
-       IDENTITY_WITH_SPEC=0
-       if [ "${IDENTITY_COUNT:-0}" -gt 0 ]; then
-         # Sample up to 5 identity files to check for specialization data
-         for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
-             --region "$BEDROCK_REGION" 2>/dev/null | awk '{print $4}' | head -5); do
-           spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
-             --region "$BEDROCK_REGION" 2>/dev/null | \
-             jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
-           if [ "${spec_count:-0}" -gt 0 ]; then
-             IDENTITY_WITH_SPEC=$((IDENTITY_WITH_SPEC + 1))
-           fi
-         done
-       fi
+        # Check how many agent S3 identity files exist (per-session + canonical)
+        # Issue #1545: count both paths — canonical/ is non-recursive prefix, needs separate ls
+        IDENTITY_COUNT=$(aws s3 ls "s3://${S3_BUCKET}/identities/" \
+          --region "$BEDROCK_REGION" 2>/dev/null | grep '\.json$' | wc -l || echo "0")
+        IDENTITY_COUNT=$(( IDENTITY_COUNT + $(aws s3 ls "s3://${S3_BUCKET}/identities/canonical/" \
+          --region "$BEDROCK_REGION" 2>/dev/null | grep '\.json$' | wc -l || echo "0") ))
+        IDENTITY_WITH_SPEC=0
+        if [ "${IDENTITY_COUNT:-0}" -gt 0 ]; then
+          # Issue #1545: sample 5 NEWEST per-session files (sort -k1,2 -r = newest first).
+          # Without sorting, we sample the oldest files (god-delegates from gen0) which never
+          # have specializationLabelCounts, giving false "no spec data" alarms.
+          for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
+              --region "$BEDROCK_REGION" 2>/dev/null | grep '\.json$' | \
+              sort -k1,2 -r | awk '{print $4}' | head -5); do
+            spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
+              --region "$BEDROCK_REGION" 2>/dev/null | \
+              jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
+            if [ "${spec_count:-0}" -gt 0 ]; then
+              IDENTITY_WITH_SPEC=$((IDENTITY_WITH_SPEC + 1))
+            fi
+          done
+          # Also check canonical files (accumulated cross-session history)
+          if [ "${IDENTITY_WITH_SPEC}" = "0" ]; then
+            for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/canonical/" \
+                --region "$BEDROCK_REGION" 2>/dev/null | grep '\.json$' | \
+                sort -k1,2 -r | awk '{print $4}' | head -5); do
+              spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/canonical/${identity_key}" - \
+                --region "$BEDROCK_REGION" 2>/dev/null | \
+                jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
+              if [ "${spec_count:-0}" -gt 0 ]; then
+                IDENTITY_WITH_SPEC=$((IDENTITY_WITH_SPEC + 1))
+              fi
+            done
+          fi
+        fi
 
        if [ "${IDENTITY_COUNT:-0}" = "0" ]; then
          ROUTING_BLOCKER="No agent identity files in S3 yet. Agents build specialization history by completing labeled issues. Routing will fire once history accumulates."
