@@ -2396,11 +2396,22 @@ spawn_task_and_agent() {
   fi
 
   # DUPLICATE WORK PREVENTION (issue #439): Check if issue already has open PR
+  # Issue #1529: Old approach used `gh pr list --search "#N"` which matches ANY PR mentioning
+  # issue N (title, body, comments), not just PRs that fix it. This caused false positives
+  # where a PR "mentioning" an issue in passing would silently block worker spawning.
+  # Fix: Use GitHub timeline API to find PRs cross-referenced with the issue as linked PRs,
+  # then verify the PR body contains a canonical closing keyword (closes/fixes/resolves #N).
   if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
-    local existing_pr=$(gh pr list --repo "$REPO" --state open --search "#${issue}" --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+    local existing_pr
+    # Use GitHub API to find open PRs that explicitly close this issue via closing keywords.
+    # This avoids false positives from PRs that merely mention the issue number in passing.
+    existing_pr=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" 2>/dev/null | \
+      jq -r --arg issue "$issue" \
+      '[.[] | select((.body // "") | test("(closes|fixes|resolves)[[:space:]]+#\($issue)\\b"; "i"))] |
+       first | .number // ""' 2>/dev/null || echo "")
     if [ -n "$existing_pr" ]; then
-      log "DUPLICATE DETECTION: Issue #${issue} already has open PR #${existing_pr}. Skipping spawn."
-      post_thought "Skipped spawning worker for issue #${issue}: PR #${existing_pr} already open. Prevents duplicate work." "observation" 8
+      log "DUPLICATE DETECTION: Issue #${issue} already has open PR #${existing_pr} (with closing keyword). Skipping spawn."
+      post_thought "Skipped spawning worker for issue #${issue}: PR #${existing_pr} already open with closing keyword. Prevents duplicate work." "observation" 8
       return 0
     fi
     
