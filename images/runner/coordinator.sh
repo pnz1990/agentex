@@ -953,6 +953,77 @@ track_debate_activity() {
     update_state "unresolvedDebates" "$unresolved_threads"
     push_metric "UnresolvedDebates" "$unresolved_count" "Count" "Component=Coordinator"
 
+    # ── Issue #1161: Write synthesis debate outcomes to S3 ────────────────────
+    # The coordinator detects synthesis debate thoughts and writes them to S3
+    # so agents can query past debate resolutions via query_debate_outcomes().
+    # This covers manually-posted debate Thought CRs (which bypass post_debate_response()
+    # in entrypoint.sh and thus never reach record_debate_outcome() directly).
+    if [ "$synthesize_count" -gt 0 ]; then
+        # Get all synthesis debate thoughts with their full names and parents
+        local synthesis_thoughts
+        synthesis_thoughts=$(echo "$all_cm" | jq -r '
+            [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))]
+            | .[] | [.name, .parent, .agent] | @tsv' 2>/dev/null || true)
+
+        local s3_written=0
+        while IFS=$'\t' read -r thought_name parent_ref agent_name; do
+            [ -z "$thought_name" ] && continue
+            { [ -z "$parent_ref" ] || [ "$parent_ref" = "null" ]; } && continue
+
+            # Use parentRef as thread_id (consistent with entrypoint.sh record_debate_outcome)
+            local thread_id="$parent_ref"
+            local s3_path="s3://${IDENTITY_BUCKET}/debates/${thread_id}.json"
+
+            # Skip if already written to S3 (idempotent)
+            if aws s3 ls "$s3_path" --region "$BEDROCK_REGION" >/dev/null 2>&1; then
+                continue
+            fi
+
+            # Fetch full content of this specific synthesis ConfigMap
+            local full_content
+            full_content=$(kubectl_with_timeout 10 get configmap "$thought_name" -n "$NAMESPACE" \
+                -o jsonpath='{.data.content}' 2>/dev/null || echo "")
+            [ -z "$full_content" ] && full_content="(content unavailable)"
+
+            # Build debate outcome JSON
+            local timestamp
+            timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            local escaped_resolution
+            escaped_resolution=$(echo "$full_content" | jq -Rs '.')
+
+            local debate_json
+            debate_json=$(cat <<DEBATE_EOF
+{
+  "threadId": "$thread_id",
+  "topic": "",
+  "outcome": "synthesized",
+  "resolution": $escaped_resolution,
+  "participants": ["$agent_name"],
+  "timestamp": "$timestamp",
+  "recordedBy": "coordinator",
+  "sourceThought": "$thought_name"
+}
+DEBATE_EOF
+)
+
+            # Write to S3
+            if echo "$debate_json" | aws s3 cp - "$s3_path" \
+                    --content-type application/json \
+                    --region "$BEDROCK_REGION" >/dev/null 2>&1; then
+                echo "[$(date -u +%H:%M:%S)] Wrote synthesis outcome to S3: $s3_path (thread=$thread_id)"
+                s3_written=$((s3_written + 1))
+            else
+                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write synthesis to S3: $s3_path" >&2
+            fi
+        done <<< "$synthesis_thoughts"
+
+        if [ "$s3_written" -gt 0 ]; then
+            push_metric "DebateOutcomesWritten" "$s3_written" "Count" "Component=Coordinator"
+            echo "[$(date -u +%H:%M:%S)] Wrote $s3_written synthesis outcome(s) to S3 debates/"
+        fi
+    fi
+    # ── End Issue #1161 ───────────────────────────────────────────────────────
+
     # If there are unresolved disagreements and no synthesis attempts, post a nudge
     if [ "$disagree_count" -gt 0 ] && [ "$synthesize_count" -eq 0 ]; then
         local existing_nudge
