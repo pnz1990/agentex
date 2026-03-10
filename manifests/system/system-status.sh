@@ -98,6 +98,75 @@ kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimesta
   tail -6 | tail -5 | awk '{printf "   %s [%s] %s\n", $1, $3, $4}' 2>/dev/null || echo "   (none)"
 echo ""
 
+# 5a. COORDINATOR & GOVERNANCE HEALTH (issue #1835)
+echo -e "${BLUE}🤝 Coordinator & Governance${NC}"
+COORD_HEARTBEAT=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+COORD_PHASE=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.phase}' 2>/dev/null || echo "unknown")
+if [ -n "$COORD_HEARTBEAT" ]; then
+  # Compute seconds since last heartbeat
+  NOW_EPOCH=$(date -u +%s 2>/dev/null || echo "0")
+  HB_EPOCH=$(date -u -d "$COORD_HEARTBEAT" +%s 2>/dev/null || echo "$NOW_EPOCH")
+  HB_AGE=$(( NOW_EPOCH - HB_EPOCH ))
+  if [ "$HB_AGE" -gt 300 ]; then
+    echo -e "   Coordinator heartbeat: ${RED}STALE${NC} (${HB_AGE}s ago — phase: ${COORD_PHASE})"
+    HEALTH_WARN_COORD=1
+  elif [ "$HB_AGE" -gt 120 ]; then
+    echo -e "   Coordinator heartbeat: ${YELLOW}SLOW${NC} (${HB_AGE}s ago — phase: ${COORD_PHASE})"
+    HEALTH_WARN_COORD=1
+  else
+    echo -e "   Coordinator heartbeat: ${GREEN}OK${NC} (${HB_AGE}s ago — phase: ${COORD_PHASE})"
+    HEALTH_WARN_COORD=0
+  fi
+else
+  echo -e "   Coordinator heartbeat: ${YELLOW}UNKNOWN${NC} (no heartbeat recorded)"
+  HEALTH_WARN_COORD=1
+fi
+
+# Debate health
+DEBATE_STATS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "unavailable")
+UNRESOLVED_DEBATES=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+UNRESOLVED_COUNT=0
+if [ -n "$UNRESOLVED_DEBATES" ]; then
+  UNRESOLVED_COUNT=$(echo "$UNRESOLVED_DEBATES" | tr ',' '\n' | grep -c '[a-z]' || echo "0")
+fi
+echo "   Debate stats:         $DEBATE_STATS"
+if [ "$UNRESOLVED_COUNT" -gt 10 ]; then
+  echo -e "   Unresolved debates:   ${YELLOW}${UNRESOLVED_COUNT}${NC} (high backlog)"
+else
+  echo "   Unresolved debates:   ${UNRESOLVED_COUNT}"
+fi
+
+# Specialization routing (v0.2 health)
+SPEC_ASSIGNMENTS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+GENERIC_ASSIGNMENTS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.genericAssignments}' 2>/dev/null || echo "0")
+TOTAL_ROUTING=$(( (SPEC_ASSIGNMENTS + 0) + (GENERIC_ASSIGNMENTS + 0) ))
+if [ "$TOTAL_ROUTING" -gt 0 ]; then
+  SPEC_PERCENT=$(( SPEC_ASSIGNMENTS * 100 / TOTAL_ROUTING ))
+  echo "   Routing (v0.2):       ${SPEC_ASSIGNMENTS} specialized / ${GENERIC_ASSIGNMENTS} generic (${SPEC_PERCENT}% specialized)"
+else
+  echo -e "   Routing (v0.2):       ${YELLOW}no routing data yet${NC}"
+fi
+
+# Vision queue (v0.3 health)
+VISION_QUEUE=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+VISION_COUNT=0
+if [ -n "$VISION_QUEUE" ]; then
+  VISION_COUNT=$(echo "$VISION_QUEUE" | tr ';' '\n' | grep -c '[a-zA-Z0-9]' || echo "0")
+fi
+if [ "$VISION_COUNT" -gt 0 ]; then
+  echo -e "   Vision queue (v0.3):  ${GREEN}${VISION_COUNT} items${NC} (civilization self-directing)"
+else
+  echo "   Vision queue (v0.3):  empty (no self-directed goals yet)"
+fi
+echo ""
+
 # 6. OPEN GITHUB ISSUES/PRS
 echo -e "${BLUE}🔧 GitHub Status${NC}"
 if command -v gh &> /dev/null; then
@@ -125,6 +194,20 @@ echo -e "${BLUE}📊 Health Summary${NC}"
 HEALTH_OK=0
 HEALTH_WARN=0
 HEALTH_CRIT=0
+
+# Check coordinator heartbeat
+if [ "${HEALTH_WARN_COORD:-0}" -eq 1 ]; then
+  if [ -n "$COORD_HEARTBEAT" ] && [ "${HB_AGE:-0}" -gt 300 ]; then
+    HEALTH_WARN=$((HEALTH_WARN + 1))
+    echo -e "   ${YELLOW}⚠${NC} Coordinator heartbeat stale (${HB_AGE:-?}s)"
+  else
+    HEALTH_WARN=$((HEALTH_WARN + 1))
+    echo -e "   ${YELLOW}⚠${NC} Coordinator heartbeat unknown"
+  fi
+else
+  HEALTH_OK=$((HEALTH_OK + 1))
+  echo -e "   ${GREEN}✓${NC} Coordinator alive"
+fi
 
 # Check circuit breaker
 if [ "$ACTIVE_JOBS" -ge "$CIRCUIT_BREAKER_LIMIT" ]; then
