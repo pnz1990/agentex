@@ -160,15 +160,23 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
-  # visionQueue: agent-voted issue numbers to prioritize ABOVE the taskQueue (issue #1149)
-  # Format: comma-separated "issueNumber:voteCount" pairs, e.g., "1149:3,1088:4"
-  # Populated when 3+ agents vote #proposal-vision-feature issueNumber=N
-  # Coordinator reads visionQueue before taskQueue so vision-aligned issues get priority
+  # visionQueue: agent-voted issues/features to prioritize ABOVE the taskQueue (issue #1149)
+  # When 3+ agents vote on #proposal-vision-queue or #proposal-vision-feature,
+  # the coordinator adds the item here. Planners read visionQueue BEFORE taskQueue.
+  # Supports issue numbers (issueNum:voteCount) and named features (feature:desc:ts:proposer).
   vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
   if [ -z "$vision_queue_val" ]; then
     [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
       -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
+  # visionQueueLog: audit log of all vision-queue additions/removals (issue #1149)
+  vision_queue_log_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueueLog}' 2>/dev/null)
+  if [ -z "$vision_queue_log_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueueLog (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueueLog":""}}' 2>/dev/null || true
   fi
 
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
@@ -907,6 +915,60 @@ tally_and_enact_votes() {
                 fi
             fi
 
+            # ── VISION-QUEUE GOVERNANCE (issue #1149) ──────────────────────────────
+            # When agents reach consensus on a #proposal-vision-queue, add the
+            # proposed feature to coordinator-state.visionQueue so planners will
+            # prioritize it — enabling the civilization to SET ITS OWN GOALS.
+            #
+            # Proposal format: #proposal-vision-queue feature=<name> description=<desc>
+            # Example: #proposal-vision-queue feature=debate-synthesis-ui description=Build-UI-to-visualize-debate-chains
+            if [ "$topic" = "vision-queue" ]; then
+                local vq_feature=""
+                local vq_description=""
+                while IFS= read -r kv; do
+                    [ -z "$kv" ] && continue
+                    local k="${kv%%=*}"
+                    local v="${kv##*=}"
+                    case "$k" in
+                        feature) vq_feature="$v" ;;
+                        description) vq_description="$v" ;;
+                    esac
+                done <<< "$kv_pairs"
+
+                if [ -n "$vq_feature" ]; then
+                    local ts_vq
+                    ts_vq=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    # Build vision queue entry: "feature:description:ts:proposer"
+                    local vq_entry="${vq_feature}:${vq_description:-no-description}:${ts_vq}:${proposer_agent}"
+
+                    local current_vq
+                    current_vq=$(get_state "visionQueue")
+                    local new_vq
+                    if [ -z "$current_vq" ]; then
+                        new_vq="$vq_entry"
+                    else
+                        new_vq="${current_vq};${vq_entry}"
+                    fi
+                    update_state "visionQueue" "$new_vq"
+
+                    # Audit log
+                    local vq_log_entry="${ts_vq} ADDED feature=${vq_feature} votes=${approve_votes} proposer=${proposer_agent}"
+                    local current_vq_log
+                    current_vq_log=$(get_state "visionQueueLog")
+                    if [ -z "$current_vq_log" ]; then
+                        update_state "visionQueueLog" "$vq_log_entry"
+                    else
+                        update_state "visionQueueLog" "${current_vq_log} | ${vq_log_entry}"
+                    fi
+
+                    push_metric "VisionQueueAdded" 1 "Count" "Feature=${vq_feature}"
+                    echo "[$(date -u +%H:%M:%S)] VISION-QUEUE: Added feature '${vq_feature}' to vision queue (${approve_votes} votes, proposer=${proposer_agent})"
+                    patched=true  # mark as handled so verdict uses ENACTED message
+                else
+                    echo "[$(date -u +%H:%M:%S)] VISION-QUEUE: Proposal missing 'feature=' key — cannot add to vision queue"
+                fi
+            fi
+
             # Record the enacted decision with full audit trail
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -921,7 +983,14 @@ tally_and_enact_votes() {
 
             # Post verdict Thought CR
             local verdict_text
-            if [ "$patched" = true ]; then
+            if [ "$topic" = "vision-queue" ] && [ "$patched" = true ]; then
+                verdict_text="VISION-QUEUE ENACTED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Feature: $kv_pairs
+Added to coordinator-state.visionQueue at ${ts}.
+Planners will now prioritize this feature over the regular task queue.
+The civilization has chosen its own next goal."
+            elif [ "$patched" = true ]; then
                 verdict_text="CONSENSUS ENACTED: $topic
 Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
 Changes: $kv_pairs

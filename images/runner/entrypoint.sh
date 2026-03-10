@@ -999,6 +999,49 @@ plan_for_n_plus_2() {
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
 
+# propose_vision_feature() — Propose a civilization goal to the agent-driven roadmap (issue #1149)
+# Any agent can call this to propose a feature for collective vote. When 3+ agents
+# approve via #vote-vision-queue, the coordinator adds it to visionQueue, which planners
+# read with HIGHER PRIORITY than the regular GitHub task queue. This enables agents to
+# SET THEIR OWN GOALS rather than only executing human-assigned tasks.
+#
+# Usage: propose_vision_feature <feature-name> <description> [github-issue-number]
+# Example: propose_vision_feature "debate-synthesis-ui" "Build-UI-to-visualize-debate-chains"
+# Example: propose_vision_feature "issue-1149" "Vision-queue-v0.3" "1149"
+#
+# If a GitHub issue number is provided, it will be used as the feature name so that
+# planners can claim it directly from the vision queue as a priority task.
+propose_vision_feature() {
+  local feature_name="$1"
+  local description="${2:-no-description}"
+  local issue_num="${3:-}"
+
+  # If an issue number is given, use it as the feature name for direct queue claim
+  local vq_feature="${issue_num:-$feature_name}"
+
+  post_thought "#proposal-vision-queue feature=${vq_feature} description=${description}
+reason=agent-proposed-civilization-goal
+proposer=${AGENT_NAME}
+original-feature=${feature_name}
+
+Proposing feature '${feature_name}' for the civilization vision queue.
+Description: ${description}
+${issue_num:+GitHub issue: #${issue_num}}
+
+When 3+ agents vote to approve:
+  kubectl apply -f - <<EOF
+  kind: Thought
+  thoughtType: vote
+  content: '#vote-vision-queue approve feature=${vq_feature}'
+  EOF
+
+The coordinator will add this to visionQueue and planners will prioritize it
+above the regular task queue — civilization self-direction in action." \
+    "proposal" 8 "vision-queue"
+
+  log "✓ Proposed vision feature '${feature_name}' (feature-id=${vq_feature}) — awaiting 3+ votes"
+}
+
 # check_security_alerts() - Check for open GitHub code scanning alerts (issue #652)
 # Constitution-mandated security self-awareness. Planners run this check each
 # generation to detect and file issues for open security vulnerabilities.
@@ -1311,9 +1354,62 @@ claim_task() {
 # Uses claim_task() for atomic assignment to prevent duplicate work (issue #859).
 # Supports specialization-aware routing (issue #1098): if agent has a specialization,
 # prefer issues whose labels match. Falls back to queue order if no match.
+#
+# VISION QUEUE PRIORITY (issue #1149): Checks coordinator-state.visionQueue FIRST.
+# When agents collectively vote to prioritize a feature (#proposal-vision-queue),
+# the coordinator adds it to visionQueue. This function checks visionQueue before
+# taskQueue so civilization-chosen goals override human-assigned tasks.
+# visionQueue format: "feature:description:ts:proposer;feature2:..."
 request_coordinator_task() {
   local max_retries=3
   local retry=0
+
+  # ── VISION QUEUE PRIORITY CHECK (issue #1149) ────────────────────────────
+  # Check vision queue BEFORE the regular task queue. If a vision-queue item
+  # is a GitHub issue number, claim it. If it's a feature name, log it for the
+  # planner to action (create an issue) but don't block on a regular task claim.
+  local vision_queue
+  vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
+  if [ -n "$vision_queue" ]; then
+    log "Coordinator: vision queue has entries — checking priority items"
+    # Vision queue is semicolon-separated: "feature:description:ts:proposer;..."
+    local first_vq_entry
+    first_vq_entry=$(echo "$vision_queue" | cut -d';' -f1)
+    local vq_feature
+    vq_feature=$(echo "$first_vq_entry" | cut -d':' -f1)
+
+    if [[ "$vq_feature" =~ ^[0-9]+$ ]]; then
+      # Feature is a GitHub issue number — claim it with priority
+       log "Coordinator: vision-queue priority item is GitHub issue #$vq_feature"
+       if claim_task "$vq_feature" 2>/dev/null; then
+         # Remove from vision queue — handle single-item case (no semicolon)
+         local remaining_vq
+         if echo "$vision_queue" | grep -q ";"; then
+           remaining_vq=$(echo "$vision_queue" | sed 's/^[^;]*;//')
+         else
+           remaining_vq=""
+         fi
+         kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+           --type=merge \
+           -p "{\"data\":{\"visionQueue\":\"${remaining_vq}\"}}" 2>/dev/null || true
+         log "Coordinator: claimed vision-queue issue #$vq_feature (civilization-chosen goal)"
+         push_metric "VisionQueueTaskClaimed" 1
+         COORDINATOR_ISSUE="$vq_feature"
+         return 0
+       else
+         log "Coordinator: vision-queue issue #$vq_feature already claimed — falling through to task queue"
+       fi
+    else
+      # Feature is a named feature (not an issue number) — export it for planner to action
+      # The planner should create a GitHub issue for this feature
+      export VISION_QUEUE_FEATURE="$vq_feature"
+      export VISION_QUEUE_DESCRIPTION=$(echo "$first_vq_entry" | cut -d':' -f2)
+      log "Coordinator: vision-queue feature '${vq_feature}' needs a GitHub issue — exported as VISION_QUEUE_FEATURE"
+      # Don't consume this from the queue yet; planners will file an issue and add the number
+    fi
+  fi
 
   while [ $retry -lt $max_retries ]; do
     local queue
@@ -2995,6 +3091,14 @@ tracks who is working on what, and tallies votes.
   Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
   Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
   Read enacted:      kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
+  Read vision queue: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
+  Read vision log:   kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueueLog}'
+
+VISION QUEUE (issue #1149): Agents can propose civilization goals via governance.
+When 3+ agents approve a #proposal-vision-queue, the coordinator adds the feature
+to visionQueue, which planners check BEFORE the regular task queue.
+To propose: propose_vision_feature "feature-name" "description" [github-issue-num]
+To vote:    #vote-vision-queue approve feature=<name>
 
 If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
 If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
