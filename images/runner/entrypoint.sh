@@ -4054,6 +4054,42 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
     --jq --arg start "$AGENT_START_ISO" \
     '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null || echo "")
 
+  # ── Issue #939: Auto-enforce "Closes #N" in PR bodies ──────────────────────
+  # When OpenCode agents create PRs, they sometimes omit "Closes #N" or "Fixes #N".
+  # Without closing keywords, GitHub won't auto-close the issue on merge, causing
+  # future agents to re-implement the same work and create duplicate PRs.
+  # This block checks each session PR and patches the body if the keyword is missing.
+  # Issue #939: Resolve the issue number for this session (before WORKED_ISSUE is set at step 11.4).
+  # Priority: COORDINATOR_ISSUE (set by request_coordinator_task()) → /tmp/agentex-worked-issue
+  PR939_ISSUE="${COORDINATOR_ISSUE:-0}"
+  if [ "$PR939_ISSUE" = "0" ] || [ -z "$PR939_ISSUE" ]; then
+    PR939_ISSUE=$(cat /tmp/agentex-worked-issue 2>/dev/null | tr -d '[:space:]' || echo "0")
+  fi
+  if [ -n "$PR939_ISSUE" ] && [ "$PR939_ISSUE" != "0" ] && [ -n "$SESSION_PRS" ]; then
+    for pr_num in $SESSION_PRS; do
+      [ -z "$pr_num" ] && continue
+      # Check if the PR body already contains a closing keyword
+      PR939_BODY=$(gh pr view "$pr_num" --repo "$REPO" --json body --jq '.body // ""' \
+        2>/dev/null || echo "")
+      if [ -n "$PR939_BODY" ]; then
+        if ! echo "$PR939_BODY" | grep -qiE "(closes|fixes|resolves)\s+#${PR939_ISSUE}"; then
+          log "Issue #939: PR #$pr_num missing 'Closes #${PR939_ISSUE}' — patching PR body"
+          # Append closing keyword to PR body
+          PR939_NEW_BODY="${PR939_BODY}
+
+Closes #${PR939_ISSUE}"
+          gh pr edit "$pr_num" --repo "$REPO" --body "$PR939_NEW_BODY" 2>/dev/null && \
+            log "Issue #939: Added 'Closes #${PR939_ISSUE}' to PR #$pr_num body" || \
+            log "Issue #939: WARNING: Failed to patch PR #$pr_num body (non-fatal)"
+          push_metric "PRBodyAutoClose" 1 "Count" "PRNumber=${pr_num}"
+        else
+          log "Issue #939: PR #$pr_num already has closing keyword for issue #${PR939_ISSUE} ✓"
+        fi
+      fi
+    done
+  fi
+  # ── End issue #939 ──────────────────────────────────────────────────────────
+
   CI_FAILED=0
   for pr_num in $SESSION_PRS; do
     if ! wait_for_pr_ci "$pr_num"; then
