@@ -364,6 +364,23 @@ refresh_task_queue() {
 
     [ -z "$issues_json" ] && return 0
 
+    # Issue #1384: Fetch open PRs once and build a set of issue numbers already covered.
+    # This prevents dispatching agents to re-implement work already in an open PR.
+    # We parse "Closes #N" / "Fixes #N" patterns from PR bodies in a single API call.
+    local covered_issues=""
+    local prs_json
+    prs_json=$(gh pr list --repo "${GITHUB_REPO}" --state open --limit 100 \
+        --json number,body 2>/dev/null) || true
+    if [ -n "$prs_json" ]; then
+        covered_issues=$(echo "$prs_json" | \
+            jq -r '.[].body // ""' 2>/dev/null | \
+            grep -oiE '(closes|fixes|resolves) #[0-9]+' | \
+            grep -oE '[0-9]+' | sort -u | tr '\n' ' ')
+        local covered_count
+        covered_count=$(echo "$covered_issues" | wc -w | tr -d ' ')
+        echo "[$(date -u +%H:%M:%S)] Issue #1384: Found $covered_count issues with open PRs (will skip from queue): ${covered_issues:-none}"
+    fi
+
     # Build scored list: "score:number"
     local scored_issues=""
     local numbers
@@ -377,6 +394,12 @@ refresh_task_queue() {
         .number' 2>/dev/null | head -20)
 
     for num in $numbers; do
+        # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
+        if echo " $covered_issues " | grep -q " $num "; then
+            echo "[$(date -u +%H:%M:%S)] Issue #1384: Skipping issue #$num — open PR already exists"
+            continue
+        fi
+
         # Score based on labels already fetched (avoid extra API calls)
         local labels
         labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
