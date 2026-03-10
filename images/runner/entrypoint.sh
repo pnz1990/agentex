@@ -293,6 +293,199 @@ EOF
   fi
 }
 
+# ── proactive_issue_hunt() - v0.5 feature 3 (issue #1741) ────────────────────
+# Specialized agents actively seek issues in their domain instead of waiting
+# for bugs to be discovered during implementation. Called by planners/architects
+# AFTER step ② if no S-effort issue was found.
+#
+# Returns 0 if an issue was filed, 1 otherwise.
+proactive_issue_hunt() {
+  # Only planners and architects hunt proactively (workers execute assigned tasks)
+  if [[ "$AGENT_ROLE" != "planner" && "$AGENT_ROLE" != "architect" ]]; then
+    return 1
+  fi
+
+  log "Proactive issue hunt: checking if agent has specialization..."
+  
+  # Read agent's S3 identity to get specialization and code areas
+  local identity_path="s3://${S3_BUCKET}/identities/${AGENT_NAME}.json"
+  local identity_json
+  identity_json=$(aws s3 cp "$identity_path" - 2>/dev/null || echo "{}")
+  
+  if [ -z "$identity_json" ] || [ "$identity_json" = "{}" ]; then
+    log "No identity found at $identity_path — skipping proactive hunt"
+    return 1
+  fi
+  
+  local specialization
+  specialization=$(echo "$identity_json" | jq -r '.specialization // ""')
+  
+  if [ -z "$specialization" ] || [ "$specialization" = "null" ]; then
+    log "Agent has no specialization — skipping proactive hunt"
+    return 1
+  fi
+  
+  log "Proactive issue hunt: agent specialization=$specialization"
+  
+  # Extract code areas from specializationDetail.codeAreas
+  local code_areas
+  code_areas=$(echo "$identity_json" | jq -r '.specializationDetail.codeAreas // [] | join(" ")' 2>/dev/null)
+  
+  # Hunt based on specialization
+  case "$specialization" in
+    debugger)
+      log "Debugger specialist: scanning recent commits in code areas for common bug patterns..."
+      # Scan for common bug patterns in recent commits
+      if [ -n "$code_areas" ]; then
+        # Check last 10 commits for code areas this agent works on
+        local recent_commits
+        recent_commits=$(gh api "/repos/${REPO}/commits?per_page=10" 2>/dev/null | \
+          jq -r '.[].sha' 2>/dev/null || echo "")
+        
+        for sha in $recent_commits; do
+          for area in $code_areas; do
+            # Look for potentially problematic patterns in this area
+            local diff_output
+            diff_output=$(gh api "/repos/${REPO}/commits/${sha}" 2>/dev/null | \
+              jq -r --arg file "$area" '.files[] | select(.filename | contains($file)) | .patch // ""' 2>/dev/null || echo "")
+            
+            if [ -n "$diff_output" ]; then
+              # Check for common bug patterns
+              if echo "$diff_output" | grep -qE '(TODO|FIXME|XXX|HACK)'; then
+                log "Found TODO/FIXME marker in $area at commit $sha — consider filing issue"
+                gh issue create --repo "$REPO" --title "bug: code debt marker in $area (found by specialist)" \
+                  --label "bug,code-debt" --body "## Context
+
+Proactive issue hunt by specialized agent (v0.5 feature 3, issue #1741)
+
+## Problem
+
+Found code debt markers (TODO/FIXME/XXX/HACK) in $area at commit $sha.
+
+## Recommendation
+
+Review the markers and either:
+1. Fix the underlying issue
+2. Create a tracking issue for the work
+3. Remove the marker if no longer relevant
+
+Part of v0.5 Emergent Specialization — specialized agents proactively hunt for bugs in their domains." \
+                  2>/dev/null && return 0 || true
+                break 2  # Found and filed, exit both loops
+              fi
+            fi
+          done
+        done
+      fi
+      ;;
+      
+    architecture|architect)
+      log "Architecture specialist: reviewing recent PRs for design anti-patterns..."
+      # Check recent merged PRs for architectural issues
+      local recent_prs
+      recent_prs=$(gh pr list --repo "$REPO" --state merged --limit 5 --json number,mergedAt --jq '.[] | .number' 2>/dev/null || echo "")
+      
+      for pr_num in $recent_prs; do
+        # Check if PR modified protected files without proper review
+        local files_changed
+        files_changed=$(gh pr view "$pr_num" --repo "$REPO" --json files --jq '.files[].path' 2>/dev/null || echo "")
+        
+        local has_protected_file=false
+        for file in $files_changed; do
+          if [[ "$file" == "images/runner/entrypoint.sh" ]] || \
+             [[ "$file" == "AGENTS.md" ]] || \
+             [[ "$file" == manifests/rgds/*.yaml ]]; then
+            has_protected_file=true
+            break
+          fi
+        done
+        
+        if [ "$has_protected_file" = true ]; then
+          # Check if PR had constitution-aligned label
+          local labels
+          labels=$(gh pr view "$pr_num" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+          
+          if ! echo "$labels" | grep -q "constitution-aligned"; then
+            log "Found merged PR #$pr_num with protected files but missing constitution-aligned label"
+            gh issue create --repo "$REPO" --title "architecture: PR #$pr_num modified protected files without constitution-aligned label" \
+              --label "enhancement,architecture" --body "## Context
+
+Proactive issue hunt by architecture specialist (v0.5 feature 3, issue #1741)
+
+## Problem
+
+PR #$pr_num modified protected files but did not have the \`constitution-aligned\` label required by AGENTS.md god-approved workflow.
+
+Protected files modified: $files_changed
+
+## Recommendation
+
+Review PR #$pr_num for compliance with constitution safety boundaries. If the changes were appropriate, this is a process gap (label should have been added). If changes were inappropriate, consider reverting.
+
+Part of v0.5 Emergent Specialization — architecture specialists proactively review for design anti-patterns." \
+              2>/dev/null && return 0 || true
+            break  # Found and filed
+          fi
+        fi
+      done
+      ;;
+      
+    coordinator)
+      log "Coordinator specialist: auditing coordinator-state for anomalies..."
+      # Check coordinator-state for stale assignments or orphaned votes
+      local active_assignments
+      active_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+      
+      if [ -n "$active_assignments" ]; then
+        # Count stale assignments (agents that completed > 1 hour ago)
+        local stale_count=0
+        for assignment in $(echo "$active_assignments" | tr ',' '\n'); do
+          local agent_name
+          agent_name=$(echo "$assignment" | cut -d: -f1)
+          # Check if agent Job still exists
+          if ! kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" &>/dev/null; then
+            stale_count=$((stale_count + 1))
+          fi
+        done
+        
+        if [ "$stale_count" -gt 5 ]; then
+          log "Found $stale_count stale assignments in coordinator-state"
+          gh issue create --repo "$REPO" --title "bug: coordinator has $stale_count stale assignments not cleaned up" \
+            --label "bug,coordinator" --body "## Context
+
+Proactive issue hunt by coordinator specialist (v0.5 feature 3, issue #1741)
+
+## Problem
+
+coordinator-state.activeAssignments contains $stale_count entries for agents whose Jobs no longer exist. Cleanup frequency may need adjustment.
+
+## Impact
+
+Stale assignments prevent those issues from being reassigned to new workers, blocking progress.
+
+## Recommendation
+
+1. Review coordinator cleanup_stale_assignments() frequency (currently 30s)
+2. Investigate why cleanup is not catching these entries
+3. Consider shorter TTL or more aggressive cleanup
+
+Part of v0.5 Emergent Specialization — coordinator specialists proactively audit state for anomalies." \
+            2>/dev/null && return 0 || true
+        fi
+      fi
+      ;;
+      
+    *)
+      log "No proactive hunt logic for specialization=$specialization"
+      return 1
+      ;;
+  esac
+  
+  log "Proactive issue hunt complete — no issues filed this run"
+  return 1
+}
+
 # ── Cleanup function for EXIT trap (issue #750) ──────────────────────────────
 # This function MUST run on ALL exit paths (normal, error, early return) to
 # prevent kro re-spawn loops. Without this, agents that exit early (circuit
@@ -3750,6 +3943,11 @@ PLANNER RULES:
 - Propose and vote on governance changes
 - Keep the thought stream signal-high: insight + planning + proposal thoughts only
 - Do NOT spawn more than 2-3 workers per planner run (circuit breaker limit is ${CIRCUIT_BREAKER_LIMIT})
+- V0.5 FEATURE (issue #1741): If you have a specialization, call proactive_issue_hunt() after
+  step ② to actively seek bugs in your domain. This function is defined in entrypoint.sh and
+  available for you to call. It scans for issues based on your specialization (debugger scans
+  for code debt markers, architecture specialist reviews PRs for anti-patterns, coordinator
+  specialist audits state for anomalies). Returns 0 if an issue was filed, 1 otherwise.
 ${UNRESOLVED_DEBATES_BLOCK}
 ${VISION_QUEUE_BLOCK}
 THOUGHT CRs for planners: insight, planning, proposal, vote — all appropriate.
