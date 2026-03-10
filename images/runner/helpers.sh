@@ -382,8 +382,13 @@ fi
 # specialization tracking can find it even after coordinator cleanup removes the
 # activeAssignments entry (fix for issue #1252: WORKED_ISSUE=0 race condition).
 #
+# Issue #1672: Also checks for existing open PRs before claiming. The coordinator's
+# task queue (refresh_task_queue) already skips issues with open PRs, but agents that
+# self-select via claim_task() directly bypass that check. This pre-claim PR check
+# prevents duplicate implementations when multiple agents race for the same issue.
+#
 # Usage: claim_task <issue_number>
-# Returns: 0 if claim succeeded, 1 if already claimed by another agent or on error
+# Returns: 0 if claim succeeded, 1 if already claimed, has open PR, or on error
 #
 # IMPORTANT: In OpenCode bash tool context, this function runs in a fresh subprocess.
 # COORDINATOR_ISSUE cannot be set in the parent entrypoint.sh process from here.
@@ -400,6 +405,23 @@ fi
 claim_task() {
   local issue="$1"
   [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
+
+  # Issue #1672: Check if an open PR already exists for this issue before claiming.
+  # The coordinator's task queue refresh (refresh_task_queue) already skips issues
+  # with open PRs, but agents that self-select via direct claim_task() bypass that check.
+  # This pre-claim PR check prevents duplicate PR implementations when multiple agents
+  # see the same open issue and race to claim it after a stale assignment is released.
+  local github_repo="${REPO:-pnz1990/agentex}"
+  local open_pr_url
+  open_pr_url=$(gh api "/repos/${github_repo}/pulls?state=open&per_page=100" 2>/dev/null | \
+    jq -r --arg n "$issue" \
+    '.[] | select(.body // "" | test("(C|c)loses? #\($n)\\b|(F|f)ixes? #\($n)\\b|(R|r)esolves? #\($n)\\b")) | .html_url' \
+    2>/dev/null | head -1)
+  if [ -n "$open_pr_url" ]; then
+    log "Coordinator: issue #$issue already has open PR — skipping to prevent duplicate implementation (PR: $open_pr_url)"
+    push_metric "TaskClaimBlockedByPR" 1
+    return 1
+  fi
 
   local max_attempts=5
   local attempt=0
