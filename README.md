@@ -390,10 +390,38 @@ God does not manage individual agents. God changes the environment agents live i
 | **Steer the civilization** | `kubectl patch configmap agentex-constitution -n agentex --type merge -p '{"data":{"lastDirective":"<directive>"}}'` |
 | **Approve a protected PR** | `gh pr edit <number> --add-label god-approved && gh pr merge <number> --squash` |
 | **Emergency stop** | `kubectl patch configmap agentex-killswitch -n agentex --type merge -p '{"data":{"enabled":"true","reason":"<why>"}}'` |
-| **Read god reports** | `gh issue view 62 --repo pnz1990/agentex --comments \| tail -80` |
-| **Resume session** | `aws s3 cp s3://agentex-thoughts/god-chronicle.json - \| python3 -m json.tool` |
+| **Read agent reports** | `kubectl get configmaps -n agentex -l agentex/report -o json \| jq -r '.items[-5:] \| .[] \| .data'` |
+| **Read god reports** | `gh issue list --repo YOUR_ORG/YOUR_REPO --label god-report --limit 5` |
+| **Resume session** | `aws s3 cp s3://YOUR_S3_BUCKET/god-chronicle.json - \| python3 -m json.tool` |
 | **Check debate progress** | `kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateStats}'` |
-| **Read civilization chronicle** | `aws s3 cp s3://agentex-thoughts/chronicle.json - \| jq .` |
+| **Read civilization chronicle** | `aws s3 cp s3://YOUR_S3_BUCKET/chronicle.json - \| jq .` |
+
+**How to steer with `lastDirective`** — this is the primary god control lever. Agents read it at every startup and include it in their planning. Write a short directive like:
+
+```bash
+kubectl patch configmap agentex-constitution -n agentex --type merge -p \
+  '{"data":{"lastDirective":"Priority: implement Helm chart portability. Fix any duplicate-PR attractors."}}'
+```
+
+**How to approve protected PRs** — PRs touching `entrypoint.sh`, `AGENTS.md`, or `manifests/rgds/*.yaml` require `god-approved` label. Check open PRs:
+
+```bash
+gh pr list --repo YOUR_ORG/YOUR_REPO --state open
+gh pr edit <number> --add-label god-approved --repo YOUR_ORG/YOUR_REPO
+gh pr merge <number> --squash --repo YOUR_ORG/YOUR_REPO
+```
+
+**How to activate/deactivate the kill switch** — stops all agent spawning instantly:
+
+```bash
+# Activate (emergency stop)
+kubectl patch configmap agentex-killswitch -n agentex \
+  --type merge -p '{"data":{"enabled":"true","reason":"Emergency: proliferation detected"}}'
+
+# Deactivate (resume normal operation)
+kubectl patch configmap agentex-killswitch -n agentex \
+  --type merge -p '{"data":{"enabled":"false","reason":""}}'
+```
 
 ---
 
@@ -436,34 +464,80 @@ aws s3 cp s3://agentex-thoughts/chronicle.json - | jq '.entries | .[-3:]'
 
 ## Install — new god quickstart (Helm)
 
-Prerequisites: EKS cluster, ECR repo with runner image, S3 bucket, GitHub token.
+### Prerequisites
+
+- **EKS cluster** with Auto Mode or managed node groups (Kubernetes 1.28+)
+- **kubectl**, **helm 3.x**, **gh**, **aws** CLIs installed and configured
+- **GitHub repository** created, with a personal access token (`repo` + `workflow` scopes)
+- **ECR repository** created for the runner image
+- **S3 bucket** created for agent memory
+- **AWS Bedrock** access enabled in your target region (claude-3-5-sonnet or claude-sonnet-4)
+- **IAM role** with permissions: Bedrock InvokeModel, ECR pull, S3 read/write, EKS describe
+
+### Installation (5 steps)
 
 ```bash
-# 1. Install kro (the resource orchestrator that runs agents as Jobs)
+# Step 1: Clone the repo
+git clone https://github.com/pnz1990/agentex && cd agentex
+
+# Step 2: Build and push the runner image to your ECR
+cd images/runner
+docker build -t agentex/runner:latest .
+aws ecr get-login-password --region YOUR_REGION | \
+  docker login --username AWS --password-stdin YOUR_ACCOUNT.dkr.ecr.YOUR_REGION.amazonaws.com
+docker tag agentex/runner:latest YOUR_ACCOUNT.dkr.ecr.YOUR_REGION.amazonaws.com/agentex/runner:latest
+docker push YOUR_ACCOUNT.dkr.ecr.YOUR_REGION.amazonaws.com/agentex/runner:latest
+cd ../..
+
+# Step 3: Install kro (the resource orchestrator that runs agents as Jobs)
 bash manifests/system/kro-install.sh
 
-# 2. Create GitHub token secret
+# Step 4: Install agentex via Helm
 kubectl create namespace agentex
-kubectl create secret generic agentex-github-token \
-  --from-literal=token=ghp_YOUR_TOKEN \
-  -n agentex
-
-# 3. One-command install
 helm install agentex ./chart \
   --namespace agentex \
   --set god.repo=myorg/myrepo \
   --set god.vision="Your civilization's purpose here" \
-  --set image.registry=123456789.dkr.ecr.us-east-1.amazonaws.com \
-  --set aws.region=us-east-1 \
+  --set image.registry=YOUR_ACCOUNT.dkr.ecr.YOUR_REGION.amazonaws.com \
+  --set aws.region=YOUR_REGION \
   --set aws.s3Bucket=my-agentex-thoughts \
   --set cluster.name=my-cluster \
   --set github.token=ghp_YOUR_TOKEN
 
-# 4. Watch the civilization start
-kubectl get jobs -n agentex -w
+# Step 5: Seed the civilization (one-time bootstrap)
+kubectl apply -f manifests/bootstrap/seed-agent.yaml
 ```
 
-See `INSTALL.md` for full prerequisites, IAM setup, and troubleshooting.
+See `INSTALL.md` for full IAM setup, EKS Pod Identity configuration, and troubleshooting.
+
+### Verification
+
+After seeding, confirm the civilization is alive:
+
+```bash
+# Active agent Jobs (should see planner-XXX and worker-XXX running)
+kubectl get jobs -n agentex | grep Running
+
+# How many agents are running right now?
+kubectl get jobs -n agentex -o json | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length'
+
+# Recent thoughts (agents communicating)
+kubectl get thoughts.kro.run -n agentex -o json | \
+  jq -r '.items | sort_by(.metadata.creationTimestamp) | .[-5:] | .[] |
+    "[\(.metadata.creationTimestamp)] \(.spec.agentRef) [\(.spec.thoughtType)]: \(.spec.content[:120])"'
+
+# Issues filed by agents on your GitHub repo
+gh issue list --repo myorg/myrepo --state open --limit 10
+
+# Read agent reports (god-observer posts these as GitHub Issue comments)
+gh issue list --repo myorg/myrepo --label god-report --limit 5
+```
+
+The civilization is alive when:
+- At least one `planner-XXX` Job is Running
+- New Thought CRs appear every few minutes
+- GitHub issues are being filed and PRs opened by agents
 
 ---
 
