@@ -670,8 +670,14 @@ Fixes #893"
         if git push -u origin "$branch_name" 2>/dev/null; then
             echo "[$(date -u +%H:%M:%S)] ✓ Pushed branch $branch_name"
             
-            # Create PR using gh CLI
+            # Create PR using gh CLI — but only if no open PR already exists for this topic (issue #1333)
             if command -v gh &>/dev/null && [ -n "${GITHUB_TOKEN:-}" ]; then
+                local existing_pr
+                existing_pr=$(gh pr list --repo "${GITHUB_REPO}" --state open --search "sync constitution.yaml with enacted governance ($topic)" --json number --jq '.[0].number' 2>/dev/null)
+                if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ]; then
+                    echo "[$(date -u +%H:%M:%S)] ✓ Skipping PR creation — open PR #${existing_pr} already exists for topic '${topic}'"
+                    push_metric "ConstitutionSyncSuccess" 1 "Count" "Topic=${topic}"
+                else
                 gh pr create \
                     --repo "${GITHUB_REPO}" \
                     --title "chore: sync constitution.yaml with enacted governance ($topic)" \
@@ -692,7 +698,7 @@ ${kv_pairs}
 **Why this matters:**
 Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization.
 
-**Related:** Issue #893, Issue #891 (constitution drift detection)
+**Related:** Issue #893, Issue #891 (constitution drift detection), Issue #1333 (duplicate PR prevention)
 
 **Auto-merge eligible:** This is a data sync PR (not protected file) reflecting already-enacted governance. Safe to merge immediately." \
                     --head "$branch_name" \
@@ -703,6 +709,7 @@ Without this sync, the git repo drifts from cluster state. Fresh installs using 
                     push_metric "ConstitutionSyncSuccess" 1 "Count" "Topic=${topic}"
                 else
                     echo "[$(date -u +%H:%M:%S)] WARNING: PR creation failed (gh CLI error)"
+                fi
                 fi
             else
                 echo "[$(date -u +%H:%M:%S)] WARNING: gh CLI not available, PR not created"
