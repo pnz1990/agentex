@@ -619,6 +619,10 @@ query_thoughts() {
 
 # cleanup_old_thoughts() - Delete thoughts older than 24 hours to prevent clutter
 # Should be called periodically by planners
+# Issue #1020: With 6000+ Thought CRs, listing takes 10+ seconds (25MB response).
+# The old 10s timeout caused silent failures — old thoughts were never deleted.
+# Fix: use 90s timeout for listing (list is slow but deletion per-item is fast).
+# Also cap deletions at 50 per run to bound execution time.
 cleanup_old_thoughts() {
   local cutoff_time=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
   
@@ -627,7 +631,10 @@ cleanup_old_thoughts() {
     return 0
   fi
   
-  local old_thoughts=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
+  # Issue #1020: Use 90s timeout — listing 6000+ CRs returns ~25MB and takes 10+ seconds.
+  # The previous 10s kubectl_with_timeout silently failed, leaving 100+ old thoughts undeleted.
+  local old_thoughts
+  old_thoughts=$(kubectl_with_timeout 90 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
     jq -r --arg cutoff "$cutoff_time" \
     '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
   
@@ -636,8 +643,14 @@ cleanup_old_thoughts() {
     return 0
   fi
   
+  # Cap deletions at 50 per planner run to bound execution time
+  local max_deletions=50
   local count=0
   for thought_name in $old_thoughts; do
+    if [ $count -ge $max_deletions ]; then
+      log "Reached max deletions ($max_deletions) for this run — remaining old thoughts will be cleaned next run"
+      break
+    fi
     if kubectl_with_timeout 10 delete thought.kro.run "$thought_name" -n "$NAMESPACE" 2>/dev/null; then
       count=$((count + 1))
     fi
