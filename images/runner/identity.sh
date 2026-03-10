@@ -96,7 +96,32 @@ claim_identity() {
       
       AGENT_DISPLAY_NAME="$claimed_name"
       echo "[identity] Successfully claimed name: $AGENT_DISPLAY_NAME"
-      save_identity
+
+      # Issue #1483: Load canonical history for cross-generation inheritance.
+      # When a previous agent released this name, they wrote accumulated specialization
+      # to s3://bucket/identities/canonical/<display_name>.json. Load it now so this agent
+      # inherits the specialization history and benefits from prior work under this name.
+      local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${claimed_name}.json"
+      local canonical_json=""
+      if aws s3 ls "$canonical_path" >/dev/null 2>&1; then
+        canonical_json=$(aws s3 cp "$canonical_path" - 2>/dev/null || echo "")
+      fi
+
+      if [[ -n "$canonical_json" ]]; then
+        # Inherit specialization from prior agent who held this name
+        AGENT_SPECIALIZATION=$(echo "$canonical_json" | jq -r '.specialization // ""')
+        local inherited_labels
+        inherited_labels=$(echo "$canonical_json" | jq -c '.specializationLabelCounts // {}')
+        local inherited_stats
+        inherited_stats=$(echo "$canonical_json" | jq -r '.stats.tasksCompleted // 0')
+        echo "[identity] Inherited specialization history for '$claimed_name' (prior spec: $AGENT_SPECIALIZATION, tasks: $inherited_stats)"
+        [[ -n "$AGENT_SPECIALIZATION" ]] && echo "[identity] Specialization: $AGENT_SPECIALIZATION"
+        # Save new identity inheriting the canonical history
+        save_identity_with_inheritance "$canonical_json"
+      else
+        echo "[identity] No prior canonical history for '$claimed_name' — starting fresh"
+        save_identity
+      fi
       return 0
     else
       echo "[identity] Failed to claim $claimed_name (already taken or race condition)"
@@ -211,10 +236,105 @@ EOF
   if echo "$identity_json" | aws s3 cp - "$s3_path" 2>/dev/null; then
     echo "[identity] Saved identity to S3: $s3_path"
     AGENT_IDENTITY_FILE="$s3_path"
+
+    # Issue #1483: Also write canonical file by display name for cross-generation history inheritance.
+    # When the next agent claims the same display name (after release_identity() makes it available),
+    # claim_identity() loads this canonical file to inherit accumulated specialization history.
+    # Path: s3://bucket/identities/canonical/<display_name>.json
+    if [[ -n "$AGENT_DISPLAY_NAME" ]]; then
+      local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+      if echo "$identity_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+        echo "[identity] Saved canonical history to S3: $canonical_path"
+      else
+        echo "[identity] WARNING: Could not save canonical history (non-fatal — cross-gen inheritance may fail)"
+      fi
+    fi
   else
     echo "[identity] WARNING: Could not save identity to S3 (bucket may not exist yet)"
     echo "[identity] Identity will not persist across restarts until S3 is configured"
     # Not a fatal error - continue without persistence
+  fi
+}
+
+#######################################
+# Save identity inheriting specialization history from a prior agent
+# Used by claim_identity() when reclaiming a registry name (issue #1483).
+# Merges prior agent's specializationLabelCounts and stats with current agent's identity.
+# Arguments:
+#   $1 - prior_identity_json (JSON string from canonical S3 file)
+# Globals:
+#   AGENT_NAME, AGENT_DISPLAY_NAME, AGENT_ROLE, AGENT_SPECIALIZATION
+#######################################
+save_identity_with_inheritance() {
+  local prior_json="${1:-}"
+  local generation
+  generation=$(timeout 10s kubectl get agent.kro.run "$AGENT_NAME" -n agentex \
+    -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+
+  # Inherit accumulated specialization from prior agent
+  local spec_label_counts spec_code_areas spec_debates_won spec_synthesis_count
+  local tasks_completed issues_filed prs_merged thoughts_posted
+
+  if [[ -n "$prior_json" ]]; then
+    spec_label_counts=$(echo "$prior_json" | jq -c '.specializationLabelCounts // {}')
+    spec_code_areas=$(echo "$prior_json" | jq -c '.specializationDetail.codeAreas // {}')
+    spec_debates_won=$(echo "$prior_json" | jq -r '.specializationDetail.debatesWon // 0')
+    spec_synthesis_count=$(echo "$prior_json" | jq -r '.specializationDetail.synthesisCount // 0')
+    tasks_completed=$(echo "$prior_json" | jq -r '.stats.tasksCompleted // 0')
+    issues_filed=$(echo "$prior_json" | jq -r '.stats.issuesFiled // 0')
+    prs_merged=$(echo "$prior_json" | jq -r '.stats.prsMerged // 0')
+    thoughts_posted=$(echo "$prior_json" | jq -r '.stats.thoughtsPosted // 0')
+  else
+    spec_label_counts="{}"
+    spec_code_areas="{}"
+    spec_debates_won=0
+    spec_synthesis_count=0
+    tasks_completed=0
+    issues_filed=0
+    prs_merged=0
+    thoughts_posted=0
+  fi
+
+  local specialization_value="${AGENT_SPECIALIZATION:-}"
+  local s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${AGENT_NAME}.json"
+
+  local identity_json
+  identity_json=$(cat <<EOF
+{
+  "agentName": "$AGENT_NAME",
+  "displayName": "$AGENT_DISPLAY_NAME",
+  "role": "$AGENT_ROLE",
+  "generation": $generation,
+  "claimedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "specialization": "$specialization_value",
+  "specializationLabelCounts": $spec_label_counts,
+  "specializationDetail": {
+    "codeAreas": $spec_code_areas,
+    "debatesWon": $spec_debates_won,
+    "synthesisCount": $spec_synthesis_count
+  },
+  "stats": {
+    "tasksCompleted": $tasks_completed,
+    "issuesFiled": $issues_filed,
+    "prsMerged": $prs_merged,
+    "thoughtsPosted": $thoughts_posted
+  }
+}
+EOF
+)
+
+  if echo "$identity_json" | aws s3 cp - "$s3_path" 2>/dev/null; then
+    echo "[identity] Saved inherited identity to S3: $s3_path (inherited from prior '$AGENT_DISPLAY_NAME')"
+    AGENT_IDENTITY_FILE="$s3_path"
+
+    # Update canonical file with new agent name
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$identity_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical history: $canonical_path"
+    fi
+  else
+    echo "[identity] WARNING: Could not save inherited identity to S3 (non-fatal)"
+    save_identity  # Fall back to standard save
   fi
 }
 
