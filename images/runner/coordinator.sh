@@ -444,15 +444,19 @@ score_issue() {
 refresh_task_queue() {
     echo "[$(date -u +%H:%M:%S)] Refreshing task queue from GitHub (vision-priority sorted)..."
 
-    # Check if gh is available and authenticated
-    if ! gh auth status &>/dev/null 2>&1; then
-        echo "[$(date -u +%H:%M:%S)] WARNING: gh CLI not authenticated, skipping queue refresh"
+    # Issue #1570: Use REST API instead of GraphQL to avoid rate-limit failures.
+    # gh auth status and gh issue list --json both use GraphQL, which is rate-limited
+    # separately from the REST API. During high agent activity (7+ concurrent agents),
+    # GraphQL exhaustion causes refresh_task_queue() to return early without updating
+    # taskQueue, leaving stale closed issues (e.g., #1536) in the queue indefinitely.
+    # Fix: use gh api (REST) for both the liveness check and the issues fetch.
+    if ! gh api /repos/${GITHUB_REPO}/issues?state=open\&per_page=1 &>/dev/null 2>&1; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: GitHub REST API unavailable, skipping queue refresh"
         return 0
     fi
 
     local issues_json
-    issues_json=$(gh issue list --repo "${GITHUB_REPO}" --state open --limit 50 \
-        --json number,labels,title 2>/dev/null) || true
+    issues_json=$(gh api "/repos/${GITHUB_REPO}/issues?state=open&per_page=50" 2>/dev/null) || true
 
     [ -z "$issues_json" ] && return 0
 
@@ -461,8 +465,8 @@ refresh_task_queue() {
     # We parse "Closes #N" / "Fixes #N" patterns from PR bodies in a single API call.
     local covered_issues=""
     local prs_json
-    prs_json=$(gh pr list --repo "${GITHUB_REPO}" --state open --limit 100 \
-        --json number,body 2>/dev/null) || true
+    # Issue #1570: Use REST API (gh api) instead of gh pr list --json (GraphQL) for rate-limit resilience.
+    prs_json=$(gh api "/repos/${GITHUB_REPO}/pulls?state=open&per_page=100" 2>/dev/null) || true
     if [ -n "$prs_json" ]; then
         covered_issues=$(echo "$prs_json" | \
             jq -r '.[].body // ""' 2>/dev/null | \
@@ -488,7 +492,10 @@ refresh_task_queue() {
     # Strategy: Query ALL open issues, then filter out meta-issues only.
     # This ensures queue is never empty when actionable work exists.
     echo "[$(date -u +%H:%M:%S)] Fetching all actionable open issues (including unlabeled)..."
+    # Issue #1570: Also filter out pull_request entries — REST /issues endpoint includes PRs.
+    # GraphQL gh issue list excludes PRs automatically; REST does not.
     numbers=$(echo "$issues_json" | jq -r '.[] |
+        select(.pull_request == null) |
         select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
         .number' 2>/dev/null | head -20)
 
@@ -501,7 +508,7 @@ refresh_task_queue() {
 
         # Score based on labels already fetched (avoid extra API calls)
         local labels
-        labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
+        labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.pull_request == null) | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
 
         # Issue #1442: Accumulate label data for issueLabels cache (only for labeled issues)
         if [ -n "$labels" ]; then
