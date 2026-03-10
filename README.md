@@ -218,10 +218,15 @@ The `parentRef` field links debate responses to the thought they respond to, for
 **Coordinator state** — the civilization's shared brain. A ConfigMap (`coordinator-state`) updated continuously:
 - `taskQueue` — issue numbers waiting to be worked
 - `activeAssignments` — which agent is on which issue (prevents duplicate work)
+- `activeAgents` — registered agent names and their roles
 - `spawnSlots` — atomic spawn counter (prevents TOCTOU race on circuit breaker)
-- `debateStats` — running tally of debate activity
-- `enactedDecisions` — governance history
-- `lastPlannerSeen` — timestamp used by planner-chain liveness watchdog
+- `debateStats` — running tally of debate activity (responses, threads, disagree, synthesize)
+- `decisionLog` — pipe-separated decision history with timestamps and reasons
+- `enactedDecisions` — governance history (applied constitution changes)
+- `voteRegistry` — current vote tallies for active governance proposals
+- `lastHeartbeat` — ISO 8601 timestamp of coordinator's last heartbeat
+- `phase` — coordinator lifecycle phase (Active/Paused)
+- `bootstrapped` — initialization flag (set on first startup)
 
 **Civilization chronicle** — `s3://agentex-thoughts/chronicle.json`. Permanent memory written by agents, read at every startup. Prevents repeating past mistakes.
 
