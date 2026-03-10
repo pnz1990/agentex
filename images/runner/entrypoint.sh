@@ -1609,8 +1609,9 @@ request_coordinator_task() {
 
        # Issue #1362: Validate the issue is still OPEN before claiming
        # (mirrors the closed-issue check in the regular queue path at issue #1015)
-       local vq_issue_state
-       vq_issue_state=$(gh issue view "$vq_feature" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+        local vq_issue_state
+        # Issue #1586: Use REST API instead of GraphQL (gh issue view --json uses GraphQL which is rate-limited)
+        vq_issue_state=$(gh api "repos/${REPO}/issues/${vq_feature}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "NOT_FOUND")
        if [ "$vq_issue_state" != "OPEN" ]; then
          log "Coordinator: vision-queue issue #$vq_feature is $vq_issue_state — removing from visionQueue"
          # Remove this closed item from visionQueue to prevent future agents from hitting it
@@ -1758,12 +1759,16 @@ request_coordinator_task() {
     # The coordinator queue may be stale and contain closed issues.
     # If the issue is closed, release the claim and remove from queue to avoid
     # wasting agent sessions on already-resolved work.
-    local issue_state
-    issue_state=$(gh issue view "$claimed_issue" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")  # issue #1066: was GITHUB_REPO (undefined), correct var is REPO
-    if [ "$issue_state" != "OPEN" ]; then
-      log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and removing from queue"
-      # Release the claim atomically
-      release_coordinator_task "$claimed_issue"
+     local issue_state
+     # Issue #1586: Use REST API instead of GraphQL (gh issue view --json uses GraphQL which is rate-limited).
+     # Under heavy agent load, GraphQL rate limits are hit quickly, causing issue_state=NOT_FOUND,
+     # which then causes agents to try to release an unclaimed issue, fail, and crash (set -euo pipefail).
+     issue_state=$(gh api "repos/${REPO}/issues/${claimed_issue}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "NOT_FOUND")
+     if [ "$issue_state" != "OPEN" ]; then
+       log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and removing from queue"
+       # Release the claim atomically. Use || true: if release fails (e.g. agent didn't actually
+       # claim this issue, or concurrent modification), don't crash — just continue to next retry.
+       release_coordinator_task "$claimed_issue" || true
       # Remove from queue to prevent future agents from wasting time on it
       local new_queue
       new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
@@ -2475,9 +2480,10 @@ spawn_task_and_agent() {
   local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}" bypass_killswitch="${9:-false}" capacity_type="${10:-on-demand}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
-  # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
+   # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
   if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
-    local issue_state=$(gh issue view "$issue" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+    # Issue #1586: Use REST API instead of GraphQL (gh issue view --json uses GraphQL which rate-limits fast)
+    local issue_state=$(gh api "repos/${REPO}/issues/${issue}" --jq '.state' 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "NOT_FOUND")
     
     if [ "$issue_state" = "NOT_FOUND" ]; then
       log "ERROR: GitHub issue #${issue} does not exist. Skipping spawn."
@@ -4339,18 +4345,12 @@ if [ "$NEEDS_EMERGENCY_SPAWN" = true ]; then
    # Default role cycling to ensure the platform keeps improving itself
     case "$AGENT_ROLE" in
       worker)
-        # Issue #947: single-planner constraint — before spawning a planner,
-        # verify no planner is already running (TOCTOU race: two workers completing
-        # simultaneously both see no successor and both spawn planners).
-        ACTIVE_PLANNERS_COUNT=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-          jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0) | select(.metadata.name | test("planner"))] | length' 2>/dev/null || echo "0")
-        if [ "$ACTIVE_PLANNERS_COUNT" -gt 0 ]; then
-          log "Single-planner constraint: $ACTIVE_PLANNERS_COUNT planner(s) already active. Spawning worker instead."
-          NEXT_ROLE="worker"
-        else
-          NEXT_ROLE="planner"
-        fi
-        ;;
+         # The planner-loop Deployment handles planner perpetuation exclusively.
+         # Workers MUST NOT spawn planners — doing so creates TOCTOU races where
+         # multiple workers completing simultaneously all see 0 planners and each
+         # spawn a planner, causing cascades of 20+ planners (issue #1600).
+         NEXT_ROLE="worker"
+         ;;
       planner)   NEXT_ROLE="worker" ;;
       reviewer)  NEXT_ROLE="worker" ;;
       architect) NEXT_ROLE="worker" ;;
