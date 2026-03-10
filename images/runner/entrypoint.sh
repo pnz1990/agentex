@@ -1747,21 +1747,29 @@ release_coordinator_task() {
 }
 
 # register_with_coordinator() - Announce this agent's presence to the coordinator
+# Issue #1499: Also register displayName (3rd field) so the coordinator can look up
+# specialization history by canonical S3 path (identities/canonical/<displayName>.json)
+# rather than ephemeral agent_name path which has no prior history for new pods.
+# Format: "agent_name:role:displayName" (backward compat: old 2-field entries treated
+# as displayName==agent_name by coordinator parser)
 register_with_coordinator() {
   local current
   current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.activeAgents}' 2>/dev/null || echo "")
 
+  # Include displayName (set by identity.sh); fall back to agent_name if unset
+  local display_name="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
+
   local new_val
   if [ -z "$current" ]; then
-    new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    new_val="${AGENT_NAME}:${AGENT_ROLE}:${display_name}"
   else
     # Deduplicate: remove any prior entry for this agent then add fresh
     # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
     # (no matches), which would crash the script under set -euo pipefail
     new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
     new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
-    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}:${display_name}" || new_val="${AGENT_NAME}:${AGENT_ROLE}:${display_name}"
   fi
 
   # Build patch data — include lastPlannerSeen timestamp for planners (issue #1274)

@@ -1997,14 +1997,20 @@ update_identity_bucket_from_constitution() {
 #   $2 - issue_number
 #   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
 #   $4 - issue_keywords (space-separated keywords from title/body)
+#   $5 - display_name (optional: persistent display name from identity.sh, e.g., worker-clear-matrix)
+#          When provided, coordinator falls back to identities/canonical/<display_name>.json
+#          (written by save_identity() in PR #1489) when the per-session file has no history.
+#          Issue #1499: fixes path mismatch — coordinator must use canonical/ prefix to match
+#          what identity.sh writes.
 # Returns: integer score via stdout (0 if agent has no specialization data)
 score_agent_for_issue() {
     local agent_name="$1"
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    local display_name="${5:-}"
 
-    # Read agent identity from S3
+    # Read agent identity from S3 (ephemeral per-session file: identities/<agent_name>.json)
     local identity_json
     identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
         --region "$BEDROCK_REGION" 2>/dev/null || echo "")
@@ -2024,6 +2030,26 @@ score_agent_for_issue() {
     has_label_data=$(echo "$identity_json" | jq -r \
         'if (.specializationLabelCounts | length) > 0 or (.specializationDetail.codeAreas | length) > 0 then "yes" else "" end' \
         2>/dev/null || echo "")
+
+    # Issue #1499: fall back to canonical/<displayName>.json if per-session file has no history.
+    # identity.sh save_identity() writes to identities/canonical/<displayName>.json (PR #1489).
+    # This file persists across agent generations for the same displayName (e.g., worker-clear-matrix)
+    # so even brand-new pod sessions can benefit from prior specialization history.
+    if [ -z "$has_label_data" ] && [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+        local canonical_identity
+        canonical_identity=$(aws s3 cp \
+            "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        if [ -n "$canonical_identity" ]; then
+            identity_json="$canonical_identity"
+            has_label_data=$(echo "$identity_json" | jq -r \
+                'if (.specializationLabelCounts | length) > 0 or (.specializationDetail.codeAreas | length) > 0 then "yes" else "" end' \
+                2>/dev/null || echo "")
+            [ -n "$has_label_data" ] && \
+                echo "[$(date -u +%H:%M:%S)] Using canonical identity for $agent_name ($display_name)" >&2
+        fi
+    fi
+
     if [ -z "$has_label_data" ]; then
         echo "0"
         return 0
@@ -2135,7 +2161,14 @@ find_best_agent_for_issue() {
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        local agent_role="${pair##*:}"
+        # Parse role from 2nd field (format: "agent_name:role" or "agent_name:role:displayName")
+        local agent_role
+        agent_role=$(echo "$pair" | cut -d: -f2)
+        # Parse displayName from 3rd field (issue #1499); fall back to agent_name if absent
+        # Registered by register_with_coordinator() in entrypoint.sh as name:role:displayName
+        local agent_display_name
+        agent_display_name=$(echo "$pair" | cut -d: -f3)
+        [ -z "$agent_display_name" ] && agent_display_name="$agent_name"
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
@@ -2147,10 +2180,12 @@ find_best_agent_for_issue() {
         fi
 
         local agent_score
+        # Pass displayName as 5th arg so score_agent_for_issue can fall back to
+        # identities/canonical/<displayName>.json for accumulated specialization history (issue #1499)
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+            "$issue_labels" "$issue_keywords" "$agent_display_name")
 
-        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
+        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name ($agent_display_name) on issue #$issue_number: $agent_score" >&2
 
         if [ "$agent_score" -gt "$best_score" ]; then
             best_score="$agent_score"
@@ -2286,13 +2321,25 @@ route_tasks_by_specialization() {
             local aname
             aname=$(echo "$pair" | cut -d: -f1)
             [ -z "$aname" ] && continue
+            # Parse displayName from 3rd field for canonical S3 lookup (issue #1499)
+            local adisplay
+            adisplay=$(echo "$pair" | cut -d: -f3)
+            [ -z "$adisplay" ] && adisplay="$aname"
             agents_checked=$((agents_checked + 1))
 
-            local spec_data
+            local spec_data=""
+            # Try per-session identity first
             spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
                 --region "$BEDROCK_REGION" 2>/dev/null | \
                 jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
                 2>/dev/null || echo "")
+            # Fall back to canonical identity if per-session has no specialization (issue #1499)
+            if [ -z "$spec_data" ] && [ "$adisplay" != "$aname" ]; then
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${adisplay}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null | \
+                    jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                    2>/dev/null || echo "")
+            fi
             if [ -n "$spec_data" ]; then
                 agents_with_spec=$((agents_with_spec + 1))
             fi
