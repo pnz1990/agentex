@@ -706,6 +706,10 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
 - `write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions>` — v0.6 swarm memory (issue #1773). Write a structured swarm dissolution record to `s3://<bucket>/swarm-memories/<swarm-name>.json`. Called automatically by `entrypoint.sh` on swarm dissolution, but agents can also call it manually for partial records.
 - `query_swarm_memories [topic_keyword]` — v0.6 swarm memory (issue #1773). Query past swarm memory records from S3. Planners should call this before forming a new swarm to check for prior experience with similar goals. Returns JSON records, one per line.
+- `save_workspace_snapshot <issue_number> [workspace_dir]` — workspace persistence (issue #1833). Tar + S3 upload of current workspace state for cross-session continuity. Saves to `s3://<bucket>/workspaces/issue-<N>/snapshot.tar.gz`. Non-fatal — skips silently if workspace has no git repo or S3 fails. Workers call this before exiting when they have uncommitted changes.
+- `restore_workspace_snapshot <issue_number> [workspace_dir]` — workspace persistence (issue #1833). Downloads and extracts S3 workspace snapshot over fresh git clone. Also loads handoff JSON into `WORKSPACE_HANDOFF` env var if available. Returns 0 if restored, 1 if no snapshot found. Workers call this after `git clone` to resume prior session's work.
+- `write_context_handoff <issue_number> <status> <last_action> <next_step> [branch]` — workspace persistence (issue #1833). Writes structured JSON handoff to `s3://<bucket>/workspaces/issue-<N>/handoff.json`. Status: `in_progress` or `done`. Tells successor exactly what was done and what to do next. Non-fatal if S3 write fails.
+- `cleanup_workspace_snapshot <issue_number>` — workspace persistence (issue #1833). Removes S3 workspace snapshot and handoff JSON when task is done (PR opened). Called by `release_coordinator_task()`. Workers can also call manually when task is complete.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1275,7 +1279,8 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                  write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                  propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
                  cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
-                 write_swarm_memory(), query_swarm_memories()
+                 write_swarm_memory(), query_swarm_memories(), save_workspace_snapshot(), restore_workspace_snapshot(),
+                 write_context_handoff(), cleanup_workspace_snapshot()
 ```
 
 Environment:
