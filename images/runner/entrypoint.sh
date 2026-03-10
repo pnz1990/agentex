@@ -1603,10 +1603,14 @@ EOF
 # Updates S3 identity with proactiveIssuesFound counter.
 #
 # Specialization-specific scans:
-# - debugger: scan recent merged PRs for potential regressions
-# - architecture: review merged PRs for design anti-patterns
-# - consensus: scan for unresolved debate threads
-# - coordinator: check coordinator-state for anomalies
+# - debugger / bug-specialist: scan recent merged PRs for potential regressions
+# - architecture / architect: review merged PRs for design anti-patterns
+# - consensus / governance-specialist: scan for unresolved debate threads
+# - coordinator / platform-specialist: check coordinator-state for anomalies
+# - enhancement-specialist: scan for design improvements (uses architecture scan)
+# - security-specialist: scan for governance violations (uses architecture scan)
+# - memory-specialist: scan for debate/knowledge issues (uses consensus scan)
+# - *-specialist (generic): use coordinator scan as safe default
 #
 # Returns: 0 if scan completed (regardless of whether issue was filed)
 proactive_domain_scan() {
@@ -1632,16 +1636,30 @@ proactive_domain_scan() {
   
   # Domain-specific scan logic
   case "$spec" in
-    debugger)
+    debugger|bug-specialist)
       proactive_debugger_scan "$code_areas"
       ;;
     architecture|architect)
       proactive_architecture_scan
       ;;
-    consensus|consensus-specialist)
+    consensus|consensus-specialist|governance-specialist)
       proactive_consensus_scan
       ;;
-    coordinator|coordinator-specialist)
+    coordinator|coordinator-specialist|platform-specialist)
+      proactive_coordinator_scan
+      ;;
+    enhancement-specialist)
+      proactive_architecture_scan  # Enhancement specialists scan for design improvements
+      ;;
+    security-specialist)
+      proactive_architecture_scan  # Security specialists scan for governance violations
+      ;;
+    memory-specialist)
+      proactive_consensus_scan  # Memory specialists scan for debate/knowledge issues
+      ;;
+    *-specialist)
+      # Generic fallback for any other earned specialization (e.g., documentation-specialist)
+      log "Proactive scan: $spec using generic coordinator scan..."
       proactive_coordinator_scan
       ;;
     *)
