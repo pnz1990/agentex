@@ -3155,13 +3155,25 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   push_metric "CIPassOnExit" 1
   
   # Update specialization based on issue labels worked on this session (issue #1098)
-  # Fetch labels from the GitHub issue claimed/worked on this session
-  if type update_specialization &>/dev/null && [ -n "${COORDINATOR_ISSUE:-}" ] && [ "$COORDINATOR_ISSUE" != "0" ]; then
-    WORKED_LABELS=$(gh issue view "$COORDINATOR_ISSUE" --repo "$REPO" \
+  # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147)
+  WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
+  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+    # Self-selected path: COORDINATOR_ISSUE was never set (queue was empty).
+    # Look up this agent's active assignment in coordinator-state to find the issue claimed.
+    ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+    WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
+    if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments"
+    fi
+  fi
+  # Fetch labels from the GitHub issue worked on this session
+  if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
+    WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
       --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
     if [ -n "$WORKED_LABELS" ]; then
       update_specialization "$WORKED_LABELS" 2>/dev/null || true
-      log "Specialization tracking updated: labels=$WORKED_LABELS"
+      log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
     fi
   fi
   
