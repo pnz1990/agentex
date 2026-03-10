@@ -699,10 +699,16 @@ tally_and_enact_votes() {
         
         echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
         
-        # Get most recent proposal for this topic
+        # Get proposal declaration line for this topic (issue #1222)
+        # BUG FIX: Previously used "| .content | tail -1" which returned the LAST LINE of
+        # ALL proposals combined — always an empty string after the trailing newline.
+        # This caused ALL proposals to be silently skipped ([ -z "$proposal_content" ] && continue).
+        # FIX: Extract only the declaration line (#proposal-<topic> ...) directly from content,
+        # which is all we need for kv_pairs parsing anyway. This is robust to multiple proposals
+        # and multi-line content.
         local proposal_content
         proposal_content=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
-            "$thoughts_file" | tail -1 || true)
+            "$thoughts_file" 2>/dev/null | grep "^#proposal-${topic}" | tail -1 || true)
         
         [ -z "$proposal_content" ] && continue
 
@@ -711,7 +717,7 @@ tally_and_enact_votes() {
         # Example: "#proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-at-limit-6"
         # Should extract "circuitBreakerLimit=12" and "reason=...", NOT "limit-6" from later lines
         local kv_pairs
-        kv_pairs=$(echo "$proposal_content" | head -1 | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
