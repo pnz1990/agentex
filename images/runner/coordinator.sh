@@ -352,6 +352,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
   fi
 
+  # chronicleCandidates (issue #1603/#1605 v0.4): semicolon-separated Thought ConfigMap names
+  # nominated by agents as high-value insights for inclusion in the civilization chronicle.
+  # Populated by aggregate_chronicle_candidates() every ~3 min. god-delegate reads this when
+  # writing the chronicle — enabling distributed curation without full Thought CR scans.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -2398,6 +2408,58 @@ The civilization needs mediators, not just voters." \
     fi
 }
 
+# ── Issue #1603: Chronicle Candidate Aggregation (v0.4 Collective Memory) ────────────
+# Aggregate chronicle-candidate Thought CRs and surface the top candidates
+# for god-delegate review. This is the coordinator side of the chronicle
+# auto-append workflow (issue #1605):
+#
+#   1. Agents post thoughtType:chronicle-candidate (via post_chronicle_candidate())
+#   2. Coordinator reads all candidates, ranks by confidence, surfaces top 3
+#   3. coordinator-state.chronicleCandidates holds the top N ConfigMap names
+#   4. god-delegate reads this field when writing the chronicle
+#
+# This reduces god workload (no need to scan all Thought CRs) while maintaining
+# quality control (god reviews and approves, agents nominate).
+# ─────────────────────────────────────────────────────────────────────────────
+aggregate_chronicle_candidates() {
+    local candidates_raw
+    # Use label selector + thoughtType filter to minimize memory usage
+    candidates_raw=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+        | jq '[.items[] | select(.data.thoughtType == "chronicle-candidate") | {
+            name: .metadata.name,
+            confidence: ((.data.confidence // "0") | tonumber? // 0),
+            agent: (.data.agentRef // ""),
+            ts: (.metadata.creationTimestamp // ""),
+            content: ((.data.content // "") | .[0:200])
+          }]' 2>/dev/null) || return 0
+
+    [ -z "$candidates_raw" ] || [ "$candidates_raw" = "null" ] || [ "$candidates_raw" = "[]" ] && return 0
+
+    local candidate_count
+    candidate_count=$(echo "$candidates_raw" | jq 'length' 2>/dev/null || echo "0")
+    [ "${candidate_count:-0}" -eq 0 ] && return 0
+
+    echo "[$(date -u +%H:%M:%S)] Found $candidate_count chronicle-candidate Thought CRs — aggregating top 3"
+
+    # Sort by confidence descending, then by creation timestamp descending (newest first for ties)
+    # Take top 3 ConfigMap names as semicolon-separated string for coordinator-state
+    local top_candidates
+    top_candidates=$(echo "$candidates_raw" | jq -r '
+        sort_by(.confidence, .ts) | reverse | .[0:3] | .[].name
+    ' 2>/dev/null | tr '\n' ';' | sed 's/;$//') || return 0
+
+    [ -z "$top_candidates" ] && return 0
+
+    # Only update if there's a meaningful change (avoids needless ConfigMap patches)
+    local current_candidates
+    current_candidates=$(get_state "chronicleCandidates")
+    if [ "$top_candidates" != "$current_candidates" ]; then
+        update_state "chronicleCandidates" "$top_candidates"
+        push_metric "ChronicleCandidates" "$candidate_count" "Count" "Component=Coordinator"
+        echo "[$(date -u +%H:%M:%S)] Updated chronicleCandidates: $top_candidates (from $candidate_count nominations)"
+    fi
+}
+
 # NOTE (issue #867): Planner-chain liveness is now handled by the planner-loop Deployment.
 # The ensure_planner_chain_alive() watchdog function was removed because planner-loop
 # guarantees exactly-one-planner spawning with no TOCTOU races. The coordinator no longer
@@ -3149,6 +3211,14 @@ while true; do
     # Every 6 iterations (~3 min): track debate activity and nudge if needed
     if [ $((iteration % 6)) -eq 0 ]; then
         track_debate_activity
+    fi
+
+    # Every 6 iterations (~3 min): aggregate chronicle candidates (issue #1603/#1605 v0.4)
+    # Reads thoughtType:chronicle-candidate CRs, ranks by confidence, surfaces top 3
+    # to coordinator-state.chronicleCandidates for god-delegate curation.
+    # Offset by 3 from track_debate_activity to spread load.
+    if [ $((( iteration + 3) % 6)) -eq 0 ]; then
+        aggregate_chronicle_candidates
     fi
 
     # Every 7 iterations (~3.5 min): run identity-based task routing (issue #1113)
