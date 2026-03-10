@@ -201,7 +201,7 @@ ensure_state_fields_initialized() {
       local migrated_enacted="${enacted} | ${new_entries}"
       # Sanitize for JSON: escape double quotes, remove newlines
       local safe_migrated
-      safe_migrated=$(echo "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+      safe_migrated=$(printf '%s' "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g' | sed 's/[[:space:]]*$//')
       kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
         -p "{\"data\":{\"enactedDecisions\":\"$safe_migrated\"}}" 2>/dev/null || true
       [ "$silent" = "false" ] && echo "  enactedDecisions migration complete (issue #1427)"
@@ -322,7 +322,8 @@ update_state() {
     # Issue #1470: Use printf '%s' instead of echo to avoid trailing newline that tr '\n\r' converts
     # to trailing space, causing spawnSlots='6 ' instead of '6'. The trailing space breaks CAS
     # operations in request_spawn_slot() and triggers false spawnSlots reconciliation every 30s.
-    safe_value=$(printf '%s' "$value" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+    # Also strip any remaining trailing whitespace with sed as a belt-and-suspenders measure.
+    safe_value=$(printf '%s' "$value" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g' | sed 's/[[:space:]]*$//')
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
         --type=merge -p "{\"data\":{\"$field\":\"$safe_value\"}}" 2>/dev/null || true
