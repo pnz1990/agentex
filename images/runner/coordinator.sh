@@ -934,7 +934,11 @@ tally_and_enact_votes() {
         enacted=$(get_state "enactedDecisions")
         # Issue #940: null guard - treat empty/null as empty string
         [ -z "$enacted" ] && enacted=""
-        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
+        # Normalize decision_key: replace all whitespace (spaces, newlines, tabs) with underscores
+        # and collapse consecutive underscores. This prevents re-enactment caused by newlines
+        # embedded in kv_pairs from the while-read loop (issue #1398).
+        local decision_key
+        decision_key="$(printf '%s_%s' "$topic" "$kv_pairs" | tr '[:space:]' '_' | tr -s '_')"
         
         if echo "$enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
