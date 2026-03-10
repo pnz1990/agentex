@@ -649,8 +649,11 @@ refresh_task_queue() {
                     # Only numeric entries map to GitHub issues; non-numeric feature entries are kept
                     if [[ "$vq_entry" =~ ^[0-9]+$ ]]; then
                         local vq_issue_state
-                        vq_issue_state=$(gh issue view "$vq_entry" --repo "${GITHUB_REPO}" \
-                            --json state --jq '.state' 2>/dev/null || echo "OPEN")
+                        # Issue #1578: Use REST API to avoid GraphQL rate-limit failures.
+                        # Fallback to OPEN (keep the entry) if the API call fails.
+                        # ascii_upcase normalizes REST ("open"/"closed") to match comparison values.
+                        vq_issue_state=$(gh api "repos/${GITHUB_REPO}/issues/${vq_entry}" \
+                            --jq '.state | ascii_upcase' 2>/dev/null || echo "OPEN")
                         if [ "$vq_issue_state" = "CLOSED" ]; then
                             echo "[$(date -u +%H:%M:%S)] visionQueue: pruning closed issue #$vq_entry"
                             vq_pruned_count=$((vq_pruned_count + 1))
@@ -735,10 +738,12 @@ cleanup_stale_assignments() {
             echo "$cached"
             return 0
         fi
-        # Not cached — fetch from GitHub API
+        # Not cached — fetch from GitHub API (REST, not GraphQL, to avoid rate limit failures)
+        # Issue #1578: gh issue view --json uses GraphQL; gh api uses REST which is rate-limited
+        # separately and more resilient. UNKNOWN fallback keeps the assignment so agents don't
+        # lose work — better to keep a stale assignment than to silently drop active work.
         local fetched
-        fetched=$(gh issue view "$iss" --repo "${GITHUB_REPO}" --json state \
-            --jq '.state' 2>/dev/null || echo "UNKNOWN")
+        fetched=$(gh api "repos/${GITHUB_REPO}/issues/${iss}" --jq '.state | ascii_upcase' 2>/dev/null || echo "UNKNOWN")
         # Add to cache
         issue_state_cache="${issue_state_cache} ${iss}=${fetched}"
         echo "$fetched"
@@ -1536,8 +1541,11 @@ NUDGE_EOF
 
                  if [ -n "$add_issue" ]; then
                      # Issue #1436: Validate issue is OPEN before adding to visionQueue
-                     local add_issue_state
-                     add_issue_state=$(gh issue view "$add_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                      local add_issue_state
+                      # Issue #1578: Use REST API to avoid GraphQL rate-limit failures.
+                      # ascii_upcase normalizes REST ("open"/"closed") to match comparison values.
+                      add_issue_state=$(gh api "repos/${GITHUB_REPO}/issues/${add_issue}" \
+                          --jq '.state | ascii_upcase' 2>/dev/null || echo "unknown")
                      if [ "$add_issue_state" != "OPEN" ]; then
                          echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue is $add_issue_state — skipping visionQueue add"
                      else
@@ -1613,8 +1621,11 @@ NUDGE_EOF
                      vision_issue=$(echo "$kv_pairs" | grep -oE '(issueNumber|addIssue)=[0-9]+' | head -1 | cut -d= -f2 || echo "")
                      if [ -n "$vision_issue" ]; then
                          # Issue #1436: Validate issue is OPEN before adding to visionQueue
-                         local vision_issue_state
-                         vision_issue_state=$(gh issue view "$vision_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                          local vision_issue_state
+                          # Issue #1578: Use REST API to avoid GraphQL rate-limit failures.
+                          # ascii_upcase normalizes REST ("open"/"closed") to match comparison values.
+                          vision_issue_state=$(gh api "repos/${GITHUB_REPO}/issues/${vision_issue}" \
+                              --jq '.state | ascii_upcase' 2>/dev/null || echo "unknown")
                          if [ "$vision_issue_state" != "OPEN" ]; then
                              echo "[$(date -u +%H:%M:%S)] VISION QUEUE: issue #$vision_issue is $vision_issue_state — skipping visionQueue add"
                              patched=true
@@ -1688,8 +1699,11 @@ NUDGE_EOF
                 add_issue=$(echo "$kv_pairs" | tr ' ' '\n' | grep "^addIssue=" | cut -d= -f2 | head -1 || echo "")
                  if [ -n "$add_issue" ] && [[ "$add_issue" =~ ^[0-9]+$ ]]; then
                      # Issue #1436: Validate issue is OPEN before adding to visionQueue
-                     local add_issue_open_state
-                     add_issue_open_state=$(gh issue view "$add_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                      local add_issue_open_state
+                      # Issue #1578: Use REST API to avoid GraphQL rate-limit failures.
+                      # ascii_upcase normalizes REST ("open"/"closed") to match comparison values.
+                      add_issue_open_state=$(gh api "repos/${GITHUB_REPO}/issues/${add_issue}" \
+                          --jq '.state | ascii_upcase' 2>/dev/null || echo "unknown")
                      if [ "$add_issue_open_state" != "OPEN" ]; then
                          echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue is $add_issue_open_state — skipping visionQueue add"
                      else
