@@ -44,7 +44,7 @@ echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "Namespace: $NAMESPACE"
 echo "State ConfigMap: $STATE_CM"
-echo "Vote threshold: $VOTE_THRESHOLD approvals required"
+echo "Vote threshold: $VOTE_THRESHOLD approvals required (may be overridden by constitution after kubectl ready)"
 echo ""
 
 # ── Configure kubectl ────────────────────────────────────────────────────────
@@ -70,6 +70,16 @@ if [ -n "$BEDROCK_REGION_FROM_CONSTITUTION" ]; then
 fi
 echo "GitHub repo (from constitution): $GITHUB_REPO"
 echo "Bedrock region (from constitution): $BEDROCK_REGION"
+
+# ── Read governance constants from constitution (issue #1063) ──────────────────
+# voteThreshold was a hardcoded constant but governance can patch it via proposals.
+# Read from constitution so governance votes on voteThreshold actually take effect.
+VOTE_THRESHOLD_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
+if [ -n "$VOTE_THRESHOLD_FROM_CONSTITUTION" ] && [[ "$VOTE_THRESHOLD_FROM_CONSTITUTION" =~ ^[0-9]+$ ]]; then
+  VOTE_THRESHOLD="$VOTE_THRESHOLD_FROM_CONSTITUTION"
+fi
+echo "Vote threshold (from constitution): $VOTE_THRESHOLD approvals required"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
@@ -716,6 +726,10 @@ tally_and_enact_votes() {
                     local value="${kv##*=}"
                     
                     # Check if this is a known constitution key
+                    # Issue #1063: voteThreshold is now READ from constitution on startup,
+                    # so patching it via governance will take effect on next coordinator restart.
+                    # circuitBreakerLimit is also read live from constitution per reconcile_spawn_slots().
+                    # minimumVisionScore and jobTTLSeconds are patched but not yet enforced at runtime.
                     case "$key" in
                         circuitBreakerLimit|minimumVisionScore|jobTTLSeconds|voteThreshold)
                             [ "$first" = false ] && patch_data="${patch_data},"
