@@ -1,0 +1,168 @@
+# God Reporter CronJob — posts status reports to GitHub issue #62 every 20 minutes.
+#
+# Provides the human supervisor with a periodic view of:
+# - Cluster health (active jobs, spawn slots)
+# - Civilization metrics (reports, thoughts, proposals, votes)
+# - Debate health (responses, threads, stats)
+# - Recent agent work and merged PRs
+# - PENDING CONSTITUTION-ALIGNED PRs (issue #1709 — PRs touching protected files
+#   that require god-approved label before merging)
+#
+# To apply: kubectl apply -f manifests/system/god-reporter-cronjob.yaml
+# To trigger manually: kubectl create job --from=cronjob/god-reporter god-reporter-manual-$(date +%s) -n agentex
+#
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: god-reporter
+  namespace: agentex
+  labels:
+    agentex/role: god-reporter
+spec:
+  schedule: "*/20 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: god-reporter
+            image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+            imagePullPolicy: Always
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+            env:
+            - name: AGENT_NAME
+              value: god-reporter
+            - name: AGENT_ROLE
+              value: god-reporter
+            - name: TASK_CR_NAME
+              value: task-god-reporter
+            - name: NAMESPACE
+              value: agentex
+            - name: REPO
+              value: pnz1990/agentex
+            - name: BEDROCK_REGION
+              value: us-west-2
+            - name: CLUSTER
+              value: agentex
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentex-github-token
+                  key: token
+            command: ["/bin/bash"]
+            args:
+            - -c
+            - |
+              echo "GOD REPORTER starting $(date -u)"
+              export GH_TOKEN="$GITHUB_TOKEN"
+
+              # Cluster health
+              ACTIVE=$(kubectl get jobs -n agentex -o json 2>/dev/null | jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "?")
+              COMPLETE=$(kubectl get jobs -n agentex -o json 2>/dev/null | jq '[.items[] | select(.status.completionTime != null)] | length' 2>/dev/null || echo "?")
+              TOTAL=$(kubectl get jobs -n agentex --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "?")
+              RUNNING=$(kubectl get pods -n agentex --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "?")
+              SPAWN_SLOTS=$(kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "?")
+              CIRCUIT_LIMIT=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "?")
+
+              # Reports — READ FROM CONFIGMAPS (label: agentex/report), not from CR .spec
+              REPORTS_JSON=$(kubectl get configmaps -n agentex -l agentex/report -o json 2>/dev/null || echo '{"items":[]}')
+              REPORTS=$(echo "$REPORTS_JSON" | jq '.items | length' 2>/dev/null || echo "0")
+              AVG=$(echo "$REPORTS_JSON" | jq '[.items[].data.visionScore | tonumber] | if length > 0 then ((add / length * 10 | round) / 10) else 0 end' 2>/dev/null || echo "0")
+              RECENT=$(echo "$REPORTS_JSON" | jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | .[0:8] | .[] | "- [\(.data.role)] \(.data.agentRef) score=\(.data.visionScore)/10 | \(.data.workDone | split("\n")[0] | .[0:80])"' 2>/dev/null || echo "none")
+
+              # Thoughts — READ FROM CONFIGMAPS (name ends in -thought), not from CR .spec
+              THOUGHTS_JSON=$(kubectl get configmaps -n agentex -o json 2>/dev/null | jq '{items: [.items[] | select(.metadata.name | endswith("-thought"))]}' 2>/dev/null || echo '{"items":[]}')
+              THOUGHTS=$(echo "$THOUGHTS_JSON" | jq '.items | length' 2>/dev/null || echo "0")
+              VOTES=$(echo "$THOUGHTS_JSON" | jq '[.items[] | select(.data.thoughtType == "vote")] | length' 2>/dev/null || echo "0")
+              PROPOSALS=$(echo "$THOUGHTS_JSON" | jq '[.items[] | select(.data.thoughtType == "proposal")] | length' 2>/dev/null || echo "0")
+              DEBATES=$(echo "$THOUGHTS_JSON" | jq '[.items[] | select(.data.thoughtType == "debate")] | length' 2>/dev/null || echo "0")
+              DEBATE_THREADS=$(echo "$THOUGHTS_JSON" | jq '[.items[] | select((.data.parentRef // "") != "")] | length' 2>/dev/null || echo "0")
+
+              # Coordinator state
+              COORDINATOR_STATE=$(kubectl get configmap coordinator-state -n agentex -o json 2>/dev/null | jq '.data' 2>/dev/null || echo '{}')
+              ENACTED=$(echo "$COORDINATOR_STATE" | jq -r '.enactedDecisions // "none"' 2>/dev/null || echo "none")
+              DEBATE_STATS=$(echo "$COORDINATOR_STATE" | jq -r '.debateStats // "not yet tracked"' 2>/dev/null || echo "not yet tracked")
+
+              # GitHub activity
+              MERGED=$(gh pr list --repo "$REPO" --state merged --limit 8 --json number,title,mergedAt --jq '.[] | "- #\(.number) \(.title[0:70]) (\(.mergedAt | .[0:10]))"' 2>/dev/null || echo "unavailable")
+              OPEN_I=$(gh issue list --repo "$REPO" --state open --limit 15 --json number,title --jq '.[] | "- #\(.number) \(.title[0:70])"' 2>/dev/null || echo "unavailable")
+              OPEN_P=$(gh pr list --repo "$REPO" --state open --limit 10 --json number,title --jq 'if length == 0 then "none" else (.[] | "- #\(.number) \(.title[0:70])") end' 2>/dev/null || echo "none")
+
+              # Issue #1709: Pending constitution-aligned PRs (require god-approved label before merge)
+              # Protected files: images/runner/entrypoint.sh, AGENTS.md, manifests/rgds/*.yaml
+              # These PRs touch protected files and need the god-approved label.
+              # Prominently displayed to reduce review latency from hours to minutes.
+              PENDING_CONST_PRS=$(gh pr list --repo "$REPO" --state open \
+                --label "constitution-aligned" \
+                --json number,title,url \
+                --jq 'if length == 0 then "none — no pending PRs need god-approved" else (.[] | "- PR #\(.number): \(.title[0:80])") end' 2>/dev/null || echo "unavailable")
+              PENDING_COUNT=$(gh pr list --repo "$REPO" --state open \
+                --label "constitution-aligned" \
+                --json number \
+                --jq 'length' 2>/dev/null || echo "?")
+
+              # Last directive from constitution (not from thoughts -- that was always null)
+              DIRECTIVE=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.lastDirective}' 2>/dev/null | head -c 300 || echo "none")
+
+              # Latest proposals (agent-originated ones are the milestone to watch)
+              RECENT_PROPOSALS=$(echo "$THOUGHTS_JSON" | jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | [.[] | select(.data.thoughtType == "proposal")] | .[0:3] | .[] | "- [\(.data.agentRef)]: \(.data.content | split("\n")[0] | .[0:100])"' 2>/dev/null || echo "none")
+
+              # Debate chain summary
+              RECENT_DEBATES=$(echo "$THOUGHTS_JSON" | jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | [.[] | select(.data.thoughtType == "debate")] | .[0:3] | .[] | "- [\(.data.agentRef) -> \(.data.parentRef // "?")]: \(.data.content | split("\n")[0] | .[0:100])"' 2>/dev/null || echo "none")
+
+              NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
+              gh issue comment 62 --repo "$REPO" --body "## God Report — ${NOW}
+
+              **Cluster:** Active=${ACTIVE} | Completed=${COMPLETE} | Total=${TOTAL} | Running=${RUNNING} | SpawnSlots=${SPAWN_SLOTS}/${CIRCUIT_LIMIT}
+
+              **Civilization:** Reports=${REPORTS} | Thoughts=${THOUGHTS} | Proposals=${PROPOSALS} | Votes=${VOTES} | AvgVisionScore=${AVG}/10
+
+              **Debate health:** DebateResponses=${DEBATES} | Threads=${DEBATE_THREADS} | CoordinatorStats=${DEBATE_STATS}
+
+              **Recent agent work:**
+              ${RECENT}
+
+              **Recent proposals (watch for agent-originated ones):**
+              ${RECENT_PROPOSALS}
+
+              **Recent debate responses:**
+              ${RECENT_DEBATES}
+
+              **Enacted decisions:**
+              ${ENACTED}
+
+              **Recently merged PRs:**
+              ${MERGED}
+
+              **Open PRs:**
+              ${OPEN_P}
+
+              ## PENDING CONSTITUTION-ALIGNED PRs — require god-approved label (${PENDING_COUNT} waiting)
+              ${PENDING_CONST_PRS}
+
+              **Open issues:**
+              ${OPEN_I}
+
+              **Last directive (first 300 chars):**
+              \`\`\`
+              ${DIRECTIVE}
+              \`\`\`
+              "
+              echo "GOD REPORTER done $(date -u)"
