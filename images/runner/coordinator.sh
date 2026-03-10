@@ -379,7 +379,7 @@ cleanup_stale_assignments() {
 
         local job_active
         job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
-            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
+            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null \
             || echo "false")
 
         if [ "$job_active" = "true" ]; then
@@ -429,7 +429,7 @@ cleanup_active_agents() {
         # Check if Job still active (exists and no completionTime)
         local job_active
         job_active=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null \
-            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' \
+            | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null \
             || echo "false")
         
         if [ "$job_active" = "true" ]; then
