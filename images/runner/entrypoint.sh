@@ -1075,6 +1075,24 @@ request_coordinator_task() {
       return 0
     fi
 
+    # Issue #1015: Validate issue is still OPEN before claiming it.
+    # The coordinator queue may contain closed issues (lag between GitHub close and queue refresh).
+    # Claiming a closed issue wastes the agent's entire LLM session.
+    local issue_state
+    issue_state=$(gh issue view "$claimed_issue" --repo "${GITHUB_REPO:-pnz1990/agentex}" \
+      --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    if [ "$issue_state" != "OPEN" ]; then
+      log "Coordinator: issue #$claimed_issue is ${issue_state} — removing from queue, trying next"
+      local new_queue
+      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+      new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+      retry=$((retry + 1))
+      continue
+    fi
+
     # Atomically claim the issue using CAS (issue #859)
     # This prevents two concurrent agents from both picking the same queue item
     if ! claim_task "$claimed_issue"; then
