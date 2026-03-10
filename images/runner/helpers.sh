@@ -86,13 +86,17 @@ EOF
 
 # ── record_debate_outcome ─────────────────────────────────────────────────────
 # Store debate resolution in S3 for future agent queries.
-# Usage: record_debate_outcome <thread_id> <outcome> <resolution> [topic]
+# Usage: record_debate_outcome <thread_id> <outcome> <resolution> [topic] [component]
 # Outcomes: synthesized | consensus-agree | consensus-disagree | unresolved
+# component: optional file/component name (e.g. "coordinator.sh", "entrypoint.sh")
+#   When provided, also writes to the component knowledge graph index:
+#   s3://bucket/knowledge-graph/components/<component>.json
 record_debate_outcome() {
   local thread_id="$1"
   local outcome="$2"
   local resolution="$3"
   local topic="${4:-}"
+  local component="${5:-}"
 
   if [ -z "$thread_id" ] || [ -z "$outcome" ] || [ -z "$resolution" ]; then
     log "ERROR: record_debate_outcome requires thread_id, outcome, and resolution"
@@ -129,6 +133,7 @@ record_debate_outcome() {
 {
   "threadId": "${thread_id}",
   "topic": "${topic}",
+  "component": "${component}",
   "outcome": "${outcome}",
   "resolution": ${escaped_resolution},
   "participants": ${participants},
@@ -145,8 +150,81 @@ EOF
     return 1
   fi
 
-  log "Recorded debate outcome: thread=${thread_id} outcome=${outcome} topic=${topic}"
+  log "Recorded debate outcome: thread=${thread_id} outcome=${outcome} topic=${topic} component=${component}"
+
+  # Issue #1609: Update component knowledge graph index if component is specified
+  # This enables query_debate_outcomes_by_component() to find relevant debates quickly
+  if [ -n "$component" ]; then
+    _update_component_knowledge_graph "$component" "$thread_id" "$topic" "$outcome" "$timestamp" "$resolution"
+  fi
+
   return 0
+}
+
+# ── _update_component_knowledge_graph ────────────────────────────────────────
+# Internal: Update the knowledge graph index for a specific component (file).
+# Maintains a rolling window of the 10 most recent debate outcomes per component.
+# Path: s3://bucket/knowledge-graph/components/<component-slug>.json
+# Called by record_debate_outcome() when component field is non-empty.
+# Issue #1609: Phase 2 — coordinator index building.
+_update_component_knowledge_graph() {
+  local component="$1"
+  local thread_id="$2"
+  local topic="$3"
+  local outcome="$4"
+  local timestamp="$5"
+  local resolution="$6"
+
+  # Sanitize component name for S3 key: replace / and spaces with -
+  local component_slug
+  component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+  [ -z "$component_slug" ] && return 0
+
+  local index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+  local escaped_resolution
+  escaped_resolution=$(echo "$resolution" | jq -Rs '.')
+
+  # New entry to prepend
+  local new_entry
+  new_entry=$(cat <<EOF
+{
+  "threadId": "${thread_id}",
+  "topic": "${topic}",
+  "outcome": "${outcome}",
+  "resolution": ${escaped_resolution},
+  "timestamp": "${timestamp}"
+}
+EOF
+)
+
+  # Read existing index (if present) and prepend new entry, keeping last 10
+  local existing_index="[]"
+  if aws s3 ls "$index_path" >/dev/null 2>&1; then
+    existing_index=$(aws s3 cp "$index_path" - 2>/dev/null || echo "[]")
+    [ -z "$existing_index" ] && existing_index="[]"
+  fi
+
+  local updated_index
+  updated_index=$(echo "$existing_index" | jq \
+    --argjson entry "$new_entry" \
+    '[$entry] + . | unique_by(.threadId) | .[0:10]' 2>/dev/null || echo "[$new_entry]")
+
+  local index_json
+  index_json=$(cat <<EOF
+{
+  "component": "${component}",
+  "updatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "debateCount": $(echo "$updated_index" | jq 'length' 2>/dev/null || echo 1),
+  "debates": ${updated_index}
+}
+EOF
+)
+
+  if echo "$index_json" | aws s3 cp - "$index_path" --content-type application/json >/dev/null 2>&1; then
+    log "Updated component knowledge graph: component=${component} thread=${thread_id}"
+  else
+    log "WARNING: Failed to update component knowledge graph for ${component} (non-fatal)"
+  fi
 }
 
 # ── post_debate_response ──────────────────────────────────────────────────────
@@ -239,6 +317,52 @@ query_debate_outcomes() {
   done <<< "$debate_files"
 
   echo "$results"
+}
+
+# ── query_debate_outcomes_by_component ───────────────────────────────────────
+# Query past debate resolutions from the component knowledge graph index.
+# Much faster than query_debate_outcomes() — reads a single pre-built index file
+# instead of listing and reading all debate files.
+# Issue #1609: Phase 2 — component knowledge graph index.
+#
+# Usage: query_debate_outcomes_by_component <component>
+# Returns: JSON array of up to 10 recent debate outcomes for that component
+#
+# Example:
+#   # Before modifying coordinator.sh, check what past debates say about it:
+#   past=$(query_debate_outcomes_by_component "coordinator.sh")
+#   echo "$past" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution[0:100])"'
+query_debate_outcomes_by_component() {
+  local component="${1:-}"
+
+  if [ -z "$component" ]; then
+    log "WARNING: query_debate_outcomes_by_component requires component argument"
+    echo "[]"
+    return 0
+  fi
+
+  # Sanitize component name for S3 key (same as _update_component_knowledge_graph)
+  local component_slug
+  component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+
+  local index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+
+  if ! aws s3 ls "$index_path" >/dev/null 2>&1; then
+    # No index yet for this component — fall back to empty
+    log "No knowledge graph index found for component: ${component}"
+    echo "[]"
+    return 0
+  fi
+
+  local index_json
+  index_json=$(aws s3 cp "$index_path" - 2>/dev/null || echo "{}")
+  if [ -z "$index_json" ] || [ "$index_json" = "{}" ]; then
+    echo "[]"
+    return 0
+  fi
+
+  # Return the debates array from the index
+  echo "$index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]"
 }
 
 # ── push_metric stub ─────────────────────────────────────────────────────────
@@ -967,5 +1091,5 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
