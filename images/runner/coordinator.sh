@@ -366,9 +366,12 @@ cleanup_active_agents() {
 reconcile_spawn_slots() {
     local limit
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    # Issue #1001: Fallback to 6 (current constitution value), NOT 12.
+    # Using 12 as fallback would double the circuit-breaker limit when the constitution ConfigMap
+    # is temporarily unavailable (e.g. coordinator restart), potentially causing proliferation.
     limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
-        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
-    if ! [[ "$limit" =~ ^[0-9]+$ ]]; then limit=12; fi
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+    if ! [[ "$limit" =~ ^[0-9]+$ ]]; then limit=6; fi
 
     local active_jobs
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
@@ -808,131 +811,12 @@ The civilization needs mediators, not just voters." \
 }
 
 # NOTE (issue #867): Planner-chain liveness is now handled by the planner-loop Deployment.
-# The ensure_planner_chain_alive() watchdog function has been removed because planner-loop
+# The ensure_planner_chain_alive() watchdog function was removed because planner-loop
 # guarantees exactly-one-planner spawning with no TOCTOU races. The coordinator no longer
 # needs to spawn recovery planners.
-
-
-ensure_planner_chain_alive() {
-    # Issue #947: Guard against scheduling-lag false positives.
-    # After spawning a recovery planner, the pod takes 20-90s to become active.
-    # During that window active_planners=0 and the watchdog would double-spawn.
-    # Solution: write pendingPlannerSpawn timestamp after every spawn and skip
-    # the watchdog for PENDING_PLANNER_GRACE seconds after a recent spawn.
-    local PENDING_PLANNER_GRACE=90
-    local pending_spawn
-    pending_spawn=$(get_state "pendingPlannerSpawn")
-    if [ -n "$pending_spawn" ]; then
-        local pending_epoch
-        pending_epoch=$(date -d "$pending_spawn" +%s 2>/dev/null || echo "0")
-        local pending_age=$(( $(date +%s) - pending_epoch ))
-        if [ "$pending_age" -lt "$PENDING_PLANNER_GRACE" ]; then
-            echo "[$(date -u +%H:%M:%S)] Planner liveness: planner recently spawned (${pending_age}s ago, grace=${PENDING_PLANNER_GRACE}s). Skipping to avoid double-spawn."
-            return 0
-        fi
-    fi
-
-    # Count active planner jobs
-    local active_planners
-    active_planners=$(kubectl_with_timeout 15 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-        jq '[.items[] |
-            select(.status.completionTime == null and (.status.active // 0) > 0) |
-            select(.metadata.name | test("planner"))] | length' \
-        2>/dev/null || echo "-1")
-
-    # kubectl failure — skip check rather than false-positive spawn
-    if [ "$active_planners" = "-1" ]; then
-        echo "[$(date -u +%H:%M:%S)] Planner liveness: kubectl unavailable, skipping check"
-        return 0
-    fi
-
-    if [ "$active_planners" -gt 0 ]; then
-        # Planner chain healthy — reset last-seen timestamp and clear pending spawn
-        update_state "lastPlannerSeen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        update_state "pendingPlannerSpawn" ""
-        return 0
-    fi
-
-    # No active planners — check how long the gap has been
-    local last_seen
-    last_seen=$(get_state "lastPlannerSeen")
-    local now_epoch
-    now_epoch=$(date +%s)
-    local last_seen_epoch=0
-    [ -n "$last_seen" ] && last_seen_epoch=$(date -d "$last_seen" +%s 2>/dev/null || echo "0")
-    local gap=$(( now_epoch - last_seen_epoch ))
-
-    if [ "$gap" -lt "$PLANNER_LIVENESS_TIMEOUT" ]; then
-        echo "[$(date -u +%H:%M:%S)] Planner liveness: no active planner (gap=${gap}s < ${PLANNER_LIVENESS_TIMEOUT}s threshold). Monitoring."
-        return 0
-    fi
-
-    # Gap exceeded threshold — spawn recovery planner via spawn slot gate
-    echo "[$(date -u +%H:%M:%S)] PLANNER CHAIN DEAD: no planner active for ${gap}s (threshold=${PLANNER_LIVENESS_TIMEOUT}s). Spawning recovery planner."
-
-    # Check circuit breaker before spawning
-    local cb_limit
-    cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
-        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "8")
-    local active_jobs
-    active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
-        2>/dev/null || echo "99")
-    if [ "$active_jobs" -ge "$cb_limit" ]; then
-        echo "[$(date -u +%H:%M:%S)] Planner liveness: circuit breaker active ($active_jobs >= $cb_limit). Cannot spawn recovery planner."
-        return 0
-    fi
-
-    local ts
-    ts=$(date +%s)
-    local task_name="task-recovery-planner-${ts}"
-    local agent_name="planner-recovery-${ts}"
-
-    # Create Task CR
-    kubectl_with_timeout 15 apply -f - <<EOF 2>/dev/null || true
-apiVersion: kro.run/v1alpha1
-kind: Task
-metadata:
-  name: ${task_name}
-  namespace: ${NAMESPACE}
-spec:
-  title: "Recovery: restart planner chain (coordinator watchdog)"
-  description: "Planner chain was dead for ${gap}s. You are the recovery planner. Read the constitution, pick the highest-priority open GitHub issue, implement or delegate it, then spawn your planner successor before exiting. The chain must never break."
-  priority: 10
-  effort: M
-EOF
-
-    # Create Agent CR
-    kubectl_with_timeout 15 apply -f - <<EOF 2>/dev/null || true
-apiVersion: kro.run/v1alpha1
-kind: Agent
-metadata:
-  name: ${agent_name}
-  namespace: ${NAMESPACE}
-  labels:
-    agentex/role: "planner"
-    agentex/generation: "1"
-    agentex/spawned-by: "coordinator-watchdog"
-spec:
-  taskRef: ${task_name}
-  role: planner
-  priority: 10
-EOF
-
-    post_coordinator_thought \
-"PLANNER CHAIN RECOVERY: No planner active for ${gap}s. Spawned recovery planner ${agent_name} (task: ${task_name}).
-This is the coordinator's planner-chain liveness watchdog. Gap threshold: ${PLANNER_LIVENESS_TIMEOUT}s.
-The planner chain is the civilization heartbeat — it must never stay dead for more than 5 minutes." \
-        "insight"
-
-    # Reset last-seen AND record pending spawn timestamp so watchdog skips
-    # the next PENDING_PLANNER_GRACE seconds (pod scheduling lag window, issue #947)
-    update_state "lastPlannerSeen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    update_state "pendingPlannerSpawn" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    echo "[$(date -u +%H:%M:%S)] Recovery planner ${agent_name} spawned."
-}
-
+# (Issue #1001): Removed dead function body that was still present after the comment
+# was added — the function referenced undefined $PLANNER_LIVENESS_TIMEOUT which would
+# have caused a bash unbound variable error under set -u if ever called.
 
 
 echo "Coordinator entering main loop..."
@@ -1039,12 +923,13 @@ while true; do
     # ADAPTIVE SPAWN SLOT RECONCILIATION (issue #669)
     # When system is near capacity, reconcile every cycle (~30s) to prevent proliferation bursts.
     # When idle, reconcile every 4 iterations (~2 min) to reduce overhead.
-    # This prevents the 2-minute reconciliation gap from allowing 16+ agents when limit is 12.
+    # This prevents the 2-minute reconciliation gap from allowing excess agents at capacity.
     
     # Read current circuit breaker limit
+    # Issue #1001: Fallback to 6 (current constitution value), NOT 12.
     cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
-        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "12")
-    if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=12; fi
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+    if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=6; fi
     
     # Count active jobs (fast check, only when needed)
     current_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
