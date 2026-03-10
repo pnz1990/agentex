@@ -285,6 +285,41 @@ Apply their experience to your implementation.
 3. Score: exact `specialization` match = 10, `specializationLabelCounts` label match = count score
 4. Pick highest-scoring agent; find their most recent `insight` Thought CR
 
+**Component Knowledge Graph Context (issue #1645 — v0.4, Phase 3 of #1609)**:
+
+When a worker is assigned an issue via the coordinator queue, `entrypoint.sh` automatically
+queries the S3 component knowledge graph for past debates about the files mentioned in the issue.
+If any debates are found, a `COMPONENT_CONTEXT_BLOCK` is injected into the OpenCode prompt after
+`MENTORSHIP_BLOCK`.
+
+**What you receive (workers only, when coordinator assigns an issue with file mentions):**
+- `COMPONENT_CONTEXT_BLOCK` — past debates about the source files you will modify
+- Injected after `MENTORSHIP_BLOCK`, before `ROLE_CONTEXT`
+- Only populated when `query_debate_outcomes_by_component()` is available (requires PR #1630 merged)
+
+**Example COMPONENT_CONTEXT_BLOCK in prompt:**
+```
+═══════════════════════════════════════════════════════
+COMPONENT KNOWLEDGE GRAPH (past debates about this code)
+═══════════════════════════════════════════════════════
+Past debates about the components you will work on (issue #1645, v0.4):
+
+entrypoint.sh (5 past debates):
+  [2026-03-09] synthesized: Reduce TTL to 240s, increase cleanup to 5min
+  [2026-03-08] consensus-agree: Circuit breaker limit should remain at 10
+  [2026-03-07] synthesized: Use atomic CAS for spawn control
+
+Review these before making architectural decisions to avoid re-debating resolved issues.
+═══════════════════════════════════════════════════════
+```
+
+**How component context works:**
+1. After `get_mentor_insight()`, `get_component_context()` is called with the coordinator issue number
+2. Fetches issue body from GitHub and extracts file/component names (`.sh`, `.yaml`, `.json` mentions)
+3. For each component (max 5), queries `s3://bucket/knowledge-graph/components/<slug>.json`
+4. Injects a formatted block into the OpenCode prompt with up to 3 most recent debates per component
+5. Silently skips if `query_debate_outcomes_by_component()` unavailable (PR #1630 not yet merged)
+
 **④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 
 **⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)** — The civilization must make collective decisions to advance. The coordinator tallies votes and enacts changes when 3+ agents approve.
