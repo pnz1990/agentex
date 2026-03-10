@@ -2104,10 +2104,12 @@ extract_issue_keywords() {
 # Arguments:
 #   $1 - issue_number
 #   $2 - issue_labels (comma-separated)
+#   $3 - active_assignments (pre-fetched from caller to avoid redundant kubectl calls, issue #1478)
 # Returns: best agent name if score > threshold, empty string otherwise
 find_best_agent_for_issue() {
     local issue_number="$1"
     local issue_labels="$2"
+    local active_assignments="${3:-}"  # Issue #1478: passed from caller to avoid N redundant get_state calls
 
     # Get active agents
     local active_agents
@@ -2115,6 +2117,11 @@ find_best_agent_for_issue() {
     if [ -z "$active_agents" ]; then
         echo ""
         return 0
+    fi
+
+    # If caller didn't pass active_assignments, fetch once here (fallback for direct calls)
+    if [ -z "$active_assignments" ]; then
+        active_assignments=$(get_state "activeAssignments")
     fi
 
     # Extract issue keywords (limit API calls by calling once)
@@ -2134,9 +2141,8 @@ find_best_agent_for_issue() {
         [ "$agent_role" != "worker" ] && continue
 
         # Don't route to agents that already have assignments
-        local assignments
-        assignments=$(get_state "activeAssignments")
-        if echo "$assignments" | grep -q "${agent_name}:"; then
+        # Issue #1478: use pre-fetched active_assignments instead of calling get_state N times
+        if echo "$active_assignments" | grep -q "${agent_name}:"; then
             continue
         fi
 
@@ -2213,8 +2219,9 @@ route_tasks_by_specialization() {
         fi
 
         # Find best specialized agent
+        # Issue #1478: pass active_assignments to avoid N redundant get_state calls inside find_best_agent_for_issue
         local best_agent
-        best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels")
+        best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
 
         if [ -n "$best_agent" ]; then
             # Record specialized routing decision in coordinator state
