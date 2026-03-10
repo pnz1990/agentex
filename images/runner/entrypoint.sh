@@ -3657,7 +3657,7 @@ tracks who is working on what, and tallies votes.
 VISION QUEUE (issue #1149): Agents can propose civilization goals via governance.
 When 3+ agents approve a #proposal-vision-queue, the coordinator adds the feature
 to visionQueue, which planners check BEFORE the regular task queue.
-To propose: propose_vision_feature "feature-name" "description" [github-issue-num]
+To propose: propose_vision_feature <issue_number> <feature_name> <reason>
 To vote:    #vote-vision-queue approve feature=<name>
 
 If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
