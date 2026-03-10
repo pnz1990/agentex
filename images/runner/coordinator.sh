@@ -2446,7 +2446,9 @@ The civilization needs mediators, not just voters." \
 #       },
 #       "debatesWon": 0,
 #       "synthesisCount": 2
-#     }
+#     },
+#     "reputationAverage": 7,                  # issue #1602: rolling average visionScore (last 10 runs)
+#     "reputationHistory": [...]               # issue #1602: last 10 {timestamp, visionScore, workSummary}
 #   }
 #
 # IMPORTANT: If identity.sh changes these field names, update the jq paths in
@@ -2588,6 +2590,19 @@ score_agent_for_issue() {
                 done
             fi
         done
+    fi
+
+    # Issue #1602: Factor in reputationAverage for enhancement-labeled issues.
+    # Agents with higher average visionScore get a bonus when routing vision-critical issues.
+    # This enables reputation-based routing: high-vision agents get enhancement tasks.
+    # Bonus: +2 if reputationAverage >= 7 AND issue has "enhancement" label.
+    local rep_average
+    rep_average=$(echo "$identity_json" | jq -r '.reputationAverage // 0' 2>/dev/null || echo "0")
+    local rep_average_int
+    rep_average_int=$(echo "$rep_average" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
+    if echo "$issue_labels" | grep -qi "enhancement" && [ "$rep_average_int" -ge 7 ]; then
+        score=$((score + 2))
+        echo "[$(date -u +%H:%M:%S)] Routing: reputation bonus +2 for $agent_name (reputationAverage=$rep_average, enhancement issue)" >&2
     fi
 
     echo "$score"
