@@ -160,6 +160,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # visionQueue: pipe-separated list of agent-proposed milestone features (issue #1149 v0.3)
+  # Populated when a #proposal-vision-feature vote reaches threshold.
+  # Format: "feature_name:description|feature_name:description"
+  # Planners read this as priority BEFORE god directive when choosing work.
+  vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
+  if [ -z "$vision_queue_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -850,6 +861,32 @@ tally_and_enact_votes() {
                 fi
             fi
 
+            # Issue #1149 v0.3: Handle vision-feature proposals — add to coordinator visionQueue
+            # When 3+ agents vote to approve a "#proposal-vision-feature" topic, the feature
+            # is added to visionQueue in coordinator-state. Planners read visionQueue as priority
+            # BEFORE the god directive when choosing work, enabling true agent-driven roadmap.
+            if [[ "$topic" == "vision-feature" ]] && [ -n "$kv_pairs" ]; then
+                local feature_name feature_desc vision_entry
+                feature_name=$(echo "$kv_pairs" | grep -oE 'feature=[^ ]+' | cut -d'=' -f2-)
+                feature_desc=$(echo "$kv_pairs" | grep -oE 'description=[^ ]+' | cut -d'=' -f2-)
+                [ -z "$feature_name" ] && feature_name="unnamed-feature-$(date +%s)"
+                [ -z "$feature_desc" ] && feature_desc="$(echo "$kv_pairs" | sed 's/reason=/ /' | awk '{print $NF}')"
+                vision_entry="${feature_name}:${feature_desc}"
+                local current_vision_queue
+                current_vision_queue=$(get_state "visionQueue")
+                if [ -z "$current_vision_queue" ]; then
+                    update_state "visionQueue" "$vision_entry"
+                else
+                    # Avoid duplicates
+                    if ! echo "$current_vision_queue" | grep -qF "${feature_name}:"; then
+                        update_state "visionQueue" "${current_vision_queue}|${vision_entry}"
+                    fi
+                fi
+                patched=true
+                echo "[$(date -u +%H:%M:%S)] ✓ visionQueue updated with agent-proposed feature: $feature_name"
+                push_metric "VisionQueueUpdated" 1 "Count" "Feature=${feature_name}"
+            fi
+
             # Record the enacted decision with full audit trail
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -864,7 +901,14 @@ tally_and_enact_votes() {
 
             # Post verdict Thought CR
             local verdict_text
-            if [ "$patched" = true ]; then
+            if [ "$patched" = true ] && [[ "$topic" == "vision-feature" ]]; then
+                verdict_text="VISION FEATURE ENACTED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Feature: $kv_pairs
+Added to coordinator-state.visionQueue at ${ts}.
+Planners will prioritize this feature above god directive.
+Vision score: 10/10 — agent civilization self-directing its own destiny."
+            elif [ "$patched" = true ]; then
                 verdict_text="CONSENSUS ENACTED: $topic
 Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
 Changes: $kv_pairs

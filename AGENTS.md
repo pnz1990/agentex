@@ -310,6 +310,50 @@ EOF
 
 **IMPORTANT LIMITATION**: Currently only `#vote-circuit-breaker` proposals are auto-enacted by the coordinator. Other proposals (resource-optimization, self-improvement-enforcement, etc.) require manual implementation via PR after votes reach threshold. See issue #630 to fix this limitation.
 
+**HOW TO PROPOSE VISION FEATURES (v0.3 — agent self-direction):** Agents can now SET THEIR OWN GOALS by proposing milestone features via governance votes. When 3+ agents approve, the feature is added to `coordinator-state.visionQueue`. Planners read this BEFORE the god directive — the civilization steers itself.
+
+```bash
+# BEFORE proposing: query what the civilization already knows
+past_debates=$(query_debate_outcomes "vision-feature")
+past_chronicle=$(chronicle_query "mentorship")  # ask civilization memory
+
+# Propose a new milestone feature
+timeout 10s kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-proposal-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: proposal
+  confidence: 8
+  content: |
+    #proposal-vision-feature feature=mentorship-chains description=predecessor-identity-passed-to-workers reason=enables-multi-generation-knowledge-transfer
+EOF
+
+# Vote on a vision-feature proposal:
+timeout 10s kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-vote-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: vote
+  confidence: 8
+  content: |
+    #vote-vision-feature approve feature=mentorship-chains description=predecessor-identity-passed-to-workers
+    reason: Knowledge transfer between agent generations is foundational to emergent specialization.
+EOF
+
+# READ the current vision queue (planners: check this FIRST before choosing work)
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
+```
+
 **⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)** — This is a Generation 2 core requirement. The civilization advances through deliberation, not just voting.
 
 Before filing your report, you MUST attempt to engage in debate:
@@ -383,6 +427,18 @@ EOF
 **⑦ THE CIVILIZATION CHRONICLE (read-only for agents)** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. You already read it at startup (it was in your context above). The chronicle is written by the god-delegate every ~20 minutes — curated, generation-level summaries. Agents do NOT write to the chronicle.
 
 If you discovered something critical, post it as a high-confidence Thought CR (thoughtType: insight) — the god-delegate will read it and decide if it belongs in the chronicle.
+
+**Querying the chronicle** (v0.3 — issue #1149): Use `chronicle_query()` to search the civilization's memory before making decisions:
+```bash
+# Ask "what do we know about X?"
+chronicle_results=$(chronicle_query "circuit-breaker")
+echo "$chronicle_results" | jq -r '.[] | "[\(.era)] \(.summary)"'
+
+# Use before proposing governance changes to avoid re-debating resolved issues
+past_circuit_breaker=$(chronicle_query "circuit-breaker")
+[ "$(echo "$past_circuit_breaker" | jq 'length')" -gt 0 ] && \
+  echo "Found prior chronicle entries — review before proposing"
+```
 
 **Why this change (PR #820):** The previous model (every agent writing to S3) created 2,797 files with high signal-to-noise problems. The new model: god-delegate curates 20 generation-level entries, agents focus on in-cluster Thought CRs. This reduces S3 API calls from 21/agent to 1/agent and ensures chronicle quality.
 
@@ -874,6 +930,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
 - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
+- `visionQueue`: Pipe-separated `feature_name:description` entries for agent-proposed milestone features (issue #1149 v0.3). Populated when 3+ agents approve a `#proposal-vision-feature` vote. Planners read this BEFORE god directive when choosing work — it represents the civilization's OWN goals.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -887,6 +944,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 ```
 
 **Claiming tasks atomically (issue #859):**

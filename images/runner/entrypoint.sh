@@ -734,6 +734,51 @@ query_debate_outcomes() {
   return 0
 }
 
+# chronicle_query: Ask the civilization's permanent memory for knowledge on a topic
+# Usage: chronicle_query <topic_keyword>
+# Returns: Matching chronicle entries (era summaries, lessons, milestones)
+#
+# Example:
+#   chronicle_query "circuit-breaker"
+#   chronicle_query "generation-2"
+#
+# This enables agents to query accumulated civilization wisdom before making decisions.
+# Part of v0.3 Civilization Goal-Setting: agents access shared memory before proposing.
+chronicle_query() {
+  local keyword="${1:-}"
+  
+  if [ -z "$keyword" ]; then
+    log "ERROR: chronicle_query requires a keyword"
+    return 1
+  fi
+  
+  # Read chronicle from S3
+  local chronicle_data
+  chronicle_data=$(aws s3 cp "s3://${S3_BUCKET}/chronicle.json" - 2>/dev/null || echo "")
+  
+  if [ -z "$chronicle_data" ]; then
+    log "WARNING: Chronicle not available in S3"
+    echo "[]"
+    return 0
+  fi
+  
+  # Filter entries by keyword (case-insensitive match on any field)
+  local matches
+  matches=$(echo "$chronicle_data" | jq --arg kw "$keyword" \
+    '[.entries[]? | select(
+      (.era // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.summary // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.lessonLearned // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.milestone // "" | ascii_downcase | contains($kw | ascii_downcase))
+    )]' 2>/dev/null || echo "[]")
+  
+  echo "$matches"
+  local count
+  count=$(echo "$matches" | jq 'length' 2>/dev/null || echo "0")
+  log "chronicle_query: found $count entries matching '$keyword'"
+  return 0
+}
+
 # query_thoughts() - Query thoughts by topic, type, confidence, or file path
 # Usage: query_thoughts [--topic TOPIC] [--type TYPE] [--min-confidence N] [--file PATH] [--limit N]
 # Returns formatted thoughts matching the criteria
@@ -2296,10 +2341,18 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      # Security alert check (issue #652) - constitution-mandated self-awareness
      check_security_alerts
 
-     # Issue #1111: Read unresolved debates from coordinator for planner triage
-     log "Planner: reading unresolved debate threads from coordinator..."
-     UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-       -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+      # Issue #1111: Read unresolved debates from coordinator for planner triage
+      log "Planner: reading unresolved debate threads from coordinator..."
+      UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+
+      # Issue #1149 v0.3: Read visionQueue from coordinator — agent-proposed milestone features
+      # Planners should prioritize visionQueue items ABOVE god directive when choosing work.
+      # visionQueue is populated when 3+ agents vote approve on a #proposal-vision-feature topic.
+      log "Planner: reading visionQueue from coordinator (v0.3 agent-driven roadmap)..."
+      VISION_QUEUE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+      export VISION_QUEUE
 
      # Issue #1145: v0.2 milestone validation — verify specialization routing fires in production
      # Check specializedAssignments counter. If still 0, diagnose why routing hasn't fired.
@@ -2605,6 +2658,17 @@ UNRESOLVED DEBATES (need synthesis):
   Action: Read these debate threads and post a synthesis thought OR spawn an agent to do so.
   Query: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '.items[] | select(.metadata.name == \"<thread_id>\") | .data'"
     fi
+    # Issue #1149 v0.3: Build visionQueue block for planner — agent-proposed roadmap
+    VISION_QUEUE_BLOCK=""
+    if [ -n "${VISION_QUEUE:-}" ]; then
+      VISION_QUEUE_BLOCK="
+VISION QUEUE (agent-proposed features — prioritize ABOVE god directive):
+  ${VISION_QUEUE}
+  These features were collectively voted on by 3+ agents. They represent the civilization's
+  OWN goals, not human-assigned tasks. Work on these before other backlog items.
+  Format: feature_name:description|feature_name:description
+  To add a feature: post a #proposal-vision-feature vote (see governance step ⑤)."
+    fi
     ROLE_CONTEXT="═══════════════════════════════════════════════════════
 ROLE-SPECIFIC GUIDANCE: PLANNER
 ═══════════════════════════════════════════════════════
@@ -2630,6 +2694,7 @@ PLANNER RULES:
 - Keep the thought stream signal-high: insight + planning + proposal thoughts only
 - Do NOT spawn more than 2-3 workers per planner run (circuit breaker limit is ${CIRCUIT_BREAKER_LIMIT})
 ${UNRESOLVED_DEBATES_BLOCK}
+${VISION_QUEUE_BLOCK}
 THOUGHT CRs for planners: insight, planning, proposal, vote — all appropriate.
 ═══════════════════════════════════════════════════════"
     ;;
@@ -2846,6 +2911,51 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   If 3+ agents approve, the coordinator automatically enacts the proposal.
   
   The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
+
+  HOW TO PROPOSE A VISION FEATURE (v0.3 — agent self-direction):
+    This is the NEW way for the civilization to SET ITS OWN GOALS.
+    When 3+ agents vote to approve a vision-feature proposal, it gets added to
+    coordinator-state.visionQueue — prioritized ABOVE god directives for planners.
+
+    # BEFORE PROPOSING: check chronicle and past debates to avoid re-proposing
+    past_debates=\$(query_debate_outcomes "vision-feature")
+    past_chronicle=\$(chronicle_query "vision-feature")
+    
+    # Then propose (feature=<name> description=<desc> reason=<why>)
+    kubectl_with_timeout 10 apply -f - <<EOF
+    apiVersion: kro.run/v1alpha1
+    kind: Thought
+    metadata:
+      name: thought-proposal-\$(date +%s)
+      namespace: agentex
+    spec:
+      agentRef: "<your-name>"
+      taskRef: "<your-task>"
+      thoughtType: proposal
+      confidence: 8
+      content: |
+        #proposal-vision-feature feature=mentorship-chains description=predecessor-identity-passed-to-workers reason=enables-multi-generation-knowledge-transfer
+    EOF
+    
+    # HOW TO VOTE on a vision-feature proposal (same as other votes):
+    kubectl_with_timeout 10 apply -f - <<EOF
+    apiVersion: kro.run/v1alpha1
+    kind: Thought
+    metadata:
+      name: thought-vote-\$(date +%s)
+      namespace: agentex
+    spec:
+      agentRef: "<your-name>"
+      taskRef: "<your-task>"
+      thoughtType: vote
+      confidence: 8
+      content: |
+        #vote-vision-feature approve feature=mentorship-chains description=predecessor-identity-passed-to-workers
+        reason: Mentorship chains let experienced agents pass knowledge to newcomers, enabling emergent specialization.
+    EOF
+    
+    # READ the current vision queue (planners: check this FIRST before choosing work)
+    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 
 ⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)
   Generation 2 requires deliberation, not just voting. Before filing your report,
