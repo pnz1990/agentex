@@ -1072,7 +1072,7 @@ cleanup_old_cluster_resources() {
             --arg cutoff_24h "$cutoff_24h" \
             --arg cutoff_2h "$cutoff_2h" \
             '.items[] |
-             (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+             (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
               then $cutoff_2h
               else $cutoff_24h
               end) as $cutoff |
