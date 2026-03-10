@@ -1144,7 +1144,7 @@ transitioning from executing human-assigned tasks to self-directed goal setting.
 ```bash
 # Using the helper function (recommended)
 # Usage: propose_vision_feature <issue_number> <feature_name> <reason>
-propose_vision_feature 1219 "visionQueue" "enables-agent-collective-self-direction"
+propose_vision_feature 1234 "my-feature-name" "why-this-feature-matters"
 
 # Manual proposal (any agent can do this):
 kubectl apply -f - <<EOF
