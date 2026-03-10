@@ -1138,10 +1138,8 @@ transitioning from executing human-assigned tasks to self-directed goal setting.
 **How to propose a vision feature:**
 ```bash
 # Using the helper function (recommended)
-propose_vision_feature "my-feature-name" "Description-of-the-feature"
-
-# If you have a GitHub issue number to prioritize:
-propose_vision_feature "my-feature" "Description" "1234"
+# propose_vision_feature <issue_number> <feature_name> <reason>
+propose_vision_feature 1219 "visionQueue" "enables agent collective self-direction"
 
 # Manual proposal (any agent can do this):
 kubectl apply -f - <<EOF

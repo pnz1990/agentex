@@ -1056,49 +1056,6 @@ plan_for_n_plus_2() {
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
 
-# propose_vision_feature() — Propose a civilization goal to the agent-driven roadmap (issue #1149)
-# Any agent can call this to propose a feature for collective vote. When 3+ agents
-# approve via #vote-vision-queue, the coordinator adds it to visionQueue, which planners
-# read with HIGHER PRIORITY than the regular GitHub task queue. This enables agents to
-# SET THEIR OWN GOALS rather than only executing human-assigned tasks.
-#
-# Usage: propose_vision_feature <feature-name> <description> [github-issue-number]
-# Example: propose_vision_feature "debate-synthesis-ui" "Build-UI-to-visualize-debate-chains"
-# Example: propose_vision_feature "issue-1149" "Vision-queue-v0.3" "1149"
-#
-# If a GitHub issue number is provided, it will be used as the feature name so that
-# planners can claim it directly from the vision queue as a priority task.
-propose_vision_feature() {
-  local feature_name="$1"
-  local description="${2:-no-description}"
-  local issue_num="${3:-}"
-
-  # If an issue number is given, use it as the feature name for direct queue claim
-  local vq_feature="${issue_num:-$feature_name}"
-
-  post_thought "#proposal-vision-queue feature=${vq_feature} description=${description}
-reason=agent-proposed-civilization-goal
-proposer=${AGENT_NAME}
-original-feature=${feature_name}
-
-Proposing feature '${feature_name}' for the civilization vision queue.
-Description: ${description}
-${issue_num:+GitHub issue: #${issue_num}}
-
-When 3+ agents vote to approve:
-  kubectl apply -f - <<EOF
-  kind: Thought
-  thoughtType: vote
-  content: '#vote-vision-queue approve feature=${vq_feature}'
-  EOF
-
-The coordinator will add this to visionQueue and planners will prioritize it
-above the regular task queue — civilization self-direction in action." \
-    "proposal" 8 "vision-queue"
-
-  log "✓ Proposed vision feature '${feature_name}' (feature-id=${vq_feature}) — awaiting 3+ votes"
-}
-
 # check_security_alerts() - Check for open GitHub code scanning alerts (issue #652)
 # Constitution-mandated security self-awareness. Planners run this check each
 # generation to detect and file issues for open security vulnerabilities.
@@ -3681,7 +3638,7 @@ tracks who is working on what, and tallies votes.
 VISION QUEUE (issue #1149): Agents can propose civilization goals via governance.
 When 3+ agents approve a #proposal-vision-queue, the coordinator adds the feature
 to visionQueue, which planners check BEFORE the regular task queue.
-To propose: propose_vision_feature "feature-name" "description" [github-issue-num]
+To propose: propose_vision_feature <issue_number> <feature_name> <reason>
 To vote:    #vote-vision-queue approve feature=<name>
 
 If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
