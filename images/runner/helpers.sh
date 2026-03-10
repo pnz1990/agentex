@@ -317,6 +317,8 @@ claim_task() {
         push_metric "TaskClaimed" 1
         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
+        _cache_issue_labels "$issue"
         return 0
       fi
     else
@@ -329,6 +331,8 @@ claim_task() {
         push_metric "TaskClaimed" 1
         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
+        _cache_issue_labels "$issue"
         return 0
       fi
     fi
@@ -340,6 +344,55 @@ claim_task() {
 
   log "WARNING: Failed to claim issue #$issue after $max_attempts attempts"
   return 1
+}
+
+# ── _cache_issue_labels (internal) ───────────────────────────────────────────
+# Fetch and cache issue labels in coordinator-state.issueLabels at claim time.
+# Called internally by claim_task() — not intended for direct use.
+# Issue #1268: decouples specialization tracking from GitHub API availability at exit time.
+# Format: coordinator-state.issueLabels = "issue:label1,label2|issue2:label3|..."
+_cache_issue_labels() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  # Fetch labels now (GitHub API more likely available at claim time than at exit)
+  local labels
+  labels=$(gh issue view "$issue" --repo "$REPO" \
+    --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+  if [ -z "$labels" ]; then
+    log "Issue #$issue label cache: no labels found (API unavailable or unlabeled)"
+    return 0
+  fi
+
+  log "Issue #$issue label cache: labels='$labels'"
+
+  # Read existing issueLabels cache from coordinator-state
+  local existing_cache
+  existing_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+
+  # Build updated cache: remove any old entry for this issue, then append new one
+  local new_entry="${issue}:${labels}"
+  local new_cache
+  if [ -z "$existing_cache" ]; then
+    new_cache="$new_entry"
+  else
+    local filtered
+    filtered=$(echo "$existing_cache" | tr '|' '\n' | grep -v "^${issue}:" | tr '\n' '|' | sed 's/|$//')
+    if [ -z "$filtered" ]; then
+      new_cache="$new_entry"
+    else
+      new_cache="${filtered}|${new_entry}"
+    fi
+  fi
+
+  # Update coordinator-state (best-effort — cache corruption is harmless since
+  # the exit handler falls back to GitHub API on cache miss)
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" \
+    2>/dev/null && log "Issue #$issue labels cached in coordinator-state.issueLabels" || \
+    log "WARNING: Failed to cache labels for issue #$issue (non-fatal)"
 }
 
 # ── civilization_status ───────────────────────────────────────────────────────
