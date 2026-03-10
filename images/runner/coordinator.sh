@@ -769,6 +769,20 @@ cleanup_stale_assignments() {
     # Format: space-separated "ISSUE=STATE" pairs (no associative arrays for bash 3 compat).
     local issue_state_cache=""
 
+    # Issue #1610: Pre-fetch issues that have open PRs referencing them, once per cleanup call.
+    # Used to distinguish "job done + issue OPEN + PR pending" from "job done + issue OPEN + no PR".
+    # Without this, agents that exit without a PR (analyzed, too complex, etc.) hold assignments forever.
+    # Fetch once and reuse — avoids N API calls for N assignments per 30s cycle.
+    local issues_with_open_prs=""
+    local open_prs_json
+    open_prs_json=$(gh api "/repos/${GITHUB_REPO}/pulls?state=open&per_page=100" 2>/dev/null || echo "")
+    if [ -n "$open_prs_json" ]; then
+        issues_with_open_prs=$(echo "$open_prs_json" | \
+            jq -r '.[].body // ""' 2>/dev/null | \
+            grep -oiE '(closes|fixes|resolves) #[0-9]+' | \
+            grep -oE '[0-9]+' | sort -u | tr '\n' ' ' || echo "")
+    fi
+
     # Helper: look up issue state from cache, or fetch and cache.
     # Usage: _get_issue_state <issue_number>
     # Prints: OPEN | CLOSED | UNKNOWN
@@ -902,7 +916,11 @@ cleanup_stale_assignments() {
             # Issue #1556: Job completed, but check if issue is closed before releasing claim.
             # Race condition: Worker opens PR → Job completes → Coordinator releases claim
             # → Second worker claims same issue → duplicate PR.
-            # Fix: Keep assignment if issue still OPEN (PR pending merge). Only release when CLOSED.
+            # Issue #1610: Job done + issue OPEN does NOT always mean "PR pending merge".
+            # Agent may have analyzed the issue and exited without a PR (too complex, already
+            # fixed, etc.). In that case, keeping the assignment forever blocks future work.
+            # Fix: When job done + issue OPEN, check if an open PR exists for this issue.
+            # If PR exists → keep assignment (PR pending merge). If no PR → release assignment.
             if [[ "$issue" =~ ^[0-9]+$ ]]; then
                 local issue_state
                 # Issue #1561: use cache to avoid duplicate gh issue view calls
@@ -911,12 +929,22 @@ cleanup_stale_assignments() {
                     echo "[$(date -u +%H:%M:%S)] Complete: $agent_name → issue #$issue CLOSED, releasing assignment"
                     stale_count=$((stale_count + 1))
                 elif [ "$issue_state" = "OPEN" ]; then
-                    # Job done but issue still open - likely PR pending merge. Keep assignment.
-                    echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (PR likely pending), keeping assignment"
-                    local clean_pair="${agent_name}:${issue}"
-                    [ -n "$cleaned_assignments" ] \
-                        && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
-                        || cleaned_assignments="${clean_pair}"
+                    # Issue #1610: Check if an open PR exists for this issue before keeping assignment.
+                    # Agents that exit without a PR (analyzed + decided too complex) would block
+                    # the issue indefinitely under the old "issue OPEN = PR pending" assumption.
+                    # Use pre-fetched issues_with_open_prs (fetched once per cleanup call, not per assignment).
+                    if echo " ${issues_with_open_prs} " | grep -q " ${issue} "; then
+                        # Job done, issue open, PR exists — PR is pending merge. Keep assignment.
+                        echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (open PR found), keeping assignment"
+                        local clean_pair="${agent_name}:${issue}"
+                        [ -n "$cleaned_assignments" ] \
+                            && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                            || cleaned_assignments="${clean_pair}"
+                    else
+                        # Job done, issue open, NO open PR — agent exited without PR. Release slot.
+                        echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue OPEN but no open PR (agent exited without PR), releasing assignment"
+                        stale_count=$((stale_count + 1))
+                    fi
                 else
                     # UNKNOWN state (API error or non-issue task) - release to be safe
                     echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue state UNKNOWN, releasing assignment"
