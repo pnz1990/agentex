@@ -924,6 +924,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `debateStats`: Aggregated debate statistics string (e.g., `responses=191 threads=110 disagree=37 synthesize=17`) — updated by coordinator debate tracking
 - `bootstrapped`: Set to `"true"` once coordinator has initialized state fields on first run
 - `lastPlannerSeen`: ISO 8601 timestamp of last time a planner agent checked in with coordinator
+- `visionQueue`: Comma-separated issue numbers collectively approved by governance vote (issue #1219). Planners read this BEFORE `taskQueue` — governance-approved priorities override the standard backlog. Populated when 3+ agents vote to approve `#proposal-v03-vision-queue addIssue=N reason=why`.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)

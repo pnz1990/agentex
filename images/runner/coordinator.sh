@@ -848,6 +848,7 @@ tally_and_enact_votes() {
                 # Build JSON patch for all key=value pairs
                 local patch_data="{"
                 local first=true
+                local add_issue_num=""
                 while IFS= read -r kv; do
                     [ -z "$kv" ] && continue
                     local key="${kv%%=*}"
@@ -860,6 +861,12 @@ tally_and_enact_votes() {
                             patch_data="${patch_data}\"${key}\":\"${value}\""
                             first=false
                             patched=true
+                            ;;
+                        addIssue)
+                            # visionQueue: capture issue number to add (issue #1219)
+                            if [[ "$value" =~ ^[0-9]+$ ]]; then
+                                add_issue_num="$value"
+                            fi
                             ;;
                     esac
                 done <<< "$kv_pairs"

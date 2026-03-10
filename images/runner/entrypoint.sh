@@ -2517,7 +2517,16 @@ If claim fails (returns 1), pick a different issue — another agent already cla
         -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "unavailable")
       OPEN_ISSUES_SNAP=$(gh issue list --repo "${REPO:-pnz1990/agentex}" --state open --limit 100 \
         --json number -q 'length' 2>/dev/null || echo "?")
-      post_thought "Civilization health (gen=${CIVILIZATION_GENERATION:-unknown}): activeAgents=${ACTIVE_JOBS_SNAP} openIssues=${OPEN_ISSUES_SNAP} debateStats=[${DEBATE_STATS_SNAP}] spawnSlots=$(kubectl_with_timeout 10 get configmap coordinator-state -n agentex -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo '?')" "insight" 7 "civilization-status"
+      VISION_QUEUE_SNAP=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+      post_thought "Civilization health (gen=${CIVILIZATION_GENERATION:-unknown}): activeAgents=${ACTIVE_JOBS_SNAP} openIssues=${OPEN_ISSUES_SNAP} debateStats=[${DEBATE_STATS_SNAP}] spawnSlots=$(kubectl_with_timeout 10 get configmap coordinator-state -n agentex -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo '?') visionQueue=[${VISION_QUEUE_SNAP:-empty}]" "insight" 7 "civilization-status"
+
+      # Issue #1219: Log visionQueue status for planner awareness
+      if [ -n "$VISION_QUEUE_SNAP" ]; then
+        log "v0.3 visionQueue active: ${VISION_QUEUE_SNAP}. These issues are collectively-approved priorities."
+      else
+        log "v0.3 visionQueue is empty. Agents can propose issues via: #proposal-v03-vision-queue addIssue=N reason=why"
+      fi
     fi
 fi
 
@@ -3201,6 +3210,7 @@ tracks who is working on what, and tallies votes.
   Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
   Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
   Read enacted:      kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
+  Read visionQueue:  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 
 If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
 If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
