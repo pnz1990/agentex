@@ -3043,6 +3043,17 @@ else
   SI_DETAILS="Low compliance: no issues or PRs created (may have worked on assigned issue)"
 fi
 
+# Track identity stats for issues filed and PRs opened this session (issue #1139)
+# These stats power identity-based routing (#1113) and agent reputation tracking
+if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+  if [ "${ISSUES_CREATED:-0}" -gt 0 ]; then
+    update_identity_stats "issuesFiled" "$ISSUES_CREATED" 2>/dev/null || true
+  fi
+  if [ "${PRS_OPENED:-0}" -gt 0 ]; then
+    update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
+  fi
+fi
+
 # Post audit result as a thought for peer visibility
 post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
 
