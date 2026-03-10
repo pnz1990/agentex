@@ -30,6 +30,7 @@ NAMESPACE="${NAMESPACE:-agentex}"
 STATE_CM="coordinator-state"
 HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
+MAX_THOUGHT_AGE_DAYS=1  # governance thoughts older than this are ignored (issue #1407, tally-perf governance vote)
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 IDENTITY_BUCKET="${S3_BUCKET:-agentex-thoughts}"  # S3 bucket for agent identities (issue #1113)
 SPECIALIZATION_ROUTING_THRESHOLD=2  # min score to trigger specialization-based routing (issue #1113, lowered from 5→3→2 per issue #1145: single label match gives score=3>2)
@@ -77,6 +78,14 @@ VOTE_THRESHOLD_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n
 if [ -n "$VOTE_THRESHOLD_FROM_CONSTITUTION" ] && [[ "$VOTE_THRESHOLD_FROM_CONSTITUTION" =~ ^[0-9]+$ ]]; then
   VOTE_THRESHOLD="$VOTE_THRESHOLD_FROM_CONSTITUTION"
 fi
+# Read maxThoughtAgeDays from constitution (issue #1407) — governance-voted limit on how old
+# thoughts can be for governance tallying. Enacted by tally-perf vote (maxThoughtAgeDays=1).
+# Default=1 (only process thoughts from last 24h). Prevents 1800+ thought scan on every tally.
+MAX_THOUGHT_AGE_DAYS_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.maxThoughtAgeDays}' 2>/dev/null || echo "")
+if [ -n "$MAX_THOUGHT_AGE_DAYS_FROM_CONSTITUTION" ] && [[ "$MAX_THOUGHT_AGE_DAYS_FROM_CONSTITUTION" =~ ^[0-9]+$ ]]; then
+  MAX_THOUGHT_AGE_DAYS="$MAX_THOUGHT_AGE_DAYS_FROM_CONSTITUTION"
+fi
 # Read minimumVisionScore from constitution (issue #1063) — allows governance to tune
 # the minimum acceptable vision score for agent work quality enforcement.
 MINIMUM_VISION_SCORE=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
@@ -87,6 +96,7 @@ fi
 echo "GitHub repo (from constitution): $GITHUB_REPO"
 echo "Bedrock region (from constitution): $BEDROCK_REGION"
 echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
+echo "Max thought age for tally (from constitution): ${MAX_THOUGHT_AGE_DAYS}d"
 echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
@@ -891,6 +901,18 @@ tally_and_enact_votes() {
         fi
     fi
 
+    # Re-read maxThoughtAgeDays from constitution (issue #1407) — allows governance to change
+    # tally scope without coordinator restart. Default=1 (enacted by tally-perf governance vote).
+    local current_max_age
+    current_max_age=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.maxThoughtAgeDays}' 2>/dev/null || echo "")
+    if [ -n "$current_max_age" ] && [[ "$current_max_age" =~ ^[0-9]+$ ]]; then
+        if [ "$current_max_age" != "$MAX_THOUGHT_AGE_DAYS" ]; then
+            echo "[$(date -u +%H:%M:%S)] maxThoughtAgeDays updated from constitution: $MAX_THOUGHT_AGE_DAYS → $current_max_age"
+            MAX_THOUGHT_AGE_DAYS="$current_max_age"
+        fi
+    fi
+
     # Write thoughts to temp file. Read from ConfigMap .data fields — this is where
     # agent-created thoughts live (kro syncs Thought CRs → ConfigMaps with -thought suffix).
     # Do NOT use gsub or encoding transforms — raw .data.content is correct as-is.
@@ -905,8 +927,20 @@ tally_and_enact_votes() {
      # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
      # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
      # Issue #1248: Also include debate thoughts for vision-feature deliberation threshold check.
+     # Issue #1407: Filter thoughts older than MAX_THOUGHT_AGE_DAYS to prevent slow tally cycles.
+     # The tally-perf governance vote enacted maxThoughtAgeDays=1 — only last 24h of thoughts needed.
+     # Old enacted decisions are tracked in enactedDecisions; re-reading them is redundant work.
+     local tally_cutoff
+     tally_cutoff=$(date -u -d "${MAX_THOUGHT_AGE_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+         || date -u -v "-${MAX_THOUGHT_AGE_DAYS}d" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+         || echo "")
+     echo "[$(date -u +%H:%M:%S)] Tally scope: last ${MAX_THOUGHT_AGE_DAYS} day(s) (cutoff: ${tally_cutoff:-unlimited})"
+
      kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-         | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") | {
+         | jq --arg cutoff "${tally_cutoff}" '[.items[] | select(
+               (.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate")
+               and ($cutoff == "" or .metadata.creationTimestamp >= $cutoff)
+             ) | {
              agent: (.data.agentRef // "unknown"),
              content: (.data.content // ""),
              type: (.data.thoughtType // ""),
@@ -1231,7 +1265,7 @@ NUDGE_EOF
                     
                     # Check if this is a known constitution key
                     case "$key" in
-                        circuitBreakerLimit|minimumVisionScore|jobTTLSeconds|voteThreshold)
+                        circuitBreakerLimit|minimumVisionScore|jobTTLSeconds|voteThreshold|maxThoughtAgeDays)
                             [ "$first" = false ] && patch_data="${patch_data},"
                             patch_data="${patch_data}\"${key}\":\"${value}\""
                             first=false
@@ -1287,6 +1321,16 @@ NUDGE_EOF
                         if [ -n "$new_threshold" ] && [[ "$new_threshold" =~ ^[0-9]+$ ]]; then
                             VOTE_THRESHOLD="$new_threshold"
                             echo "[$(date -u +%H:%M:%S)] ✓ VOTE_THRESHOLD updated to $VOTE_THRESHOLD (governance-enacted)"
+                        fi
+                    fi
+                    # Issue #1407: Reload maxThoughtAgeDays from constitution if it was just updated
+                    if echo "$kv_pairs" | grep -q "maxThoughtAgeDays="; then
+                        local new_max_age
+                        new_max_age=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+                            -o jsonpath='{.data.maxThoughtAgeDays}' 2>/dev/null || echo "")
+                        if [ -n "$new_max_age" ] && [[ "$new_max_age" =~ ^[0-9]+$ ]]; then
+                            MAX_THOUGHT_AGE_DAYS="$new_max_age"
+                            echo "[$(date -u +%H:%M:%S)] ✓ MAX_THOUGHT_AGE_DAYS updated to $MAX_THOUGHT_AGE_DAYS (governance-enacted)"
                         fi
                     fi
                     

@@ -66,6 +66,11 @@ civilization:
   # Minimum approve votes required to enact a governance proposal
   voteThreshold: "3"
 
+  # Maximum age (days) of governance thoughts considered during vote tallying (issue #1407)
+  # Thoughts older than this are ignored — prevents scanning all historical votes on every tally cycle.
+  # Enacted by tally-perf governance vote (maxThoughtAgeDays=1).
+  maxThoughtAgeDays: "1"
+
   # Minimum vision score for agent work (agents should only take high-value tasks)
   minimumVisionScore: "5"
 

@@ -49,6 +49,10 @@ data:
   # Minimum vision score for agent work
   minimumVisionScore: {{ .Values.civilization.minimumVisionScore | quote }}
 
+  # Maximum age (days) of governance thoughts for tally (issue #1407)
+  # Prevents scanning all historical votes on every tally cycle (governance-enacted)
+  maxThoughtAgeDays: {{ .Values.civilization.maxThoughtAgeDays | default "1" | quote }}
+
   # God's current directive to the civilization
   lastDirective: |
     {{ .Values.civilization.lastDirective | nindent 4 | trim }}

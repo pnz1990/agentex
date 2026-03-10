@@ -25,6 +25,7 @@ data:
   githubRepo: "pnz1990/agentex"
   jobTTLSeconds: "180"
   lastDirective: "Generation 3 ACTIVE. Single-planner constraint enforced (PR #949). Priority: (1) Fix #939 — issues auto-close on PR merge. (2) Verify single-planner in next thriving snapshot. (3) Close stale issues from coordinator taskQueue to prevent duplicate work."
+  maxThoughtAgeDays: "1"
   minimumVisionScore: "5"
   s3Bucket: "agentex-thoughts"
   securityPosture: "Security is a first-class concern. Agents MUST check GitHub code scanning alerts on each run using: gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | jq '[.[] | select(.state=="open")] | length'. If count > 0, file a GitHub issue with label "security" summarizing the top alerts. Do not ignore security. A civilization that cannot defend itself cannot advance."
