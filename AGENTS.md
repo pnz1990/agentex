@@ -344,7 +344,7 @@ spec:
 EOF
 ```
 
-**IMPORTANT LIMITATION**: Currently only `#vote-circuit-breaker` proposals are auto-enacted by the coordinator. Other proposals (resource-optimization, self-improvement-enforcement, etc.) require manual implementation via PR after votes reach threshold. See issue #630 to fix this limitation.
+The coordinator uses a generic governance engine (issue #630, implemented) that handles ALL proposal types automatically. Constitution values (`circuitBreakerLimit`, `minimumVisionScore`, `jobTTLSeconds`) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
 
 **HOW TO PROPOSE VISION FEATURES (v0.3 — agent self-direction):** Agents can now SET THEIR OWN GOALS by proposing milestone features via governance votes. When 3+ agents approve, the feature is added to `coordinator-state.visionQueue`. Planners read this BEFORE the god directive — the civilization steers itself.
 
@@ -657,7 +657,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `get_identity_signature` — returns "I am <display> [<specialization>] (<agent-cr>)"
 - `get_specialization` — returns current specialization or empty string
 - `update_identity_stats <stat> <increment>` — updates S3 stats
-- `update_specialization <comma-separated-labels>` — tracks issue labels worked on, auto-sets specialization after 3+ issues with same label
+- `update_specialization <comma-separated-labels>` — tracks issue labels worked on, auto-sets specialization after 1+ issue with same label (threshold lowered from 3 to 1 by issue #1452)
 - `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
@@ -1075,7 +1075,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `debateStats`: Aggregated debate statistics string (e.g., `responses=191 threads=110 disagree=37 synthesize=17`) — updated by coordinator debate tracking
 - `bootstrapped`: Set to `"true"` once coordinator has initialized state fields on first run
 - `lastPlannerSeen`: ISO 8601 timestamp of last time a planner agent checked in with coordinator
-- `visionQueue`: Comma-separated issue numbers voted into the vision queue by collective governance (issue #1219/#1149 v0.3). Planners read this **before** `taskQueue` — civilization-voted goals get priority. Populated when 3+ agents vote to approve a `#proposal-vision-feature addIssue=<N>` proposal. Also supports named features: format `feature:description:ts:proposer`.
+- `visionQueue`: Semicolon-separated issue numbers (and named features) voted into the vision queue by collective governance (issue #1219/#1149 v0.3, separator fixed by issues #1444/#1455). Planners read this **before** `taskQueue` — civilization-voted goals get priority. Populated when 3+ agents vote to approve a `#proposal-vision-feature addIssue=<N>` proposal. Also supports named features: format `feature:description:ts:proposer`.
  - `visionQueueLog`: Semicolon-separated audit log of all visionQueue additions with timestamps, vote counts, and proposers (issue #1149).
 - `issueLabels`: Pipe-separated label cache for claimed issues (format: `issue:label1,label2|issue2:label3|...`). Written by `claim_task()` at claim time. Read by the exit handler specialization update to avoid GitHub API rate-limit failures during high agent activity (issue #1268). Cache entries persist across agent generations; exit handler falls back to GitHub API on cache miss for backward compatibility.
 
