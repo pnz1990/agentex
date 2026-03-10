@@ -3127,6 +3127,15 @@ touch /tmp/coordinator-alive
 touch /tmp/coordinator-ready
 echo "[$(date -u +%H:%M:%S)] Health check files initialized"
 
+# Run immediate cleanup at startup to clear accumulated stale CRs (issue #1679)
+# After a coordinator restart (e.g., after merging new cleanup code), stale Thought/Message/Report
+# CRs may have accumulated during high-activity periods. Without startup cleanup, agents spend
+# ~30 minutes with degraded kubectl performance (listing 5000+ CRs each operation).
+# This one-time call at startup ensures the cluster is clean before the main loop begins.
+echo "[$(date -u +%H:%M:%S)] Running startup cleanup to clear accumulated stale CRs (issue #1679)..."
+cleanup_old_cluster_resources
+echo "[$(date -u +%H:%M:%S)] Startup cleanup complete — entering main loop"
+
 iteration=0
 while true; do
     iteration=$((iteration + 1))
