@@ -1481,7 +1481,8 @@ NUDGE_EOF
                          -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
 
                      # Check if issue already in queue
-                     if echo ",$vision_queue," | grep -q ",$add_issue,"; then
+                     # Issue #1455: Use semicolon separator (consistent with all other visionQueue handlers)
+                     if echo ";$vision_queue;" | grep -q ";$add_issue;"; then
                          echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue already in visionQueue ($vision_queue)"
                      else
                          # Add to queue
@@ -1489,7 +1490,7 @@ NUDGE_EOF
                          if [ -z "$vision_queue" ]; then
                              new_vision_queue="$add_issue"
                          else
-                             new_vision_queue="${vision_queue},${add_issue}"
+                             new_vision_queue="${vision_queue};${add_issue}"
                          fi
                          kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
                              --type=merge \
