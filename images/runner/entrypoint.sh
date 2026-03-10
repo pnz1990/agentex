@@ -617,35 +617,61 @@ query_thoughts() {
     2>/dev/null || true
 }
 
-# cleanup_old_thoughts() - Delete thoughts older than 24 hours to prevent clutter
+# cleanup_old_thoughts() - Delete thoughts using tiered TTL to prevent clutter
+# Issue #1016: Tiered cleanup reduces 5000+ noise thoughts accumulating in the cluster.
+# Low-signal types (blocker, observation) expire after 2 hours — these are transient
+# status events that have no historical value after the event passes.
+# High-signal types (insight, decision, debate, proposal, vote) expire after 24 hours
+# to preserve actionable wisdom and governance history.
 # Should be called periodically by planners
 cleanup_old_thoughts() {
-  local cutoff_time=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-  
-  if [ -z "$cutoff_time" ]; then
+  local cutoff_2h
+  local cutoff_24h
+  cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_24h" ]; then
     log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
     return 0
   fi
-  
-  local old_thoughts=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq -r --arg cutoff "$cutoff_time" \
-    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
-  
-  if [ -z "$old_thoughts" ]; then
-    log "No old thoughts to clean up"
-    return 0
+
+  # Fetch all thoughts once (label selector for efficiency — issue #1011)
+  local all_thoughts_json
+  all_thoughts_json=$(kubectl_with_timeout 30 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
+
+  # Low-signal types: delete after 2 hours (blocker, observation)
+  # These are transient status events (circuit breaker notifications, spawn observations)
+  # with no actionable value after a few hours.
+  local old_low_signal=""
+  if [ -n "$cutoff_2h" ]; then
+    old_low_signal=$(echo "$all_thoughts_json" | jq -r \
+      --arg cutoff "$cutoff_2h" \
+      '.items[] | select(.metadata.creationTimestamp < $cutoff) |
+       select(.spec.thoughtType == "blocker" or .spec.thoughtType == "observation") |
+       .metadata.name' 2>/dev/null || true)
   fi
-  
+
+  # High-signal types: delete after 24 hours (insight, decision, debate, proposal, vote, planning, etc.)
+  # Preserve actionable wisdom, governance history, and cross-agent debate chains.
+  local old_high_signal
+  old_high_signal=$(echo "$all_thoughts_json" | jq -r \
+    --arg cutoff "$cutoff_24h" \
+    '.items[] | select(.metadata.creationTimestamp < $cutoff) |
+     select(.spec.thoughtType != "blocker" and .spec.thoughtType != "observation") |
+     .metadata.name' 2>/dev/null || true)
+
   local count=0
-  for thought_name in $old_thoughts; do
+  for thought_name in $old_low_signal $old_high_signal; do
     if kubectl_with_timeout 10 delete thought.kro.run "$thought_name" -n "$NAMESPACE" 2>/dev/null; then
       count=$((count + 1))
     fi
   done
-  
+
   if [ $count -gt 0 ]; then
-    log "Cleaned up $count thoughts older than 24h"
-    post_thought "Cleaned up $count thoughts older than 24 hours to prevent cluster clutter" "observation" 7 "maintenance"
+    log "Cleaned up $count thoughts (low-signal types: 2h TTL, high-signal types: 24h TTL)"
+    post_thought "Cleaned up $count thoughts (blocker/observation: 2h TTL; insight/decision/debate: 24h TTL)" "observation" 7 "maintenance"
+  else
+    log "No old thoughts to clean up"
   fi
 }
 
