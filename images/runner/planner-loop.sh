@@ -39,7 +39,11 @@ fi
 kubectl_with_timeout() {
   local timeout_secs="${1:-10}"
   shift
-  timeout "${timeout_secs}s" kubectl "$@" 2>&1
+  # Issue #992 (same as #982 in coordinator.sh, #959 in entrypoint.sh): Do NOT use 2>&1
+  # That mixes stderr into stdout, corrupting JSON output when callers use
+  # $(kubectl_with_timeout ...) to capture data and pipe to jq.
+  # Stderr is suppressed here; callers that need error context add 2>&1 explicitly.
+  timeout "${timeout_secs}s" kubectl "$@" 2>/dev/null
 }
 
 push_metric() {
