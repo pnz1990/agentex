@@ -364,6 +364,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
   fi
 
+  # agentTrustGraph (v0.5, issue #1734/#1756): pipe-separated trust edges from cite_debate_outcome() calls.
+  # Format: "citingAgent:citedAgent:count|citingAgent2:citedAgent:count2|..."
+  # Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust.
+  # Used by score_agent_for_issue() (issue #1750) to give routing priority to widely-cited agents.
+  # Initialize to empty string if absent — cite_debate_outcome() in helpers.sh writes actual entries.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("agentTrustGraph")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing agentTrustGraph (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"agentTrustGraph":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
