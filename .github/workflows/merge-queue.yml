@@ -1,0 +1,313 @@
+name: Automated Merge Queue
+
+# Processes agent PRs automatically:
+# 1. Detects duplicate PRs referencing the same issue (closes extras)
+# 2. Auto-rebases non-protected PRs on main
+# 3. Auto-merges when CI passes for non-protected PRs
+# 4. Skips PRs touching protected files (flags for god review)
+#
+# Protected files (require god-approved label):
+#   images/runner/entrypoint.sh
+#   AGENTS.md
+#   manifests/rgds/*.yaml
+#
+# Runs every 5 minutes + on push to main (to rebase newly stale PRs).
+#
+# Closes #1828
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  process-merge-queue:
+    name: Process merge queue
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.name "agentex-bot"
+          git config --global user.email "agentex-bot@users.noreply.github.com"
+
+      - name: Ensure required labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        continue-on-error: true
+        run: |
+          gh label create "needs-closes-keyword" \
+            --repo "$REPO" \
+            --description "PR is missing Closes #N keyword required for auto-merge" \
+            --color "e4e669" 2>/dev/null || true
+          gh label create "needs-god-review" \
+            --repo "$REPO" \
+            --description "PR touches protected files — requires god-approved label before merge" \
+            --color "d93f0b" 2>/dev/null || true
+
+      - name: Process open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          echo "════════════════════════════════════════════════════"
+          echo "Agentex Automated Merge Queue"
+          echo "Run at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "════════════════════════════════════════════════════"
+
+          # Protected file patterns — PRs touching these require god-approved label
+          PROTECTED_PATTERNS="images/runner/entrypoint.sh AGENTS.md manifests/rgds/"
+
+          # ─── Step 1: Gather all open PRs ───────────────────────
+          echo ""
+          echo "Step 1: Fetching open PRs..."
+          OPEN_PRS=$(gh pr list --repo "$REPO" --state open \
+            --json number,title,headRefName,isDraft,labels,statusCheckRollup,body \
+            --limit 100 2>/dev/null || echo "[]")
+
+          PR_COUNT=$(echo "$OPEN_PRS" | jq 'length')
+          echo "Found $PR_COUNT open PRs"
+
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "No open PRs. Queue empty."
+            exit 0
+          fi
+
+          # ─── Step 2: Detect duplicate PRs for same issue ───────
+          echo ""
+          echo "Step 2: Detecting duplicate PRs..."
+
+          CLOSED_DUPLICATES=0
+
+          # Write PR→issue mapping to temp file for dedup
+          MAPPING_FILE=$(mktemp)
+          echo "$OPEN_PRS" | jq -r '.[] | .number as $num | .body as $body | .title as $title |
+            (($body + " " + $title) | ascii_downcase |
+             [scan("(?:closes|fixes|resolves)\\s+#([0-9]+)") | .[0]] | first // "") as $issue |
+            if $issue != "" then "\($issue) \($num)" else empty end' \
+            2>/dev/null > "$MAPPING_FILE" || true
+
+          # For each issue, if multiple PRs — close all but the first (lowest number)
+          while IFS= read -r ISSUE_NUM; do
+            PR_NUMS=$(grep "^${ISSUE_NUM} " "$MAPPING_FILE" | awk '{print $2}' | sort -n | tr '\n' ' ')
+            PR_ARRAY=($PR_NUMS)
+            if [ "${#PR_ARRAY[@]}" -le 1 ]; then
+              continue
+            fi
+            KEEP_PR="${PR_ARRAY[0]}"
+            echo "  Issue #$ISSUE_NUM: ${#PR_ARRAY[@]} PRs (keeping earliest: #$KEEP_PR)"
+            for i in "${!PR_ARRAY[@]}"; do
+              if [ "$i" -eq 0 ]; then continue; fi
+              DUP_PR="${PR_ARRAY[$i]}"
+              echo "  Closing duplicate PR #$DUP_PR..."
+              gh pr close "$DUP_PR" --repo "$REPO" \
+                --comment "🤖 Automated merge queue: Closing as duplicate of PR #${KEEP_PR} (both reference issue #${ISSUE_NUM}). Keeping earliest-filed PR to prevent duplicate merges." \
+                2>/dev/null || echo "  Warning: Could not close PR #$DUP_PR"
+              CLOSED_DUPLICATES=$((CLOSED_DUPLICATES + 1))
+            done
+          done < <(awk '{print $1}' "$MAPPING_FILE" | sort -u)
+          rm -f "$MAPPING_FILE"
+
+          echo "Closed $CLOSED_DUPLICATES duplicate PRs"
+
+          # ─── Step 3: Process each PR ───────────────────────────
+          echo ""
+          echo "Step 3: Processing PRs for auto-rebase and merge..."
+
+          REBASED=0
+          MERGED=0
+          SKIPPED_PROTECTED=0
+          SKIPPED_NOT_READY=0
+
+          # Re-fetch open PRs (some may have been closed as duplicates)
+          OPEN_PRS=$(gh pr list --repo "$REPO" --state open \
+            --json number,title,headRefName,isDraft,labels,statusCheckRollup,body \
+            --limit 100 2>/dev/null || echo "[]")
+
+          while IFS= read -r pr_json; do
+            # Note: process substitution used (done < <(...)) to preserve variable scope
+            PR_NUM=$(echo "$pr_json" | jq -r '.number')
+            PR_TITLE=$(echo "$pr_json" | jq -r '.title')
+            PR_BRANCH=$(echo "$pr_json" | jq -r '.headRefName')
+            PR_DRAFT=$(echo "$pr_json" | jq -r '.isDraft')
+            PR_LABELS=$(echo "$pr_json" | jq -r '[.labels[].name] | join(",")')
+            PR_BODY=$(echo "$pr_json" | jq -r '.body // ""')
+
+            echo ""
+            echo "────────────────────────────────────────────────"
+            echo "Processing PR #$PR_NUM: $PR_TITLE"
+            echo "  Branch: $PR_BRANCH"
+            echo "  Labels: ${PR_LABELS:-none}"
+            echo "  Draft:  $PR_DRAFT"
+
+            # Skip draft PRs
+            if [ "$PR_DRAFT" = "true" ]; then
+              echo "  → SKIP: draft PR"
+              continue
+            fi
+
+            # Check if PR has closing keyword in body
+            ISSUE_REF=$(echo "$PR_BODY $PR_TITLE" | \
+              grep -oiP '(?:closes|fixes|resolves)\s+#\K[0-9]+' 2>/dev/null | head -1 || true)
+            if [ -z "$ISSUE_REF" ]; then
+              echo "  → SKIP: No 'Closes #N' or 'Fixes #N' in PR body/title"
+              echo "  → Adding label 'needs-closes-keyword' for visibility"
+              gh pr edit "$PR_NUM" --repo "$REPO" --add-label "needs-closes-keyword" 2>/dev/null || true
+              continue
+            fi
+            echo "  Issue: #$ISSUE_REF"
+
+            # Check if issue is still open
+            ISSUE_STATE=$(gh issue view "$ISSUE_REF" --repo "$REPO" \
+              --json state -q '.state' 2>/dev/null || echo "unknown")
+            if [ "$ISSUE_STATE" = "CLOSED" ]; then
+              echo "  → SKIP: Issue #$ISSUE_REF is already CLOSED"
+              gh pr comment "$PR_NUM" --repo "$REPO" \
+                --body "🤖 Automated merge queue: Issue #${ISSUE_REF} is already closed. This PR may be a duplicate — please verify and close if resolved." \
+                2>/dev/null || true
+              continue
+            fi
+
+            # Check for protected files in this PR
+            PR_FILES=$(gh pr view "$PR_NUM" --repo "$REPO" \
+              --json files -q '[.files[].path] | join(",")' 2>/dev/null || echo "")
+            IS_PROTECTED=false
+            PROTECTED_MATCH=""
+            for PATTERN in $PROTECTED_PATTERNS; do
+              if echo "$PR_FILES" | grep -q "$PATTERN"; then
+                IS_PROTECTED=true
+                PROTECTED_MATCH="$PATTERN"
+                break
+              fi
+            done
+
+            if [ "$IS_PROTECTED" = "true" ]; then
+              echo "  → PROTECTED: Touches $PROTECTED_MATCH"
+              echo "  → Adding 'needs-god-review' label"
+              gh pr edit "$PR_NUM" --repo "$REPO" --add-label "needs-god-review" 2>/dev/null || true
+              # Auto-rebase even protected PRs so they're ready when god reviews
+              echo "  → Auto-rebasing protected PR so it is ready for god review..."
+              git fetch origin "$PR_BRANCH" 2>/dev/null || true
+              git fetch origin main 2>/dev/null || true
+              COMMITS_BEHIND=$(git rev-list "refs/remotes/origin/${PR_BRANCH}..refs/remotes/origin/main" \
+                --count 2>/dev/null || echo "0")
+              if [ "$COMMITS_BEHIND" -gt 0 ]; then
+                git checkout "$PR_BRANCH" 2>/dev/null && \
+                git rebase origin/main 2>/dev/null && \
+                git push --force-with-lease origin "$PR_BRANCH" 2>/dev/null && \
+                echo "  ✓ Protected PR rebased ($COMMITS_BEHIND commits caught up)" && \
+                gh pr comment "$PR_NUM" --repo "$REPO" \
+                  --body "🤖 Automated merge queue: Rebased on \`main\` ($COMMITS_BEHIND commits). Ready for god review." \
+                  2>/dev/null || echo "  Warning: rebase/push failed for protected PR" || true
+                git checkout main 2>/dev/null || git checkout - 2>/dev/null || true
+              fi
+              continue
+            fi
+
+            # ── Check CI status ──────────────────────────────────
+            CHECKS=$(echo "$pr_json" | jq '.statusCheckRollup // []')
+            TOTAL_CHECKS=$(echo "$CHECKS" | jq 'length')
+            PENDING_CHECKS=$(echo "$CHECKS" | jq \
+              '[.[] | select(.status == "IN_PROGRESS" or .status == "QUEUED" or .status == "PENDING")] | length')
+            FAILED_CHECKS=$(echo "$CHECKS" | jq \
+              '[.[] | select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")] | length')
+            PASSED_CHECKS=$(echo "$CHECKS" | jq \
+              '[.[] | select(.conclusion == "SUCCESS")] | length')
+
+            echo "  CI: total=$TOTAL_CHECKS pending=$PENDING_CHECKS failed=$FAILED_CHECKS passed=$PASSED_CHECKS"
+
+            if [ "$TOTAL_CHECKS" -eq 0 ]; then
+              echo "  → SKIP: No CI checks found (checks not yet triggered)"
+              continue
+            fi
+
+            if [ "$PENDING_CHECKS" -gt 0 ]; then
+              echo "  → SKIP: $PENDING_CHECKS CI checks still running"
+              continue
+            fi
+
+            if [ "$FAILED_CHECKS" -gt 0 ]; then
+              echo "  → SKIP: $FAILED_CHECKS CI checks FAILED"
+              continue
+            fi
+
+            # All CI checks passed — try to rebase and merge
+            echo "  ✓ CI passed ($PASSED_CHECKS checks)"
+
+            # ── Rebase on current main ───────────────────────────
+            echo "  Checking if rebase needed..."
+
+            if ! git fetch origin "$PR_BRANCH" 2>/dev/null; then
+              echo "  → SKIP: Cannot fetch branch $PR_BRANCH"
+              continue
+            fi
+            git fetch origin main 2>/dev/null || true
+
+            COMMITS_BEHIND=$(git rev-list \
+              "refs/remotes/origin/${PR_BRANCH}..refs/remotes/origin/main" \
+              --count 2>/dev/null || echo "0")
+            echo "  Branch is $COMMITS_BEHIND commits behind main"
+
+            if [ "$COMMITS_BEHIND" -gt 0 ]; then
+              echo "  Rebasing $PR_BRANCH on origin/main..."
+              if ! git checkout "$PR_BRANCH" 2>/dev/null; then
+                echo "  → SKIP: Cannot checkout branch $PR_BRANCH"
+                continue
+              fi
+              if git rebase origin/main; then
+                if git push --force-with-lease origin "$PR_BRANCH" 2>/dev/null; then
+                  echo "  ✓ Rebased and pushed ($COMMITS_BEHIND commits)"
+                  gh pr comment "$PR_NUM" --repo "$REPO" \
+                    --body "🤖 Automated merge queue: Rebased on \`main\` ($COMMITS_BEHIND commits). CI checks will re-run. Will auto-merge when checks pass." \
+                    2>/dev/null || true
+                  # After rebase, wait for CI to re-run before merging
+                  git checkout main 2>/dev/null || git checkout - 2>/dev/null || true
+                  continue
+                else
+                  echo "  Warning: Force push failed"
+                  git rebase --abort 2>/dev/null || true
+                fi
+              else
+                echo "  ✗ Rebase FAILED with conflicts"
+                git rebase --abort 2>/dev/null || true
+                gh pr comment "$PR_NUM" --repo "$REPO" \
+                  --body "🤖 Automated merge queue: Auto-rebase failed due to merge conflicts. Manual resolution required before this PR can be auto-merged." \
+                  2>/dev/null || true
+                git checkout main 2>/dev/null || git checkout - 2>/dev/null || true
+                continue
+              fi
+              git checkout main 2>/dev/null || git checkout - 2>/dev/null || true
+            fi
+
+            # ── Merge PR ─────────────────────────────────────────
+            echo "  Merging PR #$PR_NUM (squash)..."
+            if gh pr merge "$PR_NUM" --repo "$REPO" --squash 2>/dev/null; then
+              echo "  ✓ PR #$PR_NUM merged successfully"
+            else
+              echo "  ✗ Merge failed for PR #$PR_NUM"
+            fi
+
+          done < <(echo "$OPEN_PRS" | jq -c '.[]')
+
+          echo ""
+          echo "════════════════════════════════════════════════════"
+          echo "Merge queue cycle complete."
+          echo "  Duplicates closed: $CLOSED_DUPLICATES"
+          echo "  (Per-PR counts are tracked in the loop output above)"
+          echo "════════════════════════════════════════════════════"
