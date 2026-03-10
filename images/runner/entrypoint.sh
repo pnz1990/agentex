@@ -3926,63 +3926,6 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   log "All PRs from this session passed CI."
   push_metric "CIPassOnExit" 1
   
-  # Update specialization based on issue labels worked on this session (issue #1098)
-  # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147, #1252)
-  # Priority order:
-  #   1. COORDINATOR_ISSUE (set by request_coordinator_task when queue is non-empty)
-  #   2. /tmp/agentex-worked-issue (written by claim_task at claim time — survives cleanup race)
-  #   3. activeAssignments lookup (fallback, may fail if coordinator cleanup ran first)
-  WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
-  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
-    # Check temp file written by claim_task() at claim time (issue #1252: survives cleanup race)
-    if [ -f "/tmp/agentex-worked-issue" ]; then
-      WORKED_ISSUE=$(cat /tmp/agentex-worked-issue 2>/dev/null | tr -d '[:space:]' || echo "0")
-      if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
-        log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from /tmp/agentex-worked-issue"
-      fi
-    fi
-  fi
-  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
-    # Fallback: look up this agent's active assignment in coordinator-state.
-    # May fail if coordinator cleanup (30s loop) already removed the entry — see issue #1252.
-    ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
-    WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
-    if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
-      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments (fallback)"
-    fi
-  fi
-  # Fetch labels from the GitHub issue worked on this session.
-  # Issue #1268: Check coordinator-state issueLabels cache FIRST (populated by claim_task()
-  # at claim time). This is resilient to GitHub API rate limits (common during high agent
-  # activity when 10+ agents are concurrently hitting the GitHub API at exit time).
-  # Falls back to direct GitHub API call only on cache miss.
-  if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
-    WORKED_LABELS=""
-    # Step 1: Check coordinator-state label cache (populated by claim_task() at claim time)
-    ISSUE_LABELS_CACHE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-      -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
-    if [ -n "$ISSUE_LABELS_CACHE" ]; then
-      WORKED_LABELS=$(echo "$ISSUE_LABELS_CACHE" | tr '|' '\n' | grep "^${WORKED_ISSUE}:" | cut -d: -f2- | head -1 || echo "")
-      if [ -n "$WORKED_LABELS" ]; then
-        log "Specialization tracking: using cached labels for issue #$WORKED_ISSUE: '$WORKED_LABELS'"
-      fi
-    fi
-    # Step 2: Fall back to GitHub API if cache miss (e.g., issue claimed before this fix)
-    if [ -z "$WORKED_LABELS" ]; then
-      log "Specialization tracking: cache miss for issue #$WORKED_ISSUE — querying GitHub API"
-      WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
-        --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-      if [ -z "$WORKED_LABELS" ]; then
-        log "WARNING: GitHub API unavailable for label fetch on issue #$WORKED_ISSUE — specialization not updated (issue #1268)"
-      fi
-    fi
-    if [ -n "$WORKED_LABELS" ]; then
-      update_specialization "$WORKED_LABELS" 2>/dev/null || true
-      log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
-    fi
-  fi
-  
   # Track code area specialization from PRs opened this session (issue #1112)
   # Get list of PR numbers opened this session
   if type update_code_area_specialization &>/dev/null; then
@@ -3997,6 +3940,66 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
         log "Code area specialization updated for PR #$pr_num"
       done <<< "$SESSION_PR_NUMBERS"
     fi
+  fi
+fi
+
+# Update specialization based on issue labels worked on this session (issue #1098, #1347)
+# IMPORTANT: This runs OUTSIDE the PRS_OPENED gate so ALL agents get specialization tracking,
+# not just those that opened PRs. Agents doing governance, debate, or blocked by circuit
+# breaker all still accumulate specialization from the issues they were assigned to work on.
+# Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147, #1252)
+# Priority order:
+#   1. COORDINATOR_ISSUE (set by request_coordinator_task when queue is non-empty)
+#   2. /tmp/agentex-worked-issue (written by claim_task at claim time — survives cleanup race)
+#   3. activeAssignments lookup (fallback, may fail if coordinator cleanup ran first)
+WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
+if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+  # Check temp file written by claim_task() at claim time (issue #1252: survives cleanup race)
+  if [ -f "/tmp/agentex-worked-issue" ]; then
+    WORKED_ISSUE=$(cat /tmp/agentex-worked-issue 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from /tmp/agentex-worked-issue"
+    fi
+  fi
+fi
+if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+  # Fallback: look up this agent's active assignment in coordinator-state.
+  # May fail if coordinator cleanup (30s loop) already removed the entry — see issue #1252.
+  ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+  WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
+  if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+    log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments (fallback)"
+  fi
+fi
+# Fetch labels from the GitHub issue worked on this session.
+# Issue #1268: Check coordinator-state issueLabels cache FIRST (populated by claim_task()
+# at claim time). This is resilient to GitHub API rate limits (common during high agent
+# activity when 10+ agents are concurrently hitting the GitHub API at exit time).
+# Falls back to direct GitHub API call only on cache miss.
+if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
+  WORKED_LABELS=""
+  # Step 1: Check coordinator-state label cache (populated by claim_task() at claim time)
+  ISSUE_LABELS_CACHE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+  if [ -n "$ISSUE_LABELS_CACHE" ]; then
+    WORKED_LABELS=$(echo "$ISSUE_LABELS_CACHE" | tr '|' '\n' | grep "^${WORKED_ISSUE}:" | cut -d: -f2- | head -1 || echo "")
+    if [ -n "$WORKED_LABELS" ]; then
+      log "Specialization tracking: using cached labels for issue #$WORKED_ISSUE: '$WORKED_LABELS'"
+    fi
+  fi
+  # Step 2: Fall back to GitHub API if cache miss (e.g., issue claimed before this fix)
+  if [ -z "$WORKED_LABELS" ]; then
+    log "Specialization tracking: cache miss for issue #$WORKED_ISSUE — querying GitHub API"
+    WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
+      --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+    if [ -z "$WORKED_LABELS" ]; then
+      log "WARNING: GitHub API unavailable for label fetch on issue #$WORKED_ISSUE — specialization not updated (issue #1268)"
+    fi
+  fi
+  if [ -n "$WORKED_LABELS" ]; then
+    update_specialization "$WORKED_LABELS" 2>/dev/null || true
+    log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
   fi
 fi
 
