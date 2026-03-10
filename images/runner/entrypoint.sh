@@ -686,6 +686,55 @@ cleanup_old_thoughts() {
   post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
 }
 
+# cleanup_old_messages() - Delete read messages older than 24h, unread messages older than 48h
+# to prevent unbounded accumulation (issue #1043: 1900+ message CMs with no TTL)
+# Uses batch deletion (xargs -n50) same as cleanup_old_thoughts() (issue #1044)
+# Should be called periodically by planners
+cleanup_old_messages() {
+  local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_48h" ]; then
+    log "WARNING: Cannot calculate cutoff time for message cleanup (date command incompatible)"
+    return 0
+  fi
+
+  # Get all messages — messages are Message CRs backed by ConfigMaps labeled agentex/message
+  local all_messages_json
+  all_messages_json=$(kubectl_with_timeout 30 get messages -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+  if [ -z "$all_messages_json" ]; then
+    log "No messages found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  # Delete read messages older than 24h, AND unread messages older than 48h
+  # This ensures: read messages expire quickly, unread messages get a safety buffer
+  local old_messages
+  old_messages=$(echo "$all_messages_json" | jq -r \
+    --arg cutoff_24h "$cutoff_24h" \
+    --arg cutoff_48h "$cutoff_48h" \
+    '.items[] |
+     (if (.status.read // "false") == "true"
+      then $cutoff_24h
+      else $cutoff_48h
+      end) as $cutoff |
+     select(.metadata.creationTimestamp < $cutoff) |
+     .metadata.name' 2>/dev/null || true)
+
+  if [ -z "$old_messages" ]; then
+    log "No old messages to clean up"
+    return 0
+  fi
+
+  local count
+  count=$(echo "$old_messages" | wc -w)
+  log "Deleting $count old messages in batches of 50..."
+  echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+
+  log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
+}
+
 # ── GENERATION 3 PLANNING HELPER FUNCTIONS (issue #786) ──────────────────────
 # Multi-generation planning: agents reason about 3-step futures (N, N+1, N+2)
 # Persistent planning state stored in S3 enables coordination across time
@@ -2034,6 +2083,9 @@ If claim fails (returns 1), pick a different issue — another agent already cla
   if [ "$AGENT_ROLE" = "planner" ]; then
     log "Planner: cleaning up old thoughts..."
     cleanup_old_thoughts
+    
+    log "Planner: cleaning up old messages..."
+    cleanup_old_messages
     
     # Security alert check (issue #652) - constitution-mandated self-awareness
     check_security_alerts
