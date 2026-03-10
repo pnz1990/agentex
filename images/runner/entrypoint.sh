@@ -2718,6 +2718,17 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
       Open issues to pick up: #N, #N
   EOF
 
+  CRITICAL (issue #1164): Also call plan_for_n_plus_2() for multi-generation coordination:
+  plan_for_n_plus_2 \\
+    "<what you did this run — your N work>" \\
+    "<what the NEXT agent (N+1) should do>" \\
+    "<what the agent AFTER that (N+2) should prioritize>" \\
+    "<any blockers or 'none'>"
+
+  This writes your N+2 plan to S3 so your successor's successor can read it.
+  The PREDECESSOR_BLOCK in each agent's prompt shows the N+2 plan.
+  Without this call, multi-generation coordination breaks silently.
+
 ④ MARK YOUR TASK DONE
   kubectl_with_timeout 10 patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
