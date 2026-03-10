@@ -409,6 +409,15 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v06CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # activeSwarms (issue #1771): pipe-separated active swarm names for v0.6 swarm tracking.
+  # Populated by form_spontaneous_swarm() when Swarm CRs are created.
+  # Read by check_v06_milestone() Criterion 1 to count live swarm formations.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("activeSwarms")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing activeSwarms (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -1179,7 +1188,8 @@ check_swarm_dissolution() {
     local checked=0
 
     # Process each swarm state CM
-    while IFS=$'\t' read -r swarm_name phase last_ts member_agents total_tasks; do
+    # Issue #1771: also capture goal field for swarm memory persistence
+    while IFS=$'\t' read -r swarm_name phase last_ts member_agents total_tasks swarm_goal; do
         [ -z "$swarm_name" ] && continue
         [ "$phase" = "Disbanded" ] && continue
 
@@ -1223,12 +1233,58 @@ check_swarm_dissolution() {
         # DISSOLUTION: all tasks done, idle > 300s, not yet Disbanded
         echo "[$(date -u +%H:%M:%S)] SWARM DISSOLUTION: $swarm_ref completed all $total tasks, idle ${idle_seconds}s — disbanding"
 
+        # Issue #1771 v0.6: Persist swarm memory to S3 before marking disbanded.
+        # This ensures swarm institutional knowledge is available to future swarms
+        # with similar goals, and is counted by check_v06_milestone() Criterion 4.
+        local swarm_key_decisions
+        swarm_key_decisions=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+            -l "agentex/thought,agentex/swarm=${swarm_ref}" -o json 2>/dev/null | \
+            jq -r '[.items[] | select(.data.thoughtType=="decision" or .data.thoughtType=="insight") | .data.content] | join("; ")' 2>/dev/null | \
+            cut -c1-500 || echo "none recorded")
+        [ -z "$swarm_key_decisions" ] && swarm_key_decisions="none recorded"
+        local effective_goal="${swarm_goal:-unknown goal}"
+        [ -z "$effective_goal" ] && effective_goal="unknown goal"
+
+        local s3_bucket_val
+        s3_bucket_val=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+            -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
+        local coordinator_name="${AGENT_NAME:-coordinator}"
+        local dissolved_at
+        dissolved_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        # Build members array from member_agents (comma-separated)
+        local members_json
+        if [ -n "$member_agents" ]; then
+            members_json=$(echo "$member_agents" | tr ',' '\n' | jq -R . | jq -s .)
+        else
+            members_json="[]"
+        fi
+        local member_count
+        member_count=$(echo "$members_json" | jq 'length' 2>/dev/null || echo "0")
+        # Write swarm memory to S3 (s3://bucket/swarm-memories/<swarm-name>.json)
+        local memory_json
+        memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"memberAgents":"%s","memberCount":%s,"tasksCompleted":%s,"keyDecisions":"%s","goalOrigin":"coordinator","dissolvedAt":"%s","recordedBy":"%s"}\n' \
+            "$swarm_ref" \
+            "$(echo "$effective_goal" | tr '"' "'")" \
+            "$members_json" \
+            "$(echo "$member_agents" | tr '"' "'")" \
+            "$member_count" \
+            "$total" \
+            "$(echo "$swarm_key_decisions" | tr '"\\' "  ")" \
+            "$dissolved_at" \
+            "$coordinator_name")
+        if echo "$memory_json" | aws s3 cp - "s3://${s3_bucket_val}/swarm-memories/${swarm_ref}.json" \
+                --content-type application/json 2>/dev/null; then
+            echo "[$(date -u +%H:%M:%S)] SWARM MEMORY: persisted dissolution record for $swarm_ref to S3 (issue #1771)"
+        else
+            echo "[$(date -u +%H:%M:%S)] WARNING: Failed to persist swarm memory for $swarm_ref to S3 (non-fatal)"
+        fi
+
         # Patch phase to Disbanded
         kubectl_with_timeout 10 patch configmap "${swarm_name}" -n "$NAMESPACE" \
             --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
 
         # Post coordinator thought
-        post_coordinator_thought "Swarm $swarm_ref dissolved by coordinator. Goal achieved. All $total tasks completed. Members: $member_agents. Idle: ${idle_seconds}s." "insight"
+        post_coordinator_thought "Swarm $swarm_ref dissolved by coordinator. Goal achieved. All $total tasks completed. Members: $member_agents. Swarm memory persisted to S3 (issue #1771)." "insight"
 
         push_metric "SwarmDisbanded" 1 "Count" "Component=Coordinator"
         disbanded=$((disbanded + 1))
@@ -1239,12 +1295,260 @@ check_swarm_dissolution() {
             (.data.phase // "Forming"),
             (.data.lastActivityTimestamp // ""),
             (.data.memberAgents // ""),
-            (.data.tasksCompleted // "0")
+            (.data.tasksCompleted // "0"),
+            (.data.goal // "")
         ] | @tsv' 2>/dev/null)
 
     if [ "$checked" -gt 0 ]; then
         echo "[$(date -u +%H:%M:%S)] Swarm dissolution check: $checked active swarms, $disbanded disbanded"
     fi
+}
+
+# form_spontaneous_swarm — v0.6 Collective Action: Spontaneous Swarm Formation (issue #1771)
+#
+# The coordinator detects XL/L effort issues in the task queue that are too large
+# for a single worker. When detected, it creates a Swarm CR to coordinate
+# multiple specialized agents on the complex issue.
+#
+# Logic:
+#   1. Scan taskQueue for XL-labeled or L-labeled issues (based on GitHub effort label)
+#   2. Check if a swarm already exists for this issue (avoid duplicate swarms)
+#   3. Read agentTrustGraph to prefer high-trust agent pairs for the coalition
+#   4. Create a Swarm CR with a goal derived from the issue title
+#   5. Update activeSwarms field in coordinator-state
+#   6. Post a formation thought for visibility
+#
+# Runs every 30 iterations (~15 min) to detect complex issues proactively.
+form_spontaneous_swarm() {
+    local task_queue
+    task_queue=$(get_state "taskQueue")
+    [ -z "$task_queue" ] && return 0
+
+    # Check active swarms to avoid duplicate formation
+    local active_swarms
+    active_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+
+    # Fetch open issues JSON once for efficiency
+    local issues_json
+    issues_json=$(gh api "/repos/${GITHUB_REPO}/issues?state=open&per_page=50" 2>/dev/null) || true
+    [ -z "$issues_json" ] && return 0
+
+    local swarms_formed=0
+
+    IFS=',' read -ra queue_issues <<< "$task_queue"
+    for issue_num in "${queue_issues[@]}"; do
+        [ -z "$issue_num" ] && continue
+        issue_num=$(echo "$issue_num" | tr -d '[:space:]')
+        [[ "$issue_num" =~ ^[0-9]+$ ]] || continue
+
+        # Only consider at most 2 new swarm formations per cycle
+        [ "$swarms_formed" -ge 2 ] && break
+
+        # Skip if a swarm already exists for this issue (check activeSwarms field)
+        if echo "$active_swarms" | grep -q "issue-${issue_num}"; then
+            continue
+        fi
+
+        # Check if a swarm state CM already exists for this issue
+        local existing_swarm
+        existing_swarm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+            -l "kro.run/instance-kind=Swarm" -o json 2>/dev/null | \
+            jq -r --argjson n "$issue_num" \
+            '[.items[] | select(.data.goal != null) | select(.data.goal | test("\\b" + ($n|tostring) + "\\b"))] | length' \
+            2>/dev/null || echo "0")
+        [ "$existing_swarm" -gt 0 ] && continue
+
+        # Check if this issue has an XL or L effort label
+        local issue_labels issue_title
+        issue_labels=$(echo "$issues_json" | jq -r \
+            --argjson n "$issue_num" \
+            '.[] | select(.pull_request == null) | select(.number == $n) | [.labels[].name] | join(",")' \
+            2>/dev/null || echo "")
+        issue_title=$(echo "$issues_json" | jq -r \
+            --argjson n "$issue_num" \
+            '.[] | select(.pull_request == null) | select(.number == $n) | .title' \
+            2>/dev/null || echo "")
+
+        # Only form swarms for XL or multi-area issues
+        local is_xl=false
+        if echo "$issue_labels" | grep -qi "effort:xl\|effort:xxl\|xl\|effort.*large\|milestone\|multi-sprint"; then
+            is_xl=true
+        fi
+        [ "$is_xl" = "false" ] && continue
+
+        # Check active assignments — skip if already assigned
+        local active_assignments
+        active_assignments=$(get_state "activeAssignments")
+        if echo "$active_assignments" | grep -q ":${issue_num}$" || \
+           echo "$active_assignments" | grep -q ":${issue_num},"; then
+            continue
+        fi
+
+        echo "[$(date -u +%H:%M:%S)] SWARM FORMATION: Detected XL issue #${issue_num} ('${issue_title}'). Forming spontaneous swarm."
+
+        # Read trust graph to select high-trust agents for coalition
+        local trust_graph
+        trust_graph=$(get_state "agentTrustGraph" 2>/dev/null || echo "")
+        local coalition_note=""
+        if [ -n "$trust_graph" ]; then
+            # Find most-cited agent pair from trust graph
+            local top_pair
+            top_pair=$(echo "$trust_graph" | tr '|' '\n' | sort -t: -k3 -rn | head -1 | cut -d: -f1-2 | tr ':' '+')
+            [ -n "$top_pair" ] && coalition_note=" Preferred coalition pair from trust graph: ${top_pair}."
+        fi
+
+        # Create a Task CR for the swarm planner
+        local swarm_ts
+        swarm_ts=$(date +%s)
+        local swarm_name="swarm-issue-${issue_num}-${swarm_ts}"
+        local swarm_task_name="task-${swarm_name}"
+        local safe_title
+        safe_title=$(echo "$issue_title" | tr -d '"\\' | cut -c1-60)
+
+        kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${swarm_task_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/swarm: ${swarm_name}
+spec:
+  title: "Swarm planner for issue #${issue_num}: ${safe_title}"
+  description: |
+    You are the planner for swarm ${swarm_name} coordinating work on GitHub issue #${issue_num}.
+    Goal: ${safe_title}
+    
+    Your role:
+    1. Break down issue #${issue_num} into subtasks and create Task CRs for workers
+    2. Spawn 2-3 worker agents with SWARM_REF=${swarm_name} to tackle different aspects
+    3. Monitor progress and coordinate between workers
+    4. When all subtasks complete, post a summary thought
+    
+    Spawned by coordinator form_spontaneous_swarm() because this issue has XL effort label.
+    ${coalition_note}
+  effort: L
+  issueRef: "${issue_num}"
+  phase: "Pending"
+  assignee: ""
+EOF
+
+        # Create the Swarm CR (triggers kro to spawn the planner Job via swarm-graph RGD)
+        kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/issue: "${issue_num}"
+    agentex/formed-by: coordinator
+spec:
+  goal: "Collaborative implementation of issue #${issue_num}: ${safe_title}"
+  plannerTaskRef: ${swarm_task_name}
+  maxAgents: 5
+  planners: 1
+  workers: 3
+  reviewers: 1
+  consensusThreshold: 51
+EOF
+
+        local swarm_cr_status=$?
+
+        if [ "$swarm_cr_status" -eq 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] SWARM FORMED: Created Swarm CR '${swarm_name}' for issue #${issue_num}"
+
+            # Update activeSwarms in coordinator-state for v0.6 milestone tracking
+            local current_active_swarms
+            current_active_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+            if [ -z "$current_active_swarms" ]; then
+                update_state "activeSwarms" "${swarm_name}|issue-${issue_num}"
+            else
+                update_state "activeSwarms" "${current_active_swarms}|${swarm_name}|issue-${issue_num}"
+            fi
+
+            # Post formation thought for visibility
+            post_coordinator_thought "v0.6 SWARM FORMATION (issue #1771): Spontaneously formed swarm '${swarm_name}' for XL issue #${issue_num} ('${safe_title}').${coalition_note} Coalition of specialized agents will coordinate on this complex issue." "insight"
+
+            push_metric "SwarmFormed" 1 "Count" "Component=Coordinator"
+            swarms_formed=$((swarms_formed + 1))
+        else
+            echo "[$(date -u +%H:%M:%S)] WARNING: Failed to create Swarm CR for issue #${issue_num} (non-fatal)"
+        fi
+    done
+
+    [ "$swarms_formed" -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Spontaneous swarm formation: ${swarms_formed} swarm(s) created this cycle"
+}
+
+# check_swarm_goal_governance — v0.6: Swarm Goal Governance (issue #1771)
+#
+# Active swarms can vote to change their goal via governance proposals.
+# This function scans for swarm-goal proposals and enacts approved ones.
+#
+# A swarm goal proposal looks like:
+#   #proposal-swarm-goal swarmName=<name> newGoal=<new-goal> reason=<why>
+#
+# When 2+ agents approve (lower threshold for swarm-local votes), the
+# swarm state ConfigMap is updated with the new goal.
+#
+# This implements Feature 2 (Swarm Goal Governance) from issue #1771.
+check_swarm_goal_governance() {
+    # Scan for swarm-goal proposals in recent Thought CRs
+    local proposals_json
+    proposals_json=$(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
+        -l "agentex/thought" -o json 2>/dev/null | \
+        jq '[.items[] | select(.data.thoughtType == "proposal") | select(.data.content | test("#proposal-swarm-goal"))]' \
+        2>/dev/null || echo "[]")
+
+    local proposal_count
+    proposal_count=$(echo "$proposals_json" | jq 'length' 2>/dev/null || echo "0")
+    [ "$proposal_count" -eq 0 ] && return 0
+
+    echo "[$(date -u +%H:%M:%S)] Swarm goal governance: checking $proposal_count swarm-goal proposal(s)"
+
+    # Process each swarm-goal proposal
+    local i
+    for i in $(seq 0 $((proposal_count - 1))); do
+        local proposal_cm proposal_content proposal_swarm_name new_goal
+        proposal_cm=$(echo "$proposals_json" | jq -r --argjson i "$i" '.[$i].metadata.name' 2>/dev/null || echo "")
+        proposal_content=$(echo "$proposals_json" | jq -r --argjson i "$i" '.[$i].data.content' 2>/dev/null || echo "")
+        [ -z "$proposal_cm" ] || [ -z "$proposal_content" ] && continue
+
+        # Extract swarmName and newGoal from proposal content
+        proposal_swarm_name=$(echo "$proposal_content" | grep -oE 'swarmName=[^ ]+' | cut -d= -f2- | head -1)
+        new_goal=$(echo "$proposal_content" | grep -oE 'newGoal=[^ ]+' | cut -d= -f2- | head -1 | tr '_' ' ')
+        [ -z "$proposal_swarm_name" ] || [ -z "$new_goal" ] && continue
+
+        # Check if swarm exists and is active
+        local swarm_state_cm="${proposal_swarm_name}-state"
+        local swarm_phase
+        swarm_phase=$(kubectl_with_timeout 10 get configmap "$swarm_state_cm" -n "$NAMESPACE" \
+            -o jsonpath='{.data.phase}' 2>/dev/null || echo "")
+        [ "$swarm_phase" = "Disbanded" ] && continue
+        [ -z "$swarm_phase" ] && continue
+
+        # Count approvals for this proposal (key = swarm-goal-<swarmName>)
+        local vote_key="voteRegistry_swarm-goal-${proposal_swarm_name}"
+        local approve_count
+        approve_count=$(get_state "$vote_key" 2>/dev/null || echo "0")
+        [[ "$approve_count" =~ ^[0-9]+$ ]] || approve_count=0
+
+        if [ "$approve_count" -ge 2 ]; then
+            echo "[$(date -u +%H:%M:%S)] SWARM GOAL ENACTED: Swarm '${proposal_swarm_name}' goal updated to: ${new_goal}"
+
+            # Update swarm state ConfigMap with new goal
+            kubectl_with_timeout 10 patch configmap "$swarm_state_cm" -n "$NAMESPACE" \
+                --type=merge -p "{\"data\":{\"goal\":\"${new_goal}\",\"goalOrigin\":\"agent-proposed\"}}" 2>/dev/null || true
+
+            # Post governance thought
+            post_coordinator_thought "v0.6 SWARM GOAL GOVERNANCE (issue #1771): Swarm '${proposal_swarm_name}' goal updated via collective vote (${approve_count} approvals). New goal: ${new_goal}. goalOrigin=agent-proposed for Criterion 3 tracking." "decision"
+
+            push_metric "SwarmGoalUpdated" 1 "Count" "Component=Coordinator"
+
+            # Clean up the vote registry key
+            remove_state "$vote_key" 2>/dev/null || true
+        fi
+    done
 }
 
 # cleanup_old_cluster_resources — Periodically delete stale Thought and Message CRs (issue #1617)
@@ -3284,10 +3588,11 @@ check_v06_milestone() {
     local criteria_report=""
 
     # ── Read S3 swarm dissolution records ────────────────────────────────────
-    # Swarm summaries are written to s3://agentex-thoughts/swarms/*.json
-    # by the swarm memory persistence feature (issue #1773).
+    # Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
+    # by write_swarm_memory() (helpers.sh, issue #1773) and check_swarm_dissolution()
+    # (issue #1771). Fixed from swarms/ → swarm-memories/ to match write path.
     local swarm_files
-    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarms/" \
+    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
         awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
 
@@ -3298,14 +3603,14 @@ check_v06_milestone() {
 
     for sfile in $swarm_files; do
         local sjson
-        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarms/${sfile}" - \
+        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$sjson" ] && continue
 
         swarm_memory_count=$((swarm_memory_count + 1))
         swarm_formation_count=$((swarm_formation_count + 1))
 
-        # Check coalition size (number of member agents)
+        # Check coalition size from memberCount, members array, or memberAgents
         local members
         members=$(echo "$sjson" | jq -r '.memberCount // 0 | tonumber' 2>/dev/null || echo "0")
         [[ "$members" =~ ^[0-9]+$ ]] || members=0
@@ -3313,9 +3618,9 @@ check_v06_milestone() {
             max_coalition_size=$members
         fi
 
-        # Also check memberAgents array length as fallback
+        # Also check members array length (PR #1863 field name)
         local member_array_len
-        member_array_len=$(echo "$sjson" | jq -r '(.memberAgents // []) | length' 2>/dev/null || echo "0")
+        member_array_len=$(echo "$sjson" | jq -r '(.members // .memberAgents // []) | if type == "array" then length else 0 end' 2>/dev/null || echo "0")
         [[ "$member_array_len" =~ ^[0-9]+$ ]] || member_array_len=0
         if [ "$member_array_len" -gt "$max_coalition_size" ]; then
             max_coalition_size=$member_array_len
@@ -4435,6 +4740,22 @@ while true; do
     # This coordinator-driven check ensures timely cleanup regardless of agent state.
     if [ $((iteration % 10)) -eq 0 ]; then
         check_swarm_dissolution
+    fi
+
+    # Every 30 iterations (~15 min): v0.6 Spontaneous Swarm Formation (issue #1771)
+    # Detects XL/L effort issues in the task queue and creates Swarm CRs to coordinate
+    # multiple specialized agents on complex issues. Reads trust graph for coalition selection.
+    # Only creates swarms when no existing swarm covers the issue.
+    if [ $((iteration % 30)) -eq 0 ]; then
+        form_spontaneous_swarm
+    fi
+
+    # Every 12 iterations (~6 min): v0.6 Swarm Goal Governance (issue #1771)
+    # Enacts approved swarm-goal proposals — allows active swarms to vote to change
+    # their goal. Uses lower threshold (2+ approvals) for swarm-local decisions.
+    # Sets goalOrigin=agent-proposed when enacted (Criterion 3 for v0.6 milestone).
+    if [ $((iteration % 12)) -eq 0 ]; then
+        check_swarm_goal_governance
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.

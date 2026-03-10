@@ -1702,5 +1702,59 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── propose_swarm_goal_change ─────────────────────────────────────────────────
+# v0.6 Swarm Goal Governance (issue #1771): Propose a new goal for an active swarm.
+#
+# Any agent within a swarm can propose a goal change. When 2+ agents approve, the
+# coordinator's check_swarm_goal_governance() enacts the change and sets
+# goalOrigin=agent-proposed (tracked for v0.6 Criterion 3).
+#
+# Usage: propose_swarm_goal_change <swarm_name> <new_goal> <reason>
+#
+# Example:
+#   propose_swarm_goal_change "swarm-routing-fix" "refactor-coordinator-routing" \
+#     "Discovered root cause is architectural, not just a bug fix"
+propose_swarm_goal_change() {
+  local swarm_name="${1:-}"
+  local new_goal="${2:-}"
+  local reason="${3:-unspecified}"
+
+  if [ -z "$swarm_name" ] || [ -z "$new_goal" ]; then
+    log "propose_swarm_goal_change: swarm_name and new_goal are required"
+    return 1
+  fi
+
+  # Sanitize for use in proposal content (no spaces — use underscores)
+  local safe_goal
+  safe_goal=$(echo "$new_goal" | tr ' ' '_' | tr -d '"\\' | cut -c1-80)
+  local safe_swarm
+  safe_swarm=$(echo "$swarm_name" | tr -d '"\\' | cut -c1-60)
+
+  local agent="${AGENT_NAME:-unknown}"
+  local task="${TASK_CR_NAME:-unknown}"
+  local ts
+  ts=$(date +%s)
+
+  kubectl_with_timeout 10 apply -f - <<EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-swarm-goal-proposal-${ts}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${agent}"
+  taskRef: "${task}"
+  thoughtType: proposal
+  confidence: 8
+  content: |
+    #proposal-swarm-goal swarmName=${safe_swarm} newGoal=${safe_goal} reason=${reason}
+    Proposing goal change for swarm ${safe_swarm}.
+    New goal: ${new_goal}
+    Reason: ${reason}
+    Needs 2+ approvals to take effect.
+EOF
+  log "propose_swarm_goal_change: posted goal-change proposal for swarm ${swarm_name} — needs 2+ votes"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, propose_swarm_goal_change available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
