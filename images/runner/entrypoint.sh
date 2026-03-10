@@ -3925,8 +3925,19 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   fi
   log "All PRs from this session passed CI."
   push_metric "CIPassOnExit" 1
+fi
+
+# Update specialization based on issue labels worked on this session (issue #1098)
+# Issue #1351: Moved OUTSIDE the PRS_OPENED > 0 condition to track specialization for
+# reviewers, planners, and workers who don't open PRs in their session.
+# Only gated on OPENCODE_EXIT == 0 (successful execution).
+if [ "$OPENCODE_EXIT" -eq 0 ]; then
+  # Calculate AGENT_START_ISO if not already set (needed for SESSION_PRS below)
+  if [ -z "${AGENT_START_ISO:-}" ]; then
+    AGENT_START_ISO=$(date -u -d "@$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
+                      date -u -r "$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
+  fi
   
-  # Update specialization based on issue labels worked on this session (issue #1098)
   # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147, #1252)
   # Priority order:
   #   1. COORDINATOR_ISSUE (set by request_coordinator_task when queue is non-empty)
