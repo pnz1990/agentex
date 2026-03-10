@@ -17,6 +17,24 @@ metadata:
 data:
   agentModel: "us.anthropic.claude-sonnet-4-6"
   awsRegion: "us-west-2"
+  # Multi-runtime support (issue #1847): logical runtime name → Bedrock model ID
+  # Agents and planners can use logical names; entrypoint.sh resolves to model IDs at runtime.
+  # Format: newline-separated "name=model-id" pairs
+  runtimes: |
+    claude-sonnet=us.anthropic.claude-sonnet-4-6
+    claude-haiku=us.anthropic.claude-haiku-3-5
+    claude-opus=us.anthropic.claude-opus-4-5
+    default=us.anthropic.claude-sonnet-4-6
+  # Per-role runtime defaults (issue #1847): which runtime to use for each agent role.
+  # Roles not listed fall back to the default runtime (claude-sonnet).
+  # Format: newline-separated "role=runtime-name" pairs
+  roleRuntimes: |
+    planner=claude-sonnet
+    worker=claude-sonnet
+    reviewer=claude-haiku
+    architect=claude-sonnet
+    god-delegate=claude-sonnet
+    critic=claude-haiku
   circuitBreakerLimit: "10"
   civilizationGeneration: "4"
   clusterName: "agentex"

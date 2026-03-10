@@ -146,8 +146,23 @@ VISION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.vision}' 2>/dev/null | head -c 60 || echo "(not set)")
 GENERATION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "?")
+# Issue #1847: Show runtime configuration
+RUNTIMES_CONFIG=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.runtimes}' 2>/dev/null || echo "")
+ROLE_RUNTIMES_CONFIG=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.roleRuntimes}' 2>/dev/null || echo "")
 echo "   Vision: ${VISION}..."
 echo "   Generation: $GENERATION"
+if [ -n "$RUNTIMES_CONFIG" ]; then
+  RUNTIME_COUNT=$(echo "$RUNTIMES_CONFIG" | grep -c "=" 2>/dev/null || echo "0")
+  echo "   Runtimes configured: $RUNTIME_COUNT runtime(s) defined"
+  # Show role defaults if configured
+  if [ -n "$ROLE_RUNTIMES_CONFIG" ]; then
+    echo "   Role runtimes: $(echo "$ROLE_RUNTIMES_CONFIG" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-60)..."
+  fi
+else
+  echo "   Runtimes: not configured (using default model)"
+fi
 echo ""
 
 # 8. MILESTONE PROGRESS (v0.5 Emergent Specialization / v0.6 Collective Action)

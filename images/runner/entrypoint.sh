@@ -23,13 +23,16 @@ REPO="${REPO:-}"  # Will be overridden by constitution.githubRepo
 CLUSTER="${CLUSTER:-}"  # Will be overridden by constitution.clusterName
 BEDROCK_REGION="${BEDROCK_REGION:-}"  # Will be overridden by constitution.awsRegion
 BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
+# Issue #1847: RUNTIME_OVERRIDE allows spawning agents with a specific logical runtime name.
+# This is resolved to a Bedrock model ID by resolve_runtime() after constitution is read.
+RUNTIME_OVERRIDE="${RUNTIME_OVERRIDE:-}"
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
 
 # Issue #1218: Export key variables so helpers.sh can access them from OpenCode bash subprocesses.
 # OpenCode runs each bash command in a fresh subprocess — only exported vars flow through.
 # These are re-exported after constitution reads update them (see below).
-export AGENT_NAME AGENT_ROLE TASK_CR_NAME NAMESPACE SWARM_REF
+export AGENT_NAME AGENT_ROLE TASK_CR_NAME NAMESPACE SWARM_REF RUNTIME_OVERRIDE
 
 log() { 
   local gen_suffix=""
@@ -124,6 +127,63 @@ fi
 # Issue #1218: Re-export constitution-derived variables for helpers.sh accessibility.
 # These must be exported AFTER constitution reads so helpers.sh gets the final values.
 export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT
+
+# ── Multi-runtime resolution (issue #1847) ─────────────────────────────────
+# Resolve BEDROCK_MODEL from:
+#   1. RUNTIME_OVERRIDE env var (logical name like "claude-haiku" or full model ID)
+#   2. Per-role defaults from constitution.roleRuntimes
+#   3. Fall back to BEDROCK_MODEL as already set (from Agent CR spec.model env var)
+#
+# Logical runtime names (e.g. "claude-haiku") are resolved to Bedrock model IDs
+# using the runtimes mapping in constitution. Full model IDs pass through unchanged.
+CONSTITUTION_RUNTIMES=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.runtimes}' 2>/dev/null || echo "")
+CONSTITUTION_ROLE_RUNTIMES=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.roleRuntimes}' 2>/dev/null || echo "")
+
+# resolve_runtime() — converts a logical runtime name to a Bedrock model ID.
+# If the name already looks like a full model ID (contains ".") it passes through.
+# Args: $1 = logical name (e.g. "claude-haiku") or full model ID
+# Returns: resolved Bedrock model ID, or the input unchanged if not found
+resolve_runtime() {
+  local name="$1"
+  # If name contains "." assume it's already a full model ID (e.g. us.anthropic.claude-...)
+  if [[ "$name" == *"."* ]]; then
+    echo "$name"
+    return 0
+  fi
+  # Look up in constitution runtimes map (format: "name=model-id" per line)
+  if [ -n "$CONSTITUTION_RUNTIMES" ]; then
+    local resolved
+    resolved=$(echo "$CONSTITUTION_RUNTIMES" | grep -m1 "^${name}=" | cut -d'=' -f2- | tr -d '[:space:]')
+    if [ -n "$resolved" ]; then
+      echo "$resolved"
+      return 0
+    fi
+  fi
+  # Not found in map — return input unchanged (may be unknown name, will fail gracefully at bedrock call)
+  echo "$name"
+}
+
+# Apply RUNTIME_OVERRIDE if set (explicit per-task override takes highest priority)
+if [ -n "$RUNTIME_OVERRIDE" ]; then
+  resolved=$(resolve_runtime "$RUNTIME_OVERRIDE")
+  log "Runtime override: '$RUNTIME_OVERRIDE' → '$resolved'"
+  BEDROCK_MODEL="$resolved"
+# Apply per-role default from constitution.roleRuntimes (if no explicit model was injected)
+# An "explicit model" is one that differs from the hardcoded default — i.e., the god set spec.model
+# on the Agent CR. We detect this by checking if BEDROCK_MODEL matches the default.
+elif [ "$BEDROCK_MODEL" = "us.anthropic.claude-sonnet-4-6" ] && [ -n "$CONSTITUTION_ROLE_RUNTIMES" ]; then
+  role_runtime=$(echo "$CONSTITUTION_ROLE_RUNTIMES" | grep -m1 "^${AGENT_ROLE}=" | cut -d'=' -f2- | tr -d '[:space:]')
+  if [ -n "$role_runtime" ]; then
+    resolved=$(resolve_runtime "$role_runtime")
+    if [ "$resolved" != "$BEDROCK_MODEL" ]; then
+      log "Role-based runtime: role '$AGENT_ROLE' → runtime '$role_runtime' → model '$resolved'"
+      BEDROCK_MODEL="$resolved"
+    fi
+  fi
+fi
+export BEDROCK_MODEL
 
 ts() { date +%s; }
 
@@ -2804,7 +2864,7 @@ release_spawn_slot() {
 # Spawn a new Agent CR. This is the core perpetuation primitive.
 # kro agent-graph turns this into a Job automatically.
 spawn_agent() {
-  local name="$1" role="$2" task_ref="$3" reason="$4" bypass_killswitch="${5:-false}" capacity_type="${6:-on-demand}"
+  local name="$1" role="$2" task_ref="$3" reason="$4" bypass_killswitch="${5:-false}" capacity_type="${6:-on-demand}" runtime_override="${7:-}"
   
   # ATOMIC SPAWN GATE (issue #519): Request a spawn slot from the coordinator.
   # This replaces the racy "count jobs → decide to spawn" TOCTOU pattern.
@@ -2828,6 +2888,25 @@ spawn_agent() {
   
   log "Spawning successor: name=$name role=$role task=$task_ref gen=$next_generation reason=$reason"
   log "Identity: $identity_sig → $name (gen $my_generation → $next_generation)"
+  
+  # Issue #1847: Determine the model to use for the successor agent.
+  # Priority: explicit runtime_override arg > role-based default from constitution > current BEDROCK_MODEL
+  local successor_model="$BEDROCK_MODEL"
+  if [ -n "$runtime_override" ]; then
+    successor_model=$(resolve_runtime "$runtime_override")
+    log "Spawn runtime override: '$runtime_override' → '$successor_model' for $name"
+  elif [ -n "$CONSTITUTION_ROLE_RUNTIMES" ]; then
+    local role_rt
+    role_rt=$(echo "$CONSTITUTION_ROLE_RUNTIMES" | grep -m1 "^${role}=" | cut -d'=' -f2- | tr -d '[:space:]')
+    if [ -n "$role_rt" ]; then
+      local resolved_rt
+      resolved_rt=$(resolve_runtime "$role_rt")
+      if [ "$resolved_rt" != "$BEDROCK_MODEL" ]; then
+        log "Spawn role-based runtime: role '$role' → runtime '$role_rt' → model '$resolved_rt' for $name"
+        successor_model="$resolved_rt"
+      fi
+    fi
+  fi
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -2841,7 +2920,7 @@ metadata:
 spec:
   role: "${role}"
   taskRef: "${task_ref}"
-  model: "${BEDROCK_MODEL}"
+  model: "${successor_model}"
   swarmRef: "${SWARM_REF}"
   priority: 5
 EOF
@@ -2945,7 +3024,7 @@ spec:
         - name: BEDROCK_REGION
           value: "${BEDROCK_REGION}"
         - name: BEDROCK_MODEL
-          value: "${BEDROCK_MODEL}"
+          value: "${successor_model}"
         - name: SWARM_REF
           value: "${SWARM_REF}"
         - name: GITHUB_TOKEN  # secretKeyRef matches agent-graph.yaml live cluster config (issue #1657)
@@ -2985,7 +3064,7 @@ EOF
 
 # Create a Task CR and immediately spawn an Agent to work it.
 spawn_task_and_agent() {
-  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}" bypass_killswitch="${9:-false}" capacity_type="${10:-on-demand}"
+  local task_name="$1" agent_name="$2" role="$3" title="$4" desc="$5" effort="${6:-M}" issue="${7:-0}" swarm_ref="${8:-}" bypass_killswitch="${9:-false}" capacity_type="${10:-on-demand}" runtime_override="${11:-}"
   log "Creating Task $task_name and Agent $agent_name (role=$role)"
 
    # ISSUE VALIDATION (issue #561): Verify GitHub issue exists and is open
@@ -3069,7 +3148,8 @@ EOF
   
   # Propagate spawn_agent return code (circuit breaker may block)
   # Issue #783: Pass bypass_killswitch parameter to spawn_agent
-  if ! spawn_agent "$agent_name" "$role" "$task_name" "$title" "$bypass_killswitch" "$capacity_type"; then
+  # Issue #1847: Pass runtime_override to spawn_agent for per-agent model selection
+  if ! spawn_agent "$agent_name" "$role" "$task_name" "$title" "$bypass_killswitch" "$capacity_type" "$runtime_override"; then
     log "CRITICAL: spawn_agent blocked (circuit breaker). Cleaning up orphaned Task CR."
     kubectl_with_timeout 10 delete task.kro.run "$task_name" -n "$NAMESPACE" 2>/dev/null || true
     return 1

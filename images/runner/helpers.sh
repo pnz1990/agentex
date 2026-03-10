@@ -45,6 +45,37 @@ if [ -z "${REPO:-}" ]; then
 fi
 REPO="${REPO:-pnz1990/agentex}"
 
+# ── Multi-runtime support (issue #1847) ──────────────────────────────────────
+# resolve_runtime() — converts a logical runtime name to a Bedrock model ID.
+# Args: $1 = logical name (e.g. "claude-haiku") or full model ID
+# Returns: resolved Bedrock model ID, or the input unchanged if not found in constitution map
+#
+# Example:
+#   resolve_runtime "claude-haiku"  # → us.anthropic.claude-haiku-3-5
+#   resolve_runtime "us.anthropic.claude-sonnet-4-6"  # passthrough unchanged
+resolve_runtime() {
+  local name="$1"
+  # If name contains "." assume it's already a full model ID (e.g. us.anthropic.claude-...)
+  if [[ "$name" == *"."* ]]; then
+    echo "$name"
+    return 0
+  fi
+  # Look up in constitution runtimes map (format: "name=model-id" per line)
+  local runtimes_map
+  runtimes_map=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+    -n "$NAMESPACE" -o jsonpath='{.data.runtimes}' 2>/dev/null || echo "")
+  if [ -n "$runtimes_map" ]; then
+    local resolved
+    resolved=$(echo "$runtimes_map" | grep -m1 "^${name}=" | cut -d'=' -f2- | tr -d '[:space:]')
+    if [ -n "$resolved" ]; then
+      echo "$resolved"
+      return 0
+    fi
+  fi
+  # Not found — return input unchanged
+  echo "$name"
+}
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 log() {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] $*" >&2
@@ -1568,5 +1599,5 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, resolve_runtime available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
