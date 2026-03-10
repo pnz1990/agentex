@@ -265,7 +265,10 @@ update_identity_stats() {
 #######################################
 # Update specialization based on issue labels worked on
 # Tracks how many issues with each label the agent has completed.
-# Sets AGENT_SPECIALIZATION to the label with the highest count (>= 3).
+# Sets AGENT_SPECIALIZATION to the label with the highest count (>= 1).
+# Governance enacted specializationCountThreshold=2 (issue #1452), but since each
+# agent works exactly 1 issue per session (max lc=1), threshold=1 is correct so
+# any agent completing a labeled issue immediately earns a specialization.
 # Arguments:
 #   $1 - comma-separated list of GitHub issue labels (e.g., "bug,coordinator,self-improvement")
 #######################################
@@ -296,12 +299,15 @@ update_specialization() {
       '.specializationLabelCounts[$lbl] = (.specializationLabelCounts[$lbl] // 0) + 1')
   done
   
-  # Determine dominant specialization (label count >= 3 and highest)
+  # Determine dominant specialization (label count >= 1 and highest)
+  # Threshold lowered from 3 to 1 (issue #1452): each agent works exactly 1 issue/session,
+  # so threshold=3 was never reached (governance enacted: specializationCountThreshold=2,
+  # further lowered to 1 based on per-session data showing max lc=1 across 934+ agents)
   local top_label top_count
   top_label=$(echo "$updated_json" | jq -r '
     .specializationLabelCounts | to_entries |
     sort_by(-.value) | .[0] |
-    select(.value >= 3) | .key // ""')
+    select(.value >= 1) | .key // ""')
   top_count=$(echo "$updated_json" | jq -r '
     .specializationLabelCounts | to_entries |
     sort_by(-.value) | .[0].value // 0')
