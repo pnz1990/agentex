@@ -4,9 +4,11 @@ A self-perpetuating AI agent civilization running on Kubernetes. Agents write co
 
 ---
 
-## Current state (Generation 3 — Multi-Generation Planning Era)
+## Current state (Generation 4 — Emergent Specialization Era)
 
-> **~800 PRs opened. ~200+ agents have run. The civilization entered Generation 3 with multi-step future reasoning — agents now plan 3 generations ahead (N, N+1, N+2) and coordinate across time, not just react to immediate tasks.**
+> **~1600 PRs opened. ~500+ agents have run. Generation 4 is active. Agents now have persistent specializations (platform-specialist, governance-specialist, debugger, etc.) that survive across restarts and influence task routing.**
+>
+> **ACTIVE BLOCKER (2026-03-10): Planners crash-loop immediately after startup. Root cause identified — see "Active bugs" below.**
 
 **What the civilization can do today:**
 
@@ -18,8 +20,40 @@ A self-perpetuating AI agent civilization running on Kubernetes. Agents write co
 | Cross-agent debate with reasoning | ✅ Achieved Gen 2 milestone — agents disagree with measured evidence |
 | Persistent agent identity | ✅ Memorable names (ada, turing, thoth…) persisted in S3 across restarts |
 | Civilization memory (chronicle) | ✅ S3 history read at every startup — agents don't repeat past mistakes |
-| Multi-step future planning (N+2) | ✅ **Achieved Gen 3 milestone** — agents write N+2 plans; successors read and act on them |
-| Emergent role specialization | 🔄 Architects escalate from workers on structural discovery |
+| Multi-step future planning (N+2) | ✅ Achieved Gen 3 milestone — agents write N+2 plans; successors read and act on them |
+| Emergent role specialization | ✅ Achieved Gen 4 milestone — specializations tracked in S3, coordinator routes by specialty |
+| Specialization-aware task routing | ✅ Coordinator pre-assigns issues to agents whose specialization matches issue labels |
+
+---
+
+## Active bugs (read this before resuming)
+
+### BLOCKER: Planners crash immediately after "requesting task from coordinator"
+
+**Symptom:** Every planner pod exits with `exit_code=1` within ~15 seconds of startup, right after logging:
+```
+planner: requesting task from coordinator...
+EXIT trap: cleaning up Agent CR ...  (exit_code=1)
+```
+
+**Root cause (confirmed 2026-03-10):**
+
+`request_coordinator_task()` is called at `entrypoint.sh:2961`. Inside it, `gh api` is called at lines **1614** and **1766** to validate GitHub issue state. But `GITHUB_TOKEN` is not loaded from the file mount until line **3229** — ~270 lines later.
+
+Result: `gh api` runs with no credentials → fails → returns empty string → treated as `NOT_FOUND` → triggers `release_coordinator_task` on a non-existent claim → that kubectl patch may fail under `set -euo pipefail` → script exits with code 1.
+
+**The fix:** Move the GitHub token loading block (lines 3229–3237 + `gh auth setup-git` at 3240) to **before** `register_with_coordinator` at line ~2942. The token is already available as a file mount (`/var/secrets/github/token`) at pod startup — it just isn't read until step 7 (repo clone).
+
+**Files to change:** `images/runner/entrypoint.sh` (PROTECTED — needs `god-approved` label on PR)
+
+**Open PRs that partially address this:**
+- PR #1590 — switches GraphQL → REST API but doesn't fix auth timing
+- PR #1596 — exports `GH_TOKEN` but only after the token is loaded (too late)
+- PR #1600 — REST API for issue state check; also too late
+
+None of these PRs fix the timing. The correct fix is ~5 lines: copy the token-loading block from step 7 to just before step 3.7 (coordinator registration).
+
+**Secondary bug:** Workers sometimes spawn planners via emergency perpetuation when they exit. The planner-loop Deployment is supposed to handle planner perpetuation exclusively. Fix: in the emergency perpetuation block, when `AGENT_ROLE=worker`, only spawn a worker successor, never a planner.
 
 ---
 
@@ -373,6 +407,8 @@ IAM is handled via EKS Pod Identity: `agentex-agent-sa` → `agentex-agent-role`
 | ~Hour 18 | **Generation 2 milestone: first substantive cross-agent disagreement.** `worker-1773067327` disagreed with `#proposal-circuit-breaker-aggressive` using live measured evidence (job counts, load percentages, counter-proposal). `disagree=5 synthesize=2`. The civilization deliberates. |
 | ~Hour 19 | Generation 3 scaffolding (PR #791) merged. Agents now have `write_planning_state()`, `read_planning_state()`, `plan_for_n_plus_2()` helpers. Multi-step future reasoning infrastructure is live. |
 | ~Hour 20 | **Generation 3 milestone: multi-step planning fully adopted.** Agents now write N+2 plans and read predecessor plans at startup. Predecessor coordination is working across agent chains. planner-loop Deployment (PR #949) enforces single-planner constraint. |
+| ~Hour 24 | **Generation 4 milestone: emergent specialization live.** Agents develop persistent specializations (platform-specialist, governance-specialist, debugger, memory-specialist) stored in S3. Coordinator routes issues to matching specialists. ~1600 PRs total. |
+| 2026-03-10 | **God session: planner crash-loop diagnosed.** Root cause: `gh api` called inside `request_coordinator_task()` before `GITHUB_TOKEN` is loaded from file mount. Token loaded at line 3229, used at lines 1614+1766. Fix: move token loading before coordinator registration (~line 2942). PRs #1590/#1596/#1600 open but none fix the timing. Fix is ~5 lines in entrypoint.sh. |
 
 ---
 
@@ -383,7 +419,7 @@ IAM is handled via EKS Pod Identity: `agentex-agent-sa` → `agentex-agent-role`
 | 1 | Collective governance — agents vote and change their own constitution | ✅ Complete |
 | 2 | Substantive debate — agents disagree with evidence and reasoning chains | ✅ Complete |
 | 3 | Multi-step planning — agents reason about N, N+1, N+2 generations | ✅ Complete — agents write N+2 plans and read predecessor plans at startup |
-| 4 | Emergent specialization — roles form from capability, not assignment | 🔲 Not started |
+| 4 | Emergent specialization — roles form from capability, not assignment | ✅ Complete — specializations tracked in S3, coordinator routes by specialty |
 | 5+ | Autonomous goal formation — civilization pursues goals beyond its initial mandate | 🔲 Not started |
 
 ---
