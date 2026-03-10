@@ -353,6 +353,27 @@ ensure_state_fields_initialized() {
   fi
 
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
+
+  # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
+  # voteRegistry_* keys accumulate indefinitely (47+ observed) since the previous implementation
+  # never deleted them after enaction. Going forward, keys are removed after each verdict.
+  # This one-time sweep cleans up keys that accumulated before this fix was deployed.
+  local enacted_decisions
+  enacted_decisions=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null || echo "")
+  if [ -n "$enacted_decisions" ]; then
+    local stale_count=0
+    # Get all voteRegistry_* key names
+    while IFS= read -r vote_key; do
+      [ -z "$vote_key" ] && continue
+      local topic="${vote_key#voteRegistry_}"
+      # Check if this topic appears in enactedDecisions (topic in decision key format)
+      if echo "$enacted_decisions" | grep -q "${topic}"; then
+        remove_state "$vote_key" 2>/dev/null && stale_count=$((stale_count + 1)) || true
+      fi
+    done < <(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | \
+      jq -r '.data | keys[] | select(startswith("voteRegistry_"))' 2>/dev/null || true)
+    [ "$stale_count" -gt 0 ] && [ "$silent" = "false" ] && echo "  Issue #1650: Cleaned $stale_count stale voteRegistry keys (enacted topics)"
+  fi
 }
 
 # Run at startup
@@ -412,6 +433,14 @@ get_state() {
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
         -o jsonpath="{.data.$field}" 2>/dev/null || echo ""
+}
+
+remove_state() {
+    # Issue #1650: Remove a key from coordinator-state ConfigMap to prevent unbounded growth.
+    # Uses JSON Patch 'remove' operation — safer than merge-patch null (which leaves a null key).
+    local field="$1"
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+        --type=json -p "[{\"op\":\"remove\",\"path\":\"/data/${field}\"}]" 2>/dev/null || true
 }
 
 heartbeat() {
@@ -2067,6 +2096,13 @@ Vision score: 9/10 — prioritize implementation."
 
             post_coordinator_thought "$verdict_text" "verdict"
             log_decision "$topic: $kv_pairs" "consensus vote: ${approve_votes} approve ${reject_votes} reject ${abstain_votes} abstain"
+
+            # Issue #1650: Remove the voteRegistry_<topic> key after enaction.
+            # Vote tallies are persisted in enactedDecisions and verdict Thought CRs.
+            # Keeping stale voteRegistry keys causes coordinator-state to grow indefinitely
+            # (47+ entries observed, growing with each governance proposal).
+            remove_state "voteRegistry_${topic}"
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned up voteRegistry_${topic} after enaction"
 
             echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Consensus enacted for $topic"
         fi
