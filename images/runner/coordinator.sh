@@ -2242,6 +2242,11 @@ route_tasks_by_specialization() {
     IFS=',' read -ra queue_issues <<< "$task_queue"
     for issue_num in "${queue_issues[@]}"; do
         [ -z "$issue_num" ] && continue
+        # Issue #1521: trim whitespace — taskQueue can have legacy space-padded entries
+        # (e.g., "1436 " from pre-PR-#1473 update_state() writes). Without trimming,
+        # [[ "1436 " =~ ^[0-9]+$ ]] fails and routing skips ALL such entries, keeping
+        # specializedAssignments=0 even when valid agents and matching issues exist.
+        issue_num=$(echo "$issue_num" | tr -d '[:space:]')
         # Only handle numeric issue numbers
         [[ "$issue_num" =~ ^[0-9]+$ ]] || continue
 
