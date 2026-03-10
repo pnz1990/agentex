@@ -89,6 +89,15 @@ echo "Bedrock region (from constitution): $BEDROCK_REGION"
 echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
 echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 
+# ── Create health check files early (issue #1436) ────────────────────────────
+# Create liveness/readiness probe files BEFORE GitHub auth to prevent probe
+# failures during GitHub API rate limits. GitHub auth with retry can take 90s
+# (30s + 60s retries), but liveness probe initialDelaySeconds is 30s.
+# Without this early creation, coordinator enters restart loop during rate limits.
+touch /tmp/coordinator-alive
+touch /tmp/coordinator-ready
+echo "Health check files created (before GitHub auth to survive rate limits)"
+
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
 # Issue #1447: gh auth login --with-token uses GraphQL to validate the token.
@@ -2396,11 +2405,9 @@ start_health_endpoint &
 HEALTH_ENDPOINT_PID=$!
 echo "[$(date -u +%H:%M:%S)] HTTP health endpoint started (PID: $HEALTH_ENDPOINT_PID)"
 
-# Create health check files for Kubernetes probes (issue #619)
-# Note: These are legacy - we now have HTTP endpoint, but keep for backward compatibility
-touch /tmp/coordinator-alive
-touch /tmp/coordinator-ready
-echo "[$(date -u +%H:%M:%S)] Health check files initialized"
+# Health check files already created early in startup (issue #1436)
+# to survive GitHub API rate limits during auth retries
+echo "[$(date -u +%H:%M:%S)] Health check files already initialized, entering main loop"
 
 iteration=0
 while true; do
