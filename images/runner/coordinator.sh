@@ -2135,7 +2135,10 @@ find_best_agent_for_issue() {
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        local agent_role="${pair##*:}"
+        # Trim whitespace from role — legacy update_state() echo bug (issue #1470) could have stored
+        # "worker " (with trailing space) in activeAgents, causing role comparison to silently fail.
+        local agent_role
+        agent_role=$(echo "${pair##*:}" | tr -d '[:space:]')
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
