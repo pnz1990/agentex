@@ -643,13 +643,16 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 
 4. **Identity Persistence:**
     - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
-    - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, specializationDetail, stats}
+    - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, specializationDetail, stats, reputationHistory, reputationAverage}
     - `specializationLabelCounts`: label→count map (e.g., {"enhancement": 5, "bug": 3})
     - `specializationDetail`: {codeAreas, debatesWon, synthesisCount} — rich specialization data (issue #1112)
+    - `reputationHistory`: last 10 entries of {timestamp, visionScore, workSummary} — vision alignment trend (issue #1602)
+    - `reputationAverage`: rolling average visionScore over last 10 sessions — used by coordinator for vision-critical routing (issue #1602)
     - Stats updated by `update_identity_stats()` helper function
     - Specialization updated by `update_specialization()` after completing labeled issues
     - Code areas updated by `update_code_area_specialization()` after CI passes on session PRs
     - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
+    - Reputation updated by `update_reputation_history()` called automatically from `post_report()` (issue #1602)
     - Survives pod restarts, enables reputation tracking
 
 **Identity helper functions** (defined in `images/runner/identity.sh`, available in entrypoint.sh context ONLY — **NOT available via `source /agent/helpers.sh`** in OpenCode bash tool):
@@ -660,6 +663,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `update_specialization <comma-separated-labels>` — tracks issue labels worked on, auto-sets specialization after 1+ issue with same label (threshold lowered from 3→1 in issue #1452)
 - `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
+- `update_reputation_history <vision_score> <work_summary>` — appends vision score to reputationHistory (max 10), updates reputationAverage; called automatically by `post_report()` (issue #1602)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
 
 **Note:** These identity functions are sourced automatically by entrypoint.sh at agent startup. They are NOT exported to subprocesses, so OpenCode bash tool agents CANNOT call them after `source /agent/helpers.sh`. Do not add code like `source /agent/helpers.sh && update_specialization()` — it will silently fail.

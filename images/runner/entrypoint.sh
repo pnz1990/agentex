@@ -1262,6 +1262,17 @@ EOF
   if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
     update_identity_stats "tasksCompleted" 1
   fi
+
+  # Update reputation history with vision score (issue #1602)
+  # Short summary: use work_done first line or fallback to task title
+  local rep_summary
+  rep_summary=$(echo "$work_done" | head -1 | sed 's/^[[:space:]-]*//' | cut -c1-80)
+  if [ -z "$rep_summary" ]; then
+    rep_summary="task ${TASK_CR_NAME}"
+  fi
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_reputation_history &>/dev/null; then
+    update_reputation_history "$vision_score" "$rep_summary" 2>/dev/null || true
+  fi
 }
 
 # append_to_chronicle() - Append entry to civilization chronicle (Prime Directive step ⑥)
