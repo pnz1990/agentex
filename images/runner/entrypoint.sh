@@ -1500,6 +1500,25 @@ request_coordinator_task() {
     log "Coordinator: claimed issue #$claimed_issue from queue"
     push_metric "CoordinatorTaskClaimed" 1
     COORDINATOR_ISSUE="$claimed_issue"
+
+    # Issue #1228: Predecessor mentorship — check if coordinator has mentorship context
+    # The coordinator's route_tasks_by_specialization() may have stored a predecessor mentor.
+    local mentorship_ctx
+    mentorship_ctx=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.mentorshipContext}' 2>/dev/null || echo "")
+    if [ -n "$mentorship_ctx" ]; then
+      local my_mentorship
+      my_mentorship=$(echo "$mentorship_ctx" | tr '|' '\n' | \
+        grep "^${claimed_issue}:" | head -1 || echo "")
+      if [ -n "$my_mentorship" ]; then
+        local mentor_agent="${my_mentorship#*:}"
+        mentor_agent="${mentor_agent%%:*}"
+        local mentor_insight="${my_mentorship#*:*:}"
+        PREDECESSOR_MENTORSHIP="${mentor_agent}|${mentor_insight}"
+        log "Predecessor mentorship context found: $mentor_agent has insights for issue #$claimed_issue"
+      fi
+    fi
+
     return 0
   done
 
@@ -2455,6 +2474,7 @@ restart_coordinator_if_unhealthy
 # Issue #938: workers were bypassing coordinator queue entirely, causing duplicates
 COORDINATOR_ISSUE=0
 COORDINATOR_CONTEXT=""
+PREDECESSOR_MENTORSHIP=""  # Issue #1228: set by request_coordinator_task() if mentor found in coordinator-state
 if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
   log "${AGENT_ROLE}: requesting task from coordinator..."
   request_coordinator_task
@@ -2767,6 +2787,29 @@ Your predecessor (previous $AGENT_ROLE) planned for YOU (N+2) to:
 This is multi-generation coordination. Your predecessor reasoned 3 steps ahead
 and identified work for you to prioritize. Consider this when choosing tasks.
 ═══════════════════════════════════════════════════════"
+fi
+
+# Issue #1228: Predecessor Mentorship Block
+# When a worker is routed to a task by specialization, the coordinator stores
+# a predecessor specialist's insight. Include this in the worker's prompt.
+MENTORSHIP_BLOCK=""
+if [ -n "${PREDECESSOR_MENTORSHIP:-}" ]; then
+  local_mentor_agent="${PREDECESSOR_MENTORSHIP%%|*}"
+  local_mentor_insight="${PREDECESSOR_MENTORSHIP#*|}"
+  MENTORSHIP_BLOCK="
+═══════════════════════════════════════════════════════
+PREDECESSOR MENTORSHIP (issue #1228)
+═══════════════════════════════════════════════════════
+You have been routed this task because your specialization matches a predecessor.
+
+Predecessor: ${local_mentor_agent}
+Their insight on similar work:
+
+  ${local_mentor_insight}
+
+This is generational knowledge transfer. Learn from your predecessor and build on it.
+═══════════════════════════════════════════════════════"
+  log "Including predecessor mentorship context from: $local_mentor_agent"
 fi
 
 # Role-specialized context block (issue #881)
@@ -3217,6 +3260,8 @@ ${INBOX_MESSAGES}
 ${PEER_BLOCK}
 
 ${PREDECESSOR_BLOCK}
+
+${MENTORSHIP_BLOCK}
 
 ${ROLE_CONTEXT}
 

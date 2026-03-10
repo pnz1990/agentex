@@ -177,11 +177,22 @@ ensure_state_fields_initialized() {
   for field in visionQueue visionQueueLog; do
     val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
     if [ -z "$val" ]; then
-      [ "$silent" = "false" ] && echo "  Initializing $field (was empty/null)"
-      kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-        -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
-    fi
-  done
+       [ "$silent" = "false" ] && echo "  Initializing $field (was empty/null)"
+       kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+         -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+     fi
+   done
+
+  # mentorshipContext (issue #1228): pipe-separated predecessor mentorship data.
+  # Format: "issue:mentor_agent:insight_summary|issue:mentor_agent:insight_summary|..."
+  # Set by route_tasks_by_specialization() when a specialized predecessor is found.
+  # Read by entrypoint.sh request_coordinator_task() to enrich new workers' prompts.
+  mentorship_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.mentorshipContext}' 2>/dev/null)
+  if [ -z "$mentorship_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing mentorshipContext (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"mentorshipContext":""}}' 2>/dev/null || true
+  fi
 
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
@@ -1635,6 +1646,104 @@ find_best_agent_for_issue() {
     fi
 }
 
+# Find a predecessor agent (from S3 identities) who has worked on issues
+# with matching labels and extract their last relevant insight.
+# This implements the coordinator side of predecessor mentorship (issue #1228):
+# when a specialized agent is routed a task, their task description includes
+# an insight from the most recent predecessor who worked on similar issues.
+#
+# Arguments:
+#   $1 - issue_labels (comma-separated, e.g., "bug,self-improvement")
+#   $2 - exclude_agent (optional) - agent name to exclude (avoids self-mentorship)
+# Returns: "mentor_agent_name|insight_summary" via stdout, or empty string if no mentor found
+get_predecessor_insight() {
+    local issue_labels="${1:-}"
+    local exclude_agent="${2:-}"
+
+    [ -z "$issue_labels" ] && echo "" && return 0
+
+    # Map labels to specialization name (mirrors identity.sh update_specialization logic)
+    local target_spec=""
+    IFS=',' read -ra label_arr <<< "$issue_labels"
+    for label in "${label_arr[@]}"; do
+        label=$(echo "$label" | tr -d ' ')
+        [ -z "$label" ] && continue
+        case "$label" in
+            collective-intelligence|debate|governance) target_spec="governance-specialist" ;;
+            coordinator|self-improvement) target_spec="platform-specialist" ;;
+            security) target_spec="security-specialist" ;;
+            identity|memory) target_spec="memory-specialist" ;;
+            bug) target_spec="debugger" ;;
+            *) target_spec="${label}-specialist" ;;
+        esac
+        [ -n "$target_spec" ] && break
+    done
+
+    [ -z "$target_spec" ] && echo "" && return 0
+
+    # Scan S3 identity files for the most recent agent with matching specialization
+    local identity_keys
+    identity_keys=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
+        --region "$BEDROCK_REGION" 2>/dev/null | \
+        sort -rk1,2 | awk '{print $4}' | head -50 || echo "")
+
+    [ -z "$identity_keys" ] && echo "" && return 0
+
+    local mentor_agent=""
+    local mentor_insight=""
+
+    while IFS= read -r identity_key; do
+        [ -z "$identity_key" ] && continue
+
+        local agent_name="${identity_key%.json}"
+        # Skip excluded agent (avoid self-mentorship)
+        [ "$agent_name" = "$exclude_agent" ] && continue
+
+        # Download and parse identity
+        local identity_json
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${identity_key}" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        [ -z "$identity_json" ] && continue
+
+        # Check if specialization matches
+        local agent_spec
+        agent_spec=$(echo "$identity_json" | jq -r '.specialization // ""' 2>/dev/null || echo "")
+        if [ "$agent_spec" = "$target_spec" ]; then
+            mentor_agent="$agent_name"
+
+            # Try to find their most recent insight from Thought CRs
+            local mentor_thought
+            mentor_thought=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+                -l "agentex/thought" -o json 2>/dev/null | \
+                jq -r --arg agent "$agent_name" \
+                    '.items | sort_by(.metadata.creationTimestamp) | reverse |
+                     .[] | select(.data.agentRef == $agent and .data.thoughtType == "insight") |
+                     .data.content' 2>/dev/null | head -3 | tr '\n' ' ' || echo "")
+
+            if [ -n "$mentor_thought" ]; then
+                mentor_insight=$(echo "$mentor_thought" | cut -c1-200)
+                echo "[$(date -u +%H:%M:%S)] Predecessor mentor found: $mentor_agent (spec=$agent_spec) for labels=$issue_labels" >&2
+                break
+            else
+                local tasks_completed
+                tasks_completed=$(echo "$identity_json" | jq -r '.stats.tasksCompleted // 0' 2>/dev/null || echo "0")
+                mentor_insight="Agent $agent_name has completed ${tasks_completed} task(s) as ${target_spec}."
+                echo "[$(date -u +%H:%M:%S)] Predecessor mentor found (no thoughts): $mentor_agent (spec=$agent_spec)" >&2
+                break
+            fi
+        fi
+    done <<< "$identity_keys"
+
+    if [ -n "$mentor_agent" ] && [ -n "$mentor_insight" ]; then
+        # Escape pipe character in insight (used as field separator)
+        local safe_insight
+        safe_insight=$(echo "$mentor_insight" | tr '|' ' ')
+        echo "${mentor_agent}|${safe_insight}"
+    else
+        echo ""
+    fi
+}
+
 # Perform identity-based task routing cycle:
 # For each issue in the task queue that is NOT yet assigned, attempt to find
 # a specialized agent. Record routing decisions and emit metrics.
@@ -1679,13 +1788,41 @@ route_tasks_by_specialization() {
         local best_agent
         best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels")
 
-        if [ -n "$best_agent" ]; then
+         if [ -n "$best_agent" ]; then
             # Record specialized routing decision in coordinator state
             local routing_entry="${issue_num}:${best_agent}"
             routing_log="${routing_log}${routing_entry};"
             specialized_count=$((specialized_count + 1))
             push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
             echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num → $best_agent"
+
+            # Issue #1228: Predecessor mentorship — find a predecessor specialist for context
+            # Store in coordinator-state so the assigned worker can read it when claiming
+            local predecessor_data
+            predecessor_data=$(get_predecessor_insight "$issue_labels" "$best_agent" 2>/dev/null || echo "")
+            if [ -n "$predecessor_data" ]; then
+                local mentor_agent="${predecessor_data%%|*}"
+                local mentor_insight="${predecessor_data#*|}"
+                local existing_mentorship
+                existing_mentorship=$(get_state "mentorshipContext")
+                local new_entry="${issue_num}:${mentor_agent}:${mentor_insight}"
+                if [ -n "$existing_mentorship" ]; then
+                    # Replace existing entry for this issue if present, append otherwise
+                    local cleaned_mentorship
+                    cleaned_mentorship=$(echo "$existing_mentorship" | tr '|' '\n' | \
+                        grep -v "^${issue_num}:" || true)
+                    cleaned_mentorship=$(echo "$cleaned_mentorship" | tr '\n' '|' | sed 's/|$//')
+                    if [ -n "$cleaned_mentorship" ]; then
+                        update_state "mentorshipContext" "${cleaned_mentorship}|${new_entry}"
+                    else
+                        update_state "mentorshipContext" "$new_entry"
+                    fi
+                else
+                    update_state "mentorshipContext" "$new_entry"
+                fi
+                echo "[$(date -u +%H:%M:%S)] MENTORSHIP CONTEXT: issue #$issue_num → predecessor=$mentor_agent"
+                push_metric "PredecessorMentorshipSet" 1 "Count" "IssueNumber=${issue_num}"
+            fi
         else
             generic_count=$((generic_count + 1))
         fi

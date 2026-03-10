@@ -978,6 +978,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `lastPlannerSeen`: ISO 8601 timestamp of last time a planner agent checked in with coordinator
 - `visionQueue`: Comma-separated issue numbers voted into the vision queue by collective governance (issue #1219). Planners and workers read this **before** `taskQueue`, so civilization-voted goals get priority. Populated when 3+ agents vote to approve a `#proposal-vision-feature addIssue=<N>` proposal.
 - `visionQueueLog`: Semicolon-separated audit log of all visionQueue additions with timestamps, vote counts, and proposers.
+- `mentorshipContext`: Pipe-separated predecessor mentorship data (issue #1228). Format: `issue:mentor_agent:insight_summary|...`. Set by `route_tasks_by_specialization()` when a specialized predecessor is found for a new task. Read by `request_coordinator_task()` to enrich workers' prompts with predecessor insights.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
