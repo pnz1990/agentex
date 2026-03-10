@@ -2003,11 +2003,21 @@ score_agent_for_issue() {
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    local display_name="${5:-$agent_name}"  # Issue #1475: use displayName for S3 lookup (default to agent_name for backward compat)
 
     # Read agent identity from S3
+    # Issue #1475: Workers are ephemeral (new agent_name each pod) but displayNames persist.
+    # Specialization history accumulates under displayName.json, not agent_name.json.
+    # Try displayName first, fall back to agent_name for backward compatibility.
     local identity_json
-    identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+    identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${display_name}.json" - \
         --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    
+    # Fallback: try agent_name if displayName lookup fails (backward compat)
+    if [ -z "$identity_json" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    fi
 
     if [ -z "$identity_json" ]; then
         echo "0"
@@ -2135,7 +2145,16 @@ find_best_agent_for_issue() {
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        local agent_role="${pair##*:}"
+        # Issue #1475: Parse displayName from 3rd field (format: agent_name:role:displayName)
+        # Backward compat: if only 2 fields, displayName == agent_name
+        local display_name
+        if [[ "$pair" =~ .*:.+:.+ ]]; then
+            display_name=$(echo "$pair" | cut -d: -f3)
+        else
+            display_name="$agent_name"
+        fi
+        local agent_role
+        agent_role=$(echo "$pair" | cut -d: -f2)
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
@@ -2148,7 +2167,7 @@ find_best_agent_for_issue() {
 
         local agent_score
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+            "$issue_labels" "$issue_keywords" "$display_name")
 
         echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
 
@@ -2288,11 +2307,26 @@ route_tasks_by_specialization() {
             [ -z "$aname" ] && continue
             agents_checked=$((agents_checked + 1))
 
+            # Issue #1475: Also check displayName for specialization data
+            local dname
+            if [[ "$pair" =~ .*:.+:.+ ]]; then
+                dname=$(echo "$pair" | cut -d: -f3)
+            else
+                dname="$aname"
+            fi
+
             local spec_data
-            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+            # Try displayName first, fall back to agent_name
+            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${dname}.json" - \
                 --region "$BEDROCK_REGION" 2>/dev/null | \
                 jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
                 2>/dev/null || echo "")
+            if [ -z "$spec_data" ]; then
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null | \
+                    jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                    2>/dev/null || echo "")
+            fi
             if [ -n "$spec_data" ]; then
                 agents_with_spec=$((agents_with_spec + 1))
             fi

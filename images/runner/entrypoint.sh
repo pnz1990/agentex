@@ -1752,16 +1752,22 @@ register_with_coordinator() {
   current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.activeAgents}' 2>/dev/null || echo "")
 
+  # Issue #1475: Include displayName as 3rd field for specialization routing.
+  # Workers are ephemeral (new agent_name each pod) but displayNames persist.
+  # Format: agent_name:role:displayName
+  # Backward compat: coordinator parser treats 2-field entries as displayName==agent_name
+  local display_name="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
+
   local new_val
   if [ -z "$current" ]; then
-    new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    new_val="${AGENT_NAME}:${AGENT_ROLE}:${display_name}"
   else
     # Deduplicate: remove any prior entry for this agent then add fresh
     # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
     # (no matches), which would crash the script under set -euo pipefail
     new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
     new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
-    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}:${display_name}" || new_val="${AGENT_NAME}:${AGENT_ROLE}:${display_name}"
   fi
 
   # Build patch data — include lastPlannerSeen timestamp for planners (issue #1274)
