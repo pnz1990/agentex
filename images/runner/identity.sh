@@ -196,6 +196,11 @@ save_identity() {
   local spec_synthesis_count=0
   local spec_cited_syntheses_count=0
   local spec_debate_quality_score=0
+  local spec_mentor_credits="[]"
+  local spec_successful_mentorships=0
+  local spec_promoted_role=""
+  local spec_promoted_at=""
+  local spec_promotion_reason=""
   local reputation_history="[]"
   local reputation_average=0
   local proactive_issues_found=0
@@ -213,6 +218,13 @@ save_identity() {
     # Issue #1604: Preserve debate quality fields across save cycles
     spec_cited_syntheses_count=$(echo "$existing_json" | jq -r '.specializationDetail.citedSynthesesCount // 0')
     spec_debate_quality_score=$(echo "$existing_json" | jq -r '.specializationDetail.debateQualityScore // 0')
+    # Issue #1796: Preserve mentor credit fields across save cycles
+    spec_mentor_credits=$(echo "$existing_json" | jq -c '.specializationDetail.mentorCredits // []')
+    spec_successful_mentorships=$(echo "$existing_json" | jq -r '.specializationDetail.successfulMentorships // 0')
+    # Issue #1796: Preserve promoted role across save cycles
+    spec_promoted_role=$(echo "$existing_json" | jq -r '.promotedRole // ""')
+    spec_promoted_at=$(echo "$existing_json" | jq -r '.promotedAt // ""')
+    spec_promotion_reason=$(echo "$existing_json" | jq -r '.promotionReason // ""')
     # Issue #1602: Preserve reputationHistory across save cycles
     reputation_history=$(echo "$existing_json" | jq -c '.reputationHistory // []')
     reputation_average=$(echo "$existing_json" | jq -r '.reputationAverage // 0')
@@ -235,7 +247,9 @@ save_identity() {
     "debatesWon": $spec_debates_won,
     "synthesisCount": $spec_synthesis_count,
     "citedSynthesesCount": $spec_cited_syntheses_count,
-    "debateQualityScore": $spec_debate_quality_score
+    "debateQualityScore": $spec_debate_quality_score,
+    "mentorCredits": $spec_mentor_credits,
+    "successfulMentorships": $spec_successful_mentorships
   },
   "stats": {
     "tasksCompleted": $tasks_completed,
@@ -249,6 +263,17 @@ save_identity() {
 }
 EOF
 )
+
+  # Issue #1796: If existing identity had a promotedRole, preserve it via jq post-processing.
+  # Done after heredoc to avoid bash escaping issues with optional/empty fields.
+  if [[ -n "$spec_promoted_role" ]]; then
+    identity_json=$(echo "$identity_json" | jq \
+      --arg role "$spec_promoted_role" \
+      --arg at "$spec_promoted_at" \
+      --arg reason "$spec_promotion_reason" \
+      '. + {promotedRole: $role, promotedAt: $at, promotionReason: $reason}' \
+      2>/dev/null || echo "$identity_json")
+  fi
   
   if echo "$identity_json" | aws s3 cp - "$s3_path" 2>/dev/null; then
     echo "[identity] Saved identity to S3: $s3_path"
@@ -291,6 +316,8 @@ save_identity_with_inheritance() {
   # Inherit accumulated specialization from prior agent
   local spec_label_counts spec_code_areas spec_debates_won spec_synthesis_count
   local spec_cited_syntheses_count spec_debate_quality_score
+  local spec_mentor_credits spec_successful_mentorships
+  local spec_promoted_role spec_promoted_at spec_promotion_reason
   local tasks_completed issues_filed prs_merged thoughts_posted
   local reputation_history reputation_average
 
@@ -302,6 +329,15 @@ save_identity_with_inheritance() {
     # Issue #1604: Inherit debate quality fields
     spec_cited_syntheses_count=$(echo "$prior_json" | jq -r '.specializationDetail.citedSynthesesCount // 0')
     spec_debate_quality_score=$(echo "$prior_json" | jq -r '.specializationDetail.debateQualityScore // 0')
+    # Issue #1796: Inherit mentor credit fields — previously dropped on cross-gen inheritance,
+    # causing v0.5 Criterion 4 (mentorCredits > 0) and mentor routing bonus to be silently lost.
+    spec_mentor_credits=$(echo "$prior_json" | jq -c '.specializationDetail.mentorCredits // []')
+    spec_successful_mentorships=$(echo "$prior_json" | jq -r '.specializationDetail.successfulMentorships // 0')
+    # Issue #1796: Inherit promoted role — previously dropped on cross-gen inheritance,
+    # causing v0.5 Criterion 1 (promotedRole count) to be silently lost after re-claim.
+    spec_promoted_role=$(echo "$prior_json" | jq -r '.promotedRole // ""')
+    spec_promoted_at=$(echo "$prior_json" | jq -r '.promotedAt // ""')
+    spec_promotion_reason=$(echo "$prior_json" | jq -r '.promotionReason // ""')
     tasks_completed=$(echo "$prior_json" | jq -r '.stats.tasksCompleted // 0')
     issues_filed=$(echo "$prior_json" | jq -r '.stats.issuesFiled // 0')
     prs_merged=$(echo "$prior_json" | jq -r '.stats.prsMerged // 0')
@@ -317,6 +353,11 @@ save_identity_with_inheritance() {
     spec_synthesis_count=0
     spec_cited_syntheses_count=0
     spec_debate_quality_score=0
+    spec_mentor_credits="[]"
+    spec_successful_mentorships=0
+    spec_promoted_role=""
+    spec_promoted_at=""
+    spec_promotion_reason=""
     tasks_completed=0
     issues_filed=0
     prs_merged=0
@@ -329,6 +370,7 @@ save_identity_with_inheritance() {
   local specialization_value="${AGENT_SPECIALIZATION:-}"
   local s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${AGENT_NAME}.json"
 
+  # Build the base identity JSON with all preserved fields
   local identity_json
   identity_json=$(cat <<EOF
 {
@@ -344,7 +386,9 @@ save_identity_with_inheritance() {
     "debatesWon": $spec_debates_won,
     "synthesisCount": $spec_synthesis_count,
     "citedSynthesesCount": $spec_cited_syntheses_count,
-    "debateQualityScore": $spec_debate_quality_score
+    "debateQualityScore": $spec_debate_quality_score,
+    "mentorCredits": $spec_mentor_credits,
+    "successfulMentorships": $spec_successful_mentorships
   },
   "stats": {
     "tasksCompleted": $tasks_completed,
@@ -358,6 +402,19 @@ save_identity_with_inheritance() {
 }
 EOF
 )
+
+  # Issue #1796: If prior agent had a promotedRole, inject it into the identity JSON.
+  # We do this via jq post-processing to avoid bash heredoc quoting issues with
+  # optional fields (empty strings should not produce "promotedRole": "").
+  if [[ -n "$spec_promoted_role" ]]; then
+    identity_json=$(echo "$identity_json" | jq \
+      --arg role "$spec_promoted_role" \
+      --arg at "$spec_promoted_at" \
+      --arg reason "$spec_promotion_reason" \
+      '. + {promotedRole: $role, promotedAt: $at, promotionReason: $reason}' \
+      2>/dev/null || echo "$identity_json")
+    echo "[identity] Inherited promotedRole from prior agent: $spec_promoted_role"
+  fi
 
   if echo "$identity_json" | aws s3 cp - "$s3_path" 2>/dev/null; then
     echo "[identity] Saved inherited identity to S3: $s3_path (inherited from prior '$AGENT_DISPLAY_NAME')"
