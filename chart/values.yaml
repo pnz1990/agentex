@@ -1,27 +1,47 @@
 # =============================================================================
 # Agentex Helm Chart — values.yaml
 # =============================================================================
-# A new god needs to set ONLY these values to start a civilization:
+# A new god needs to set ONLY the values under `vision:` to start a civilization:
 #
 #   helm install agentex ./chart \
-#     --set god.repo=myorg/myproduct \
-#     --set god.vision="Build a SaaS invoice tool" \
-#     --set image.registry=123456789.dkr.ecr.us-east-1.amazonaws.com \
-#     --set aws.region=us-east-1 \
-#     --set aws.s3Bucket=my-agentex-thoughts
+#     --set vision.githubRepo=myorg/myproduct \
+#     --set vision.awsRegion=eu-west-1 \
+#     --set vision.ecrRegistry=123456789.dkr.ecr.eu-west-1.amazonaws.com \
+#     --set vision.s3Bucket=my-agentex-thoughts \
+#     --set vision.clusterName=my-cluster \
+#     --set github.token=ghp_YOUR_TOKEN
 #
 # Everything else has sensible defaults.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# God configuration — customize your civilization
+# vision: — REQUIRED — new god must set all five of these
+# These define WHERE your civilization lives and what it works on.
 # ---------------------------------------------------------------------------
-god:
-  # Your GitHub repo (agents will push code, open PRs, create issues here)
-  repo: "pnz1990/agentex"
+vision:
+  # Your GitHub repo — agents file issues and open PRs here (format: owner/repo)
+  githubRepo: "pnz1990/agentex"
 
-  # Your civilization's purpose (free text, shown to all agents)
-  vision: |
+  # AWS region where your EKS cluster and Bedrock run (e.g. eu-west-1, us-east-1)
+  awsRegion: "us-west-2"
+
+  # ECR registry base URL — agents pull the runner image from here (no trailing slash)
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com
+  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
+
+  # S3 bucket for agent memory, chronicle, and planning state
+  s3Bucket: "agentex-thoughts"
+
+  # EKS cluster name — agents use this to configure kubectl context
+  clusterName: "agentex"
+
+# ---------------------------------------------------------------------------
+# civilization: — OPTIONAL — sensible defaults for a fresh install
+# These shape your civilization's behavior and governance.
+# ---------------------------------------------------------------------------
+civilization:
+  # Your civilization's purpose (free text, shown to all agents as the north star)
+  purpose: |
     Agents that propose, vote, debate, and reason about improvements to
     their own society — a true collective intelligence that develops itself.
     NOT: agents that fix their own plumbing forever.
@@ -34,83 +54,73 @@ god:
     platform issue, spawn workers for open GitHub issues, and ensure
     the planner loop never stops.
 
-# ---------------------------------------------------------------------------
-# Container image — your ECR (or any registry)
-# ---------------------------------------------------------------------------
-image:
-  # Your container registry base URL (no trailing slash)
-  registry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
-  # Image repository path within registry
-  repository: "agentex/runner"
-  # Image tag (latest or a specific SHA)
-  tag: "latest"
-  # Pull policy
-  pullPolicy: Always
+  # Current civilization generation (god increments this)
+  generation: "1"
 
-# ---------------------------------------------------------------------------
-# AWS — region and S3 for agent memory
-# ---------------------------------------------------------------------------
-aws:
-  # AWS region where EKS cluster runs
-  region: "us-west-2"
-  # S3 bucket for agent memory and chronicle
-  s3Bucket: "agentex-thoughts"
+  # Maximum concurrent active Jobs — increase slowly with evidence (circuit breaker)
+  circuitBreakerLimit: "6"
 
-# ---------------------------------------------------------------------------
-# Kubernetes cluster — where your civilization lives
-# ---------------------------------------------------------------------------
-cluster:
-  # EKS cluster name (used in agent env var)
-  name: "agentex"
-  # Namespace for all agentex resources
-  namespace: "agentex"
+  # Daily Bedrock cost budget in USD
+  dailyCostBudgetUSD: "50"
 
-# ---------------------------------------------------------------------------
-# Agent model — Bedrock model for all agents
-# ---------------------------------------------------------------------------
-agent:
-  # Bedrock model ID (cross-region inference prefix required)
+  # Job TTL for completed agent pods (seconds)
+  jobTTLSeconds: "300"
+
+  # Minimum approve votes required to enact a governance proposal
+  voteThreshold: "3"
+
+  # Minimum vision score for agent work (agents should only take high-value tasks)
+  minimumVisionScore: "5"
+
+  # Minimum generations before agents may work on vision features
+  visionUnlockGeneration: "10"
+
+  # Bedrock model ID for all agents (cross-region inference prefix required)
   model: "us.anthropic.claude-sonnet-4-6"
 
 # ---------------------------------------------------------------------------
-# GitHub token — injected as a Kubernetes Secret
-# Agents use this to authenticate with GitHub (push, PR, issues)
-# Set via: --set github.token=ghp_xxx  OR  use an existing secret
+# security: — OPTIONAL — kill switch and security posture
+# ---------------------------------------------------------------------------
+security:
+  # Set to true to stop ALL agent spawning immediately (emergency use only)
+  killSwitchEnabled: false
+  # Reason shown in kill switch ConfigMap (human-readable)
+  killSwitchReason: ""
+
+# ---------------------------------------------------------------------------
+# github: — GitHub authentication
+# Agents use this to push code, open PRs, and create issues.
+# Set token via: --set github.token=ghp_xxx  OR  use an existing secret.
 # ---------------------------------------------------------------------------
 github:
-  # GitHub repository for issue tracking and PRs (format: owner/repo)
-  # Agents will file issues and open PRs on this repo
-  repo: "pnz1990/agentex"
   # GitHub personal access token with repo scope
   # If empty, assumes secret already exists (e.g. externally managed)
   token: ""
-  # Name of the secret that holds the token
+  # Name of the Kubernetes Secret that holds the token
   secretName: "agentex-github-token"
   # Key within the secret
   secretKey: "token"
 
 # ---------------------------------------------------------------------------
-# Constitution — civilization governance parameters
-# Agents READ these. Only god changes them.
+# image: — container image configuration
 # ---------------------------------------------------------------------------
-constitution:
-  # Maximum concurrent active Jobs (circuit breaker limit)
-  circuitBreakerLimit: "6"
-  # Minimum votes to enact a governance proposal
-  voteThreshold: "3"
-  # Daily Bedrock cost budget in USD
-  dailyCostBudgetUSD: "50"
-  # Job TTL for completed pods (seconds)
-  jobTTLSeconds: "300"
-  # Minimum vision score for agent work
-  minimumVisionScore: "5"
-  # Current civilization generation (god increments this)
-  civilizationGeneration: "1"
-  # Minimum generations before vision features are unlocked
-  visionUnlockGeneration: "10"
+image:
+  # Image repository path within the vision.ecrRegistry
+  repository: "agentex/runner"
+  # Image tag (latest or a specific SHA for reproducibility)
+  tag: "latest"
+  # Pull policy
+  pullPolicy: Always
 
 # ---------------------------------------------------------------------------
-# Resource limits for agent pods
+# cluster: — Kubernetes namespace (rarely needs changing)
+# ---------------------------------------------------------------------------
+cluster:
+  # Namespace for all agentex resources
+  namespace: "agentex"
+
+# ---------------------------------------------------------------------------
+# resources: — agent pod resource limits
 # ---------------------------------------------------------------------------
 resources:
   requests:
@@ -121,25 +131,7 @@ resources:
     cpu: "1000m"
 
 # ---------------------------------------------------------------------------
-# Pod security — applied to all agent pods
-# ---------------------------------------------------------------------------
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
-  seccompProfile:
-    type: RuntimeDefault
-
-# ---------------------------------------------------------------------------
-# Kill switch — set to true to stop all agent spawning immediately
-# ---------------------------------------------------------------------------
-killswitch:
-  enabled: false
-  reason: ""
-
-# ---------------------------------------------------------------------------
-# Seed agent — the bootstrap job that starts the civilization
+# seed: — one-time bootstrap job
 # ---------------------------------------------------------------------------
 seed:
   # Enable seed job (set to false if civilization is already running)

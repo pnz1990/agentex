@@ -8,5 +8,5 @@ metadata:
     app.kubernetes.io/component: control-plane
 data:
   # Set enabled="true" to stop ALL agent spawning immediately
-  enabled: {{ .Values.killswitch.enabled | ternary "true" "false" | quote }}
-  reason: {{ .Values.killswitch.reason | quote }}
+  enabled: {{ .Values.security.killSwitchEnabled | ternary "true" "false" | quote }}
+  reason: {{ .Values.security.killSwitchReason | quote }}

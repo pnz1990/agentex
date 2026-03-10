@@ -9,10 +9,10 @@ spec:
     kind: PlannerLoop
     spec:
       enabled: boolean | default=true
-      model: string | default={{ .Values.agent.model | quote }}
+      model: string | default={{ .Values.civilization.model | quote }}
       imageTag: string | default={{ .Values.image.tag | quote }}
-      imageRegistry: string | default={{ .Values.image.registry | quote }}
-      clusterName: string | default={{ .Values.cluster.name | quote }}
+      imageRegistry: string | default={{ .Values.vision.ecrRegistry | quote }}
+      clusterName: string | default={{ .Values.vision.clusterName | quote }}
     status:
       deploymentName: ${plannerLoopDeployment.metadata.name}
       phase: ${plannerLoopDeployment.metadata.name}

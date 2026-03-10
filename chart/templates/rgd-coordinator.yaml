@@ -9,7 +9,7 @@ spec:
     kind: Coordinator
     spec:
       enabled: boolean | default=true
-      model: string | default={{ .Values.agent.model | quote }}
+      model: string | default={{ .Values.civilization.model | quote }}
       imageTag: string | default={{ .Values.image.tag | quote }}
     status:
       configMapName: ${coordinatorState.metadata.name}
@@ -74,7 +74,7 @@ spec:
                   type: RuntimeDefault
               containers:
                 - name: coordinator
-                  image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:${schema.spec.imageTag}
+                  image: {{ .Values.vision.ecrRegistry }}/{{ .Values.image.repository }}:${schema.spec.imageTag}
                   imagePullPolicy: {{ .Values.image.pullPolicy }}
                   command: ["/bin/bash", "/usr/local/bin/coordinator.sh"]
                   securityContext:
@@ -88,11 +88,11 @@ spec:
                     - name: BEDROCK_MODEL
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
-                      value: {{ .Values.aws.region | quote }}
+                      value: {{ .Values.vision.awsRegion | quote }}
                     - name: REPO
-                      value: {{ .Values.god.repo | quote }}
+                      value: {{ .Values.vision.githubRepo | quote }}
                     - name: CLUSTER
-                      value: {{ .Values.cluster.name | quote }}
+                      value: {{ .Values.vision.clusterName | quote }}
                     - name: NAMESPACE
                       value: ${schema.metadata.namespace}
                     - name: GITHUB_TOKEN_FILE
