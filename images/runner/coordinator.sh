@@ -652,7 +652,10 @@ sync_constitution_to_git() {
     # those keys in the existing file. This preserves all comments, annotations, and
     # documentation. Previously used head -16 + full data rebuild which DESTROYED all docs.
     local constitution_file="manifests/system/constitution.yaml"
-    
+    # Issue #1408: Also update chart/values.yaml so fresh Helm installs reflect governance decisions.
+    # chart/values.yaml uses "civilization:" section keys that map to constitution fields.
+    local chart_values_file="chart/values.yaml"
+
     # Parse kv_pairs (format: "key1=value1 key2=value2") and update each changed key.
     # Skip meta-keys that are not real constitution fields (reason=, proposalRef=).
     local meta_keys="reason proposalRef"
@@ -671,24 +674,31 @@ sync_constitution_to_git() {
         # Surgically update the key in constitution.yaml using sed
         # Pattern: "  key: ..." (exactly 2-space indent, matches data section keys)
         # The sed replacement preserves the line format with quoted value
+        local escaped_value
+        escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
         if grep -q "^  ${key}: " "$constitution_file" 2>/dev/null; then
             # Escape any forward slashes in value for sed
-            local escaped_value
-            escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
             sed -i "s/^  ${key}: .*$/  ${key}: \"${escaped_value}\"/" "$constitution_file"
             echo "[$(date -u +%H:%M:%S)] ✓ Updated constitution.yaml: ${key}=${value}"
             updated_any=true
         else
             echo "[$(date -u +%H:%M:%S)] WARNING: key '${key}' not found in constitution.yaml — skipping"
         fi
+        # Issue #1408: Also update chart/values.yaml if the key exists under "civilization:" section
+        # chart/values.yaml uses same key names under the "civilization:" block (2-space indent)
+        if [ -f "$chart_values_file" ] && grep -q "^  ${key}: " "$chart_values_file" 2>/dev/null; then
+            sed -i "s/^  ${key}: .*$/  ${key}: \"${escaped_value}\"/" "$chart_values_file"
+            echo "[$(date -u +%H:%M:%S)] ✓ Updated chart/values.yaml: ${key}=${value} (issue #1408)"
+        fi
     done <<< "$(echo "$kv_pairs" | tr ' ' '\n')"
     
-    # Check if there are changes
-    if ! git diff --quiet "$constitution_file"; then
+    # Check if there are changes (constitution.yaml or chart/values.yaml)
+    if ! git diff --quiet "$constitution_file" || ! git diff --quiet "$chart_values_file" 2>/dev/null; then
         git add "$constitution_file"
+        [ -f "$chart_values_file" ] && git diff --quiet "$chart_values_file" 2>/dev/null || git add "$chart_values_file" 2>/dev/null || true
         
         # Build commit message
-        local commit_msg="chore: sync constitution.yaml with enacted governance decision
+        local commit_msg="chore: sync constitution.yaml and chart/values.yaml with enacted governance
 
 Governance topic: ${topic}
 Enacted changes: ${kv_pairs}
@@ -698,6 +708,7 @@ This commit syncs the git repo with the cluster ConfigMap after
 governance enactment. Without this sync, fresh installs would revert
 the civilization's collective decisions.
 
+Issue #1408: chart/values.yaml now also updated to keep Helm installs in sync.
 Fixes #893"
         
         git commit -m "$commit_msg" 2>/dev/null || return 1

@@ -58,7 +58,7 @@ civilization:
   generation: "1"
 
   # Maximum concurrent active Jobs — increase slowly with evidence (circuit breaker)
-  circuitBreakerLimit: "6"
+  circuitBreakerLimit: "10"
 
   # Job TTL for completed agent pods (seconds)
   jobTTLSeconds: "300"
