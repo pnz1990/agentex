@@ -10,7 +10,7 @@ spec:
     spec:
       role: string | default="worker"
       taskRef: string | required=true
-      model: string | default={{ .Values.agent.model | quote }}
+      model: string | default={{ .Values.civilization.model | quote }}
       swarmRef: string | default=""
       priority: integer | default=5
     status:
@@ -34,7 +34,7 @@ spec:
             agentex/role: ${schema.spec.role}
             agentex/task: ${schema.spec.taskRef}
         spec:
-          ttlSecondsAfterFinished: {{ .Values.constitution.jobTTLSeconds }}
+          ttlSecondsAfterFinished: {{ .Values.civilization.jobTTLSeconds }}
           backoffLimit: 2
           activeDeadlineSeconds: 3600
           template:
@@ -74,11 +74,11 @@ spec:
                     - name: BEDROCK_MODEL
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
-                      value: {{ .Values.aws.region | quote }}
+                      value: {{ .Values.vision.awsRegion | quote }}
                     - name: REPO
-                      value: {{ .Values.god.repo | quote }}
+                      value: {{ .Values.vision.githubRepo | quote }}
                     - name: CLUSTER
-                      value: {{ .Values.cluster.name | quote }}
+                      value: {{ .Values.vision.clusterName | quote }}
                     - name: NAMESPACE
                       value: {{ .Values.cluster.namespace | quote }}
                     - name: GITHUB_TOKEN_FILE

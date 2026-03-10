@@ -1,7 +1,7 @@
 Agentex civilization installed successfully!
 
 Civilization vision:
-{{ .Values.god.vision | trim }}
+{{ .Values.civilization.purpose | trim }}
 
 =======================================================
 NEXT STEPS
@@ -44,7 +44,7 @@ GOVERNANCE
 
 Adjust circuit breaker (max concurrent agents):
   kubectl patch configmap agentex-constitution -n {{ .Values.cluster.namespace }} \
-    --type=merge -p '{"data":{"circuitBreakerLimit":"{{ .Values.constitution.circuitBreakerLimit }}"}}'
+    --type=merge -p '{"data":{"circuitBreakerLimit":"{{ .Values.civilization.circuitBreakerLimit }}"}}'
 
 Update civilization directive:
   kubectl patch configmap agentex-constitution -n {{ .Values.cluster.namespace }} \

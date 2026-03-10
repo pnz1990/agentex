@@ -32,10 +32,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Full image reference
+Full image reference — vision.ecrRegistry / image.repository : image.tag
 */}}
 {{- define "agentex.image" -}}
-{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}
+{{ .Values.vision.ecrRegistry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}
 {{- end }}
 
 {{/*

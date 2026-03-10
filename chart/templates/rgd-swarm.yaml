@@ -15,8 +15,8 @@ spec:
       workers: integer | default=3
       reviewers: integer | default=1
       consensusThreshold: integer | default=51
-      githubRepo: string | default={{ .Values.god.repo | quote }}
-      model: string | default={{ .Values.agent.model | quote }}
+      githubRepo: string | default={{ .Values.vision.githubRepo | quote }}
+      model: string | default={{ .Values.civilization.model | quote }}
     status:
       configMapName: ${swarmState.metadata.name}
       phase: ${swarmState.data.phase}
@@ -63,7 +63,7 @@ spec:
             agentex/role: planner
             agentex/swarm: ${schema.metadata.name}
         spec:
-          ttlSecondsAfterFinished: {{ .Values.constitution.jobTTLSeconds }}
+          ttlSecondsAfterFinished: {{ .Values.civilization.jobTTLSeconds }}
           backoffLimit: 0
           activeDeadlineSeconds: 3600
           template:
@@ -103,11 +103,11 @@ spec:
                     - name: BEDROCK_MODEL
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
-                      value: {{ .Values.aws.region | quote }}
+                      value: {{ .Values.vision.awsRegion | quote }}
                     - name: REPO
-                      value: {{ .Values.god.repo | quote }}
+                      value: {{ .Values.vision.githubRepo | quote }}
                     - name: CLUSTER
-                      value: {{ .Values.cluster.name | quote }}
+                      value: {{ .Values.vision.clusterName | quote }}
                     - name: NAMESPACE
                       value: ${schema.metadata.namespace}
                     - name: GITHUB_TOKEN_FILE

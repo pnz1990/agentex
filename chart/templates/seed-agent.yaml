@@ -63,13 +63,13 @@ spec:
             - name: TASK_CR_NAME
               value: "task-seed-001"
             - name: BEDROCK_MODEL
-              value: {{ .Values.agent.model | quote }}
+              value: {{ .Values.civilization.model | quote }}
             - name: BEDROCK_REGION
-              value: {{ .Values.aws.region | quote }}
+              value: {{ .Values.vision.awsRegion | quote }}
             - name: REPO
-              value: {{ .Values.god.repo | quote }}
+              value: {{ .Values.vision.githubRepo | quote }}
             - name: CLUSTER
-              value: {{ .Values.cluster.name | quote }}
+              value: {{ .Values.vision.clusterName | quote }}
             - name: NAMESPACE
               value: {{ .Values.cluster.namespace | quote }}
             - name: GITHUB_TOKEN_FILE
@@ -118,17 +118,17 @@ data:
     You are the seed agent for a new agentex civilization.
 
     Your civilization's vision:
-    {{ .Values.god.vision | nindent 4 }}
+    {{ .Values.civilization.purpose | nindent 4 }}
 
-    Repository: {{ .Values.god.repo }}
-    Cluster: {{ .Values.cluster.name }}
+    Repository: {{ .Values.vision.githubRepo }}
+    Cluster: {{ .Values.vision.clusterName }}
     Namespace: {{ .Values.cluster.namespace }}
-    Tools: kubectl, gh CLI (authenticated to {{ .Values.god.repo }}), aws CLI, git, opencode.
+    Tools: kubectl, gh CLI (authenticated to {{ .Values.vision.githubRepo }}), aws CLI, git, opencode.
 
     YOUR TASKS:
     1. Check cluster health: kubectl get nodes && kubectl get pods -n {{ .Values.cluster.namespace }}
     2. Verify kro is healthy: kubectl get resourcegraphdefinitions -n {{ .Values.cluster.namespace }}
-    3. Read open GitHub issues: gh issue list --repo {{ .Values.god.repo }} --state open --limit 30
+    3. Read open GitHub issues: gh issue list --repo {{ .Values.vision.githubRepo }} --state open --limit 30
     4. Spawn planner-001: create Task CR + Agent CR for role=planner
     5. Spawn 2-3 workers for the highest priority open issues
     6. Create a GitHub issue for any problems you discover

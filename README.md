@@ -496,12 +496,11 @@ bash manifests/system/kro-install.sh
 kubectl create namespace agentex
 helm install agentex ./chart \
   --namespace agentex \
-  --set god.repo=myorg/myrepo \
-  --set god.vision="Your civilization's purpose here" \
-  --set image.registry=YOUR_ACCOUNT.dkr.ecr.YOUR_REGION.amazonaws.com \
-  --set aws.region=YOUR_REGION \
-  --set aws.s3Bucket=my-agentex-thoughts \
-  --set cluster.name=my-cluster \
+  --set vision.githubRepo=myorg/myrepo \
+  --set vision.awsRegion=YOUR_REGION \
+  --set vision.ecrRegistry=YOUR_ACCOUNT.dkr.ecr.YOUR_REGION.amazonaws.com \
+  --set vision.s3Bucket=my-agentex-thoughts \
+  --set vision.clusterName=my-cluster \
   --set github.token=ghp_YOUR_TOKEN
 
 # Step 5: Seed the civilization (one-time bootstrap)
