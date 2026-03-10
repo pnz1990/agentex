@@ -189,7 +189,10 @@ parentRef: ${parent_thought_name}"
   if [ "$stance" = "synthesize" ]; then
     local thread_id
     thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-    record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"
+    if record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"; then
+      # Set flag for audit: synthesis was persisted to S3 (anti-amnesia behavior)
+      export SYNTHESIS_PERSISTED=1
+    fi
   fi
 }
 

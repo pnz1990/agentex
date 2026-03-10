@@ -609,7 +609,10 @@ parentRef: ${parent_thought_name}"
   # If this is a synthesis response, automatically record the debate outcome
   if [ "$stance" = "synthesize" ]; then
     local thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-    record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"
+    if record_debate_outcome "$thread_id" "synthesized" "$reasoning" "$parent_topic"; then
+      # Set flag for audit: synthesis was persisted to S3 (anti-amnesia behavior)
+      export SYNTHESIS_PERSISTED=1
+    fi
     # Track synthesis contribution in identity specialization (issue #1112)
     if type update_debate_specialization &>/dev/null; then
       update_debate_specialization "synthesize" 2>/dev/null || true
@@ -1052,6 +1055,9 @@ plan_for_n_plus_2() {
   
   # Post thought for immediate peer visibility
   post_planning_thought "$my_work" "$n1_priority" "$n2_priority"
+  
+  # Set flag so audit can detect N+2 coordination usage (issue #1283)
+  export N2_PRIORITY_SET=1
   
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
@@ -3760,45 +3766,87 @@ ESTIMATED_COST_USD=0.30  # Conservative estimate per agent run
 push_metric "BedrockCostEstimate" "$ESTIMATED_COST_USD" "None"  # Unit=None for currency
 log "Cost estimate: \$$ESTIMATED_COST_USD USD (model: $BEDROCK_MODEL)"
 
-# ── 11.2. SELF-IMPROVEMENT AUDIT (issue #22) ─────────────────────────────────
+# ── 11.2. SELF-IMPROVEMENT AUDIT (issue #22, updated by #1283) ───────────────
 # Audit whether the agent fulfilled Prime Directive step ②: find and fix a platform improvement.
 # This creates observability and accountability for self-improvement work.
+# Vision-aligned metrics (enacted governance: self-improvement-audit-metrics):
+#   - debate_participation: did the agent post debate/synthesis responses?
+#   - synthesis_persistence: did synthesis get written to S3 (anti-amnesia)?
+#   - vision_issues: did the agent file vision-aligned issues (enhancement/self-improvement)?
+#   - n2_coordination: did the agent call plan_for_n_plus_2() with meaningful content?
 log "Auditing self-improvement work..."
 
 # Convert AGENT_START_TIME (Unix timestamp) to ISO 8601 for GitHub API
 AGENT_START_ISO=$(date -u -d "@$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
 
-# Check if agent created any GitHub issues during this run
+# Check if agent posted any debate responses (thoughtType=debate) during this run
+DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null | \
+  jq --arg agent "$AGENT_NAME" --arg start "$AGENT_START_ISO" \
+  '[.items[] | select(.data.agentRef == $agent and .data.thoughtType == "debate" and .metadata.creationTimestamp >= $start)] | length' 2>/dev/null || echo "0")
+
+# Check if agent posted a synthesis response persisted to S3 (anti-amnesia behavior)
+# SYNTHESIS_PERSISTED is set by post_debate_response() when record_debate_outcome() succeeds
+SYNTHESIS_PERSISTED_FLAG=$([ -n "${SYNTHESIS_PERSISTED:-}" ] && echo 1 || echo 0)
+
+# Check if agent filed vision-aligned issues (enhancement or self-improvement labels)
+VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels \
+  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start) | select(.labels | map(.name) | any(. == "enhancement" or . == "self-improvement"))] | length' 2>/dev/null || echo "0")
+
+# Check if agent also created any issues at all (for legacy tracking)
 ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Check if agent opened any PRs during this run
+# Check if agent opened any PRs during this run (for legacy tracking)
 PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Compute self-improvement score
-SI_SCORE=0
-SI_DETAILS=""
+# Check if agent called plan_for_n_plus_2() — flag set in that function (issue #1283)
+N2_COORDINATION=$([ -n "${N2_PRIORITY_SET:-}" ] && echo 1 || echo 0)
 
-if [ "$ISSUES_CREATED" -gt 0 ] && [ "$PRS_OPENED" -gt 0 ]; then
-  SI_SCORE=10
-  SI_DETAILS="Full compliance: created $ISSUES_CREATED issue(s) and opened $PRS_OPENED PR(s)"
-elif [ "$ISSUES_CREATED" -gt 0 ]; then
-  SI_SCORE=7
-  SI_DETAILS="Partial compliance: created $ISSUES_CREATED issue(s) but no PR"
-elif [ "$PRS_OPENED" -gt 0 ]; then
-  SI_SCORE=5
-  SI_DETAILS="Partial compliance: opened $PRS_OPENED PR(s) but no new issue"
+# Compute vision-aligned self-improvement score (issue #1283)
+# Replaces volume-based scoring (issues + PRs) with quality-based metrics:
+#   +3 for debate participation (encouraged deliberative society)
+#   +3 for synthesis persisted to S3 (anti-amnesia, prevents civilization debate loss)
+#   +3 for vision-aligned issue filing (prevents trivial-issue gaming)
+#   +1 for N+2 planning coordination (multi-generation awareness)
+# Maximum: 10 points
+SI_SCORE=0
+SI_DETAILS_PARTS=()
+
+if [ "$DEBATE_RESPONSES" -gt 0 ]; then
+  SI_SCORE=$((SI_SCORE + 3))
+  SI_DETAILS_PARTS+=("debate=$DEBATE_RESPONSES")
+fi
+if [ "$SYNTHESIS_PERSISTED_FLAG" -eq 1 ]; then
+  SI_SCORE=$((SI_SCORE + 3))
+  SI_DETAILS_PARTS+=("synthesis-persisted=yes")
+fi
+if [ "$VISION_ISSUES" -gt 0 ]; then
+  SI_SCORE=$((SI_SCORE + 3))
+  SI_DETAILS_PARTS+=("vision-issues=$VISION_ISSUES")
+fi
+if [ "$N2_COORDINATION" -eq 1 ]; then
+  SI_SCORE=$((SI_SCORE + 1))
+  SI_DETAILS_PARTS+=("n2-coordination=yes")
+fi
+
+# Build details string
+if [ "${#SI_DETAILS_PARTS[@]}" -gt 0 ]; then
+  SI_DETAILS="Vision-aligned compliance: $(IFS=', '; echo "${SI_DETAILS_PARTS[*]}")"
 else
-  SI_SCORE=2
-  SI_DETAILS="Low compliance: no issues or PRs created (may have worked on assigned issue)"
+  SI_DETAILS="No vision-aligned contributions detected (debate=0, synthesis=0, vision-issues=0, n2=0). Issues=$ISSUES_CREATED, PRs=$PRS_OPENED (volume metrics no longer drive score)."
 fi
 
 # Post audit result as a thought for peer visibility
 post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
 
-# Push metrics to CloudWatch
+# Push metrics to CloudWatch (vision-aligned metrics + legacy volume metrics)
 push_metric "SelfImprovementScore" "$SI_SCORE" "None"
+push_metric "DebateResponsesByAgent" "$DEBATE_RESPONSES" "Count"
+push_metric "SynthesisPersistedByAgent" "$SYNTHESIS_PERSISTED_FLAG" "Count"
+push_metric "VisionIssuesByAgent" "$VISION_ISSUES" "Count"
+push_metric "N2CoordinationUsed" "$N2_COORDINATION" "Count"
+# Legacy volume metrics still tracked for trend analysis (but no longer drive score)
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
@@ -3810,7 +3858,7 @@ if [ "$PRS_OPENED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_id
   update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
 fi
 
-log "Self-improvement audit complete: score=$SI_SCORE/10"
+log "Self-improvement audit complete: score=$SI_SCORE/10 (debate=$DEBATE_RESPONSES synthesis-persisted=$SYNTHESIS_PERSISTED_FLAG vision-issues=$VISION_ISSUES n2=$N2_COORDINATION)"
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
 # The agent who opened a PR has the most context to fix a CI failure.
