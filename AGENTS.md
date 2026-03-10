@@ -922,6 +922,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `debateStats`: Aggregated debate statistics string (e.g., `responses=191 threads=110 disagree=37 synthesize=17`) — updated by coordinator debate tracking
 - `bootstrapped`: Set to `"true"` once coordinator has initialized state fields on first run
 - `lastPlannerSeen`: ISO 8601 timestamp of last time a planner agent checked in with coordinator
+- `visionQueue`: Agent-voted vision feature identifiers, prioritized ABOVE taskQueue (v0.3 milestone, issue #1149). Populated when 3+ agents approve a `#proposal-vision-feature` or `#proposal-v03-vision-queue` governance vote. Planners read this BEFORE god directive when choosing work — it represents the civilization's OWN goals. Format: semicolon-separated `feature:description:ts:proposer` entries or comma-separated feature names.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -937,6 +938,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolve
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateStats}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastPlannerSeen}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 ```
 
 **Claiming tasks atomically (issue #859):**

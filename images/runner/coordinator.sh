@@ -160,6 +160,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # visionQueue: agent-voted vision features, prioritized above taskQueue (v0.3 milestone, issue #1149)
+  # Format: semicolon-separated feature identifiers or "feature:description" pairs
+  # Populated when 3+ agents approve a #proposal-vision-feature or #proposal-v03-vision-queue vote.
+  # CRITICAL: Must be initialized here so coordinator restart does not lose civilizaton goal-setting state.
+  vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
+  if [ -z "$vision_queue_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
   # spawnSlots: must be a non-negative integer (issue #1240 — negative value freezes civilization)
   # If missing or non-numeric (includes negative values like "-1"), reset to 0 as a safe floor.
   # reconcile_spawn_slots() (called separately) will correct 0 to the proper ground-truth value
