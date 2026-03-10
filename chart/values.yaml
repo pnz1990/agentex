@@ -132,3 +132,17 @@ seed:
   enabled: true
   # Maximum time seed job may run (seconds)
   activeDeadlineSeconds: 3600
+
+# ---------------------------------------------------------------------------
+# cleanup: — periodic pod cleanup CronJob
+# Deletes completed/failed pods older than podAgeSeconds to keep the cluster
+# tidy and prevent etcd bloat. Enabled by default.
+# Disable with: --set cleanup.enabled=false
+# ---------------------------------------------------------------------------
+cleanup:
+  # Enable the cleanup CronJob (recommended: keep enabled)
+  enabled: true
+  # Cron schedule — default: 23 minutes past every hour (avoids :00 spike)
+  schedule: "23 * * * *"
+  # Delete completed/failed pods older than this many seconds (default: 7200 = 2 hours)
+  podAgeSeconds: 7200
