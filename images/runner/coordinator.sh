@@ -3163,7 +3163,8 @@ Closes #1732"
 #   3. emergentGoalCount >= 1    — agent-proposed goals pursued by a swarm
 #   4. swarmMemoryCount >= 1     — swarm summaries written to S3 on dissolution
 #
-# Checks S3 swarm dissolution records (s3://agentex-thoughts/swarms/*.json)
+# Checks S3 swarm dissolution records (s3://agentex-thoughts/swarm-memories/*.json)
+# (issue #1799: fixed from "swarms/" to "swarm-memories/" to match write_swarm_memory() path)
 # and activeSwarms field for live swarm data.
 #
 # State: coordinator-state.v06MilestoneStatus — set to "completed" on success
@@ -3185,10 +3186,11 @@ check_v06_milestone() {
     local criteria_report=""
 
     # ── Read S3 swarm dissolution records ────────────────────────────────────
-    # Swarm summaries are written to s3://agentex-thoughts/swarms/*.json
-    # by the swarm memory persistence feature (issue #1773).
+    # Issue #1799: Use "swarm-memories/" path — consistent with write_swarm_memory() in
+    # helpers.sh which writes to s3://agentex-thoughts/swarm-memories/<name>.json.
+    # The original path "swarms/" would never match any records (path mismatch bug).
     local swarm_files
-    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarms/" \
+    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
         awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
 
@@ -3199,14 +3201,18 @@ check_v06_milestone() {
 
     for sfile in $swarm_files; do
         local sjson
-        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarms/${sfile}" - \
+        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$sjson" ] && continue
 
         swarm_memory_count=$((swarm_memory_count + 1))
         swarm_formation_count=$((swarm_formation_count + 1))
 
-        # Check coalition size (number of member agents)
+        # Issue #1799: Check coalition size using memberCount, memberAgents, AND members
+        # write_swarm_memory() may use different field names depending on implementation.
+        # - "memberCount": integer count (preferred)
+        # - "memberAgents": array of agent names (PR #1794 style)
+        # - "members": array of agent names (PR #1779 style)
         local members
         members=$(echo "$sjson" | jq -r '.memberCount // 0 | tonumber' 2>/dev/null || echo "0")
         [[ "$members" =~ ^[0-9]+$ ]] || members=0
@@ -3220,6 +3226,14 @@ check_v06_milestone() {
         [[ "$member_array_len" =~ ^[0-9]+$ ]] || member_array_len=0
         if [ "$member_array_len" -gt "$max_coalition_size" ]; then
             max_coalition_size=$member_array_len
+        fi
+
+        # Issue #1799: Also check .members array length (PR #1779 uses "members" not "memberAgents")
+        local members_arr_len
+        members_arr_len=$(echo "$sjson" | jq -r '(.members // []) | length' 2>/dev/null || echo "0")
+        [[ "$members_arr_len" =~ ^[0-9]+$ ]] || members_arr_len=0
+        if [ "$members_arr_len" -gt "$max_coalition_size" ]; then
+            max_coalition_size=$members_arr_len
         fi
 
         # Check for emergent goals (agent-proposed goal, not god-assigned)

@@ -1568,5 +1568,91 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── write_swarm_memory ────────────────────────────────────────────────────────
+# Issue #1773 v0.6: Swarm Memory Persistence — write swarm summary to S3 on dissolution.
+#
+# When a swarm disbands, this function writes a structured record to S3 so future
+# agents can learn from past swarm experiences, decisions, and accomplishments.
+# This is the foundation of swarm institutional memory.
+#
+# S3 location: s3://<bucket>/swarm-memories/<swarm-name>.json
+#
+# DATA CONTRACT (issue #1799 fix):
+#   - S3 path: s3://${S3_BUCKET}/swarm-memories/${swarm_name}.json
+#   - JSON fields: swarmName, goal, goalOrigin, members (array), memberCount, tasksCompleted,
+#                  keyDecisions, dissolvedAt, recordedBy
+#   - goalOrigin: "coordinator" (auto-spawned) or "agent-proposed" (from visionQueue)
+#   - members: array of agent name strings (use for Criterion 2 coalition size check)
+#   - memberCount: integer count of members (use for Criterion 2 coalition size check)
+#   - check_v06_milestone() reads .members, .memberAgents, and .memberCount for max coalition size
+#
+# Args:
+#   $1 — swarm_name (required)
+#   $2 — goal description (default: "unknown goal")
+#   $3 — members_csv — comma-separated list of agent names (default: "")
+#   $4 — tasks_completed count (default: 0)
+#   $5 — key_decisions summary string (default: "none recorded")
+#   $6 — goal_origin: "coordinator" | "agent-proposed" | "emergent" (default: "coordinator")
+#
+write_swarm_memory() {
+  local swarm_name="${1:-}"
+  local goal="${2:-unknown goal}"
+  local members_csv="${3:-}"
+  local tasks_completed="${4:-0}"
+  local key_decisions="${5:-none recorded}"
+  local goal_origin="${6:-coordinator}"
+
+  if [ -z "$swarm_name" ]; then
+    log "write_swarm_memory: no swarm name provided — skipping"
+    return 0
+  fi
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Build members JSON array from CSV
+  local members_json
+  members_json=$(echo "$members_csv" | tr ',' '\n' | grep -v '^$' | jq -R . 2>/dev/null | jq -s . 2>/dev/null || echo "[]")
+
+  # Count members
+  local member_count
+  member_count=$(echo "$members_csv" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
+  [[ "$member_count" =~ ^[0-9]+$ ]] || member_count=0
+
+  # Escape strings for JSON safety
+  local safe_goal safe_decisions safe_origin
+  safe_goal=$(echo "$goal" | sed 's/"/\\"/g' | tr '\n' ' ')
+  safe_decisions=$(echo "$key_decisions" | sed 's/"/\\"/g' | tr '\n' ' ')
+  safe_origin=$(echo "$goal_origin" | sed 's/"/\\"/g' | tr -d '\n')
+
+  # Issue #1799 DATA CONTRACT: use "members" as primary array field name.
+  # Also include "memberAgents" alias so check_v06_milestone() fallback works
+  # regardless of which field name it checks.
+  local memory_json
+  memory_json=$(printf '{"swarmName":"%s","goal":"%s","goalOrigin":"%s","members":%s,"memberAgents":%s,"memberCount":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"%s"}\n' \
+    "$swarm_name" \
+    "$safe_goal" \
+    "$safe_origin" \
+    "$members_json" \
+    "$members_json" \
+    "$member_count" \
+    "$tasks_completed" \
+    "$safe_decisions" \
+    "$timestamp" \
+    "${AGENT_NAME:-unknown}")
+
+  # Issue #1799: S3 path is "swarm-memories/" — consistent with check_v06_milestone()
+  local s3_path="s3://${s3_bucket}/swarm-memories/${swarm_name}.json"
+
+  if echo "$memory_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
+    log "write_swarm_memory: persisted swarm memory for ${swarm_name} to ${s3_path} (goalOrigin=${goal_origin}, members=${member_count})"
+    return 0
+  else
+    log "WARNING: write_swarm_memory: failed to write to S3 for swarm ${swarm_name} (non-fatal)"
+    return 1
+  fi
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
