@@ -1509,5 +1509,34 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── query_active_swarms ────────────────────────────────────────────────────────
+# Return the current activeSwarms field from coordinator-state (v0.6, issue #1782).
+# Lists coordinator-spawned swarms in "swarmName:issueNumber" pairs (comma-separated).
+#
+# Usage:
+#   source /agent/helpers.sh
+#   query_active_swarms        # prints all active swarms
+#   query_active_swarms 1782   # filter for a specific issue number
+#
+query_active_swarms() {
+  local filter_issue="${1:-}"
+  local ns="${NAMESPACE:-agentex}"
+  local raw
+  raw=$(kubectl get configmap coordinator-state -n "$ns" \
+    -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo "")
+
+  if [ -z "$raw" ]; then
+    echo "(no active coordinator-spawned swarms)"
+    return 0
+  fi
+
+  if [ -n "$filter_issue" ]; then
+    # Show only entries matching the given issue number
+    echo "$raw" | tr ',' '\n' | grep ":${filter_issue}$" || echo "(no swarm for issue #${filter_issue})"
+  else
+    echo "$raw" | tr ',' '\n'
+  fi
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, query_active_swarms available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

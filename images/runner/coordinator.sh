@@ -392,6 +392,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v05CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # activeSwarms (issue #1782, v0.6): comma-separated "swarmName:issueNumber" pairs for
+  # coordinator-spawned swarms. Written by spawn_swarm_for_issue() when an issue labeled
+  # "swarm-eligible" or "multi-domain" is detected in the task queue. Read by
+  # civilization_status() (helpers.sh) to show swarm health.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("activeSwarms")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing activeSwarms (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -3384,6 +3394,124 @@ extract_issue_keywords() {
         sort -u | head -20 | tr '\n' ' '
 }
 
+# Check if an issue should be handled by a swarm instead of a single worker.
+# Issues labeled "swarm-eligible" or "multi-domain" are automatically dispatched
+# to a Swarm CR (v0.6 feature #2, issue #1782).
+#
+# Arguments:
+#   $1 - issue_number
+#   $2 - issue_labels (comma-separated)
+#   $3 - issue_title (for swarm goal string)
+# Returns: 0 if swarm was spawned (caller should remove issue from queue),
+#          1 if issue is not swarm-eligible or swarm spawn failed
+spawn_swarm_for_issue() {
+    local issue_number="$1"
+    local issue_labels="$2"
+    local issue_title="${3:-GitHub issue #${issue_number}}"
+
+    # Only dispatch to swarm if labeled swarm-eligible or multi-domain
+    if ! echo "$issue_labels" | grep -qiE "swarm-eligible|multi-domain"; then
+        return 1
+    fi
+
+    # Check if already tracked in activeSwarms (idempotent — don't spawn twice)
+    local current_swarms
+    current_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if echo "$current_swarms" | grep -q ":${issue_number}$" || \
+       echo "$current_swarms" | grep -q ":${issue_number},"; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: issue #${issue_number} already has an active swarm — skipping"
+        return 0
+    fi
+
+    local swarm_name="swarm-issue-${issue_number}-$(date +%s)"
+    local swarm_goal="Collectively resolve GitHub issue #${issue_number}: ${issue_title}"
+
+    echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: issue #${issue_number} is swarm-eligible — spawning Swarm CR ${swarm_name}"
+
+    # Create a Task CR for the swarm planner to read
+    local planner_task_name="task-${swarm_name}-planner"
+    kubectl_with_timeout 15 apply -f - <<TASKCR > /dev/null 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${planner_task_name}
+  namespace: ${NAMESPACE}
+spec:
+  title: "Swarm goal: ${swarm_goal}"
+  description: "You are the swarm planner for issue #${issue_number}. Analyze the goal, break it into sub-tasks, spawn worker agents, and coordinate their work. Goal: ${swarm_goal}"
+  effort: "M"
+  issueRef: "${issue_number}"
+  phase: "Pending"
+TASKCR
+
+    local task_rc=$?
+    if [ "$task_rc" -ne 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: WARNING — Task CR creation failed for ${planner_task_name} (rc=$task_rc)"
+        return 1
+    fi
+
+    # Verify Task CR was created before spawning Swarm
+    sleep 2
+    if ! kubectl_with_timeout 10 get configmap "${planner_task_name}-spec" -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: WARNING — Task CR ${planner_task_name} not found after creation — aborting swarm spawn"
+        return 1
+    fi
+
+    # Read runtime values from constitution for portability (issue #819)
+    local ecr_registry
+    ecr_registry=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
+    local cluster_name
+    cluster_name=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "agentex")
+    local github_repo
+    github_repo=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.githubRepo}' 2>/dev/null || echo "${GITHUB_REPO:-pnz1990/agentex}")
+
+    # Spawn the Swarm CR — kro will create the state ConfigMap and planner Job
+    kubectl_with_timeout 15 apply -f - <<SWARMCR > /dev/null 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/swarm-issue: "${issue_number}"
+    agentex/coordinator-spawned: "true"
+spec:
+  goal: "${swarm_goal}"
+  plannerTaskRef: "${planner_task_name}"
+  maxAgents: 4
+  planners: 1
+  workers: 2
+  reviewers: 1
+  consensusThreshold: 51
+  githubRepo: "${github_repo}"
+  model: "${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
+  imageRegistry: "${ecr_registry}"
+  clusterName: "${cluster_name}"
+SWARMCR
+
+    local swarm_rc=$?
+    if [ "$swarm_rc" -ne 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: WARNING — Swarm CR creation failed for ${swarm_name} (rc=$swarm_rc)"
+        return 1
+    fi
+
+    # Track in coordinator-state.activeSwarms
+    local updated_swarms
+    if [ -z "$current_swarms" ]; then
+        updated_swarms="${swarm_name}:${issue_number}"
+    else
+        updated_swarms="${current_swarms},${swarm_name}:${issue_number}"
+    fi
+    update_state "activeSwarms" "$updated_swarms"
+
+    push_metric "SwarmSpawnedByCoordinator" 1 "Count" "IssueNumber=${issue_number}"
+    echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: SUCCESS — Swarm ${swarm_name} spawned for issue #${issue_number} (goal: ${swarm_goal})"
+    return 0
+}
+
 # Find the best specialized agent for a given issue from among active agents
 # Arguments:
 #   $1 - issue_number
@@ -3533,6 +3661,28 @@ route_tasks_by_specialization() {
         if [ -z "$issue_labels" ]; then
             issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
                 --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        fi
+
+        # Issue #1782 (v0.6): Check if issue is swarm-eligible before single-worker routing.
+        # Issues labeled "swarm-eligible" or "multi-domain" are dispatched to a Swarm CR
+        # instead of a single worker — enabling coordinator-driven swarm spawning.
+        if echo "$issue_labels" | grep -qiE "swarm-eligible|multi-domain"; then
+            local issue_title_for_swarm=""
+            issue_title_for_swarm=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+                --json title --jq '.title' 2>/dev/null || echo "GitHub issue #${issue_num}")
+            if spawn_swarm_for_issue "$issue_num" "$issue_labels" "$issue_title_for_swarm"; then
+                echo "[$(date -u +%H:%M:%S)] Issue #${issue_num} dispatched to swarm — removing from task queue"
+                # Remove from taskQueue so it isn't double-assigned to a single worker
+                local current_queue_for_removal
+                current_queue_for_removal=$(get_state "taskQueue" 2>/dev/null || echo "")
+                local updated_queue_for_removal
+                updated_queue_for_removal=$(echo "$current_queue_for_removal" | \
+                    tr ',' '\n' | grep -v "^[[:space:]]*${issue_num}[[:space:]]*$" | \
+                    tr '\n' ',' | sed 's/^,//;s/,$//')
+                update_state "taskQueue" "$updated_queue_for_removal"
+                specialized_count=$((specialized_count + 1))
+                continue
+            fi
         fi
 
         # Find best specialized agent
