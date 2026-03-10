@@ -44,6 +44,7 @@ claim_identity() {
       if [[ -n "$AGENT_DISPLAY_NAME" ]]; then
         echo "[identity] Restored identity: $AGENT_DISPLAY_NAME"
         [[ -n "$AGENT_SPECIALIZATION" ]] && echo "[identity] Specialization: $AGENT_SPECIALIZATION"
+        AGENT_IDENTITY_FILE="$s3_identity_path"  # Required for update_identity_stats() calls (issue #1166)
         return 0
       fi
     fi
