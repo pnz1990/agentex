@@ -171,7 +171,7 @@ ensure_state_fields_initialized() {
       -p '{"data":{"spawnSlots":"0"}}' 2>/dev/null || true
   fi
 
-  # visionQueue (issue #1219): comma-separated issue numbers voted in by collective governance.
+  # visionQueue (issue #1219/#1149): comma-separated issue numbers voted in by collective governance.
   # Planners read this BEFORE taskQueue, enabling agent-voted goals to override the standard backlog.
   # visionQueueLog: audit log for all visionQueue additions (semicolon-separated entries).
   for field in visionQueue visionQueueLog; do
@@ -381,12 +381,30 @@ refresh_task_queue() {
         # duplicate work. Deduplication improves coordinator efficiency and reduces queue bloat.
         sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
 
+        # Issue #1149: Prepend visionQueue items BEFORE taskQueue so agent-voted issues get priority
+        # visionQueue contains issues that 3+ agents voted to prioritize via governance
+        # Format: "issueNumber:voteCount" pairs; extract just the issue numbers
+        local vision_queue
+        vision_queue=$(get_state "visionQueue")
+        if [ -n "$vision_queue" ]; then
+            # Extract issue numbers from "issueNumber:voteCount" pairs
+            local vision_issues
+            vision_issues=$(echo "$vision_queue" | tr ',' '\n' | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+            if [ -n "$vision_issues" ]; then
+                # Prepend vision issues, then deduplicate (vision issues appear first)
+                sorted_issues="${vision_issues},${sorted_issues}"
+                # Deduplicate while preserving first occurrence (vision items stay at front)
+                sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
+                echo "[$(date -u +%H:%M:%S)] VISION QUEUE: Prepended vision-voted issues: $vision_issues"
+            fi
+        fi
+
         # Issue #977: Replace queue with fresh open issues from GitHub.
         # Old merge strategy (sorted_issues + current_queue) caused closed issues
         # to persist in the queue indefinitely. Since the queue is driven entirely
         # by GitHub open issues, we simply replace with the latest sorted list.
         update_state "taskQueue" "$sorted_issues"
-        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted, deduplicated): $sorted_issues"
+        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted, vision-prepended, deduplicated): $sorted_issues"
     fi
 }
 
@@ -981,6 +999,34 @@ NUDGE_EOF
                 done <<< "$kv_pairs"
                 patch_data="${patch_data}}"
 
+                # Issue #1149: vision-feature topic adds voted issue to visionQueue
+                # Agents propose: #proposal-vision-feature issueNumber=1149
+                # When 3+ approve, coordinator adds it to visionQueue with vote count
+                # Format: "issueNumber:voteCount" pairs, coordinator reads this BEFORE taskQueue
+                if [ "$topic" = "vision-feature" ]; then
+                    local vision_issue
+                    vision_issue=$(echo "$kv_pairs" | grep -oE 'issueNumber=[0-9]+' | cut -d= -f2 || echo "")
+                    if [ -n "$vision_issue" ]; then
+                        local current_vq
+                        current_vq=$(get_state "visionQueue")
+                        local new_entry="${vision_issue}:${approve_votes}"
+                        # Only add if not already in visionQueue
+                        if ! echo "$current_vq" | grep -q "^${vision_issue}:" && \
+                           ! echo "$current_vq" | grep -q ",${vision_issue}:"; then
+                            if [ -z "$current_vq" ]; then
+                                update_state "visionQueue" "$new_entry"
+                            else
+                                update_state "visionQueue" "${current_vq},${new_entry}"
+                            fi
+                            echo "[$(date -u +%H:%M:%S)] ✓ VISION QUEUE: Added issue #$vision_issue (${approve_votes} votes) to visionQueue"
+                            patched=true
+                        else
+                            echo "[$(date -u +%H:%M:%S)] VISION QUEUE: Issue #$vision_issue already in visionQueue, skipping"
+                            patched=true
+                        fi
+                    fi
+                fi
+
                 if [ "$patched" = true ]; then
                     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
                     kubectl_with_timeout 10 patch configmap agentex-constitution -n "$NAMESPACE" \
@@ -1024,7 +1070,7 @@ NUDGE_EOF
                     continue
                 fi
 
-                # Extract addIssue value from kv_pairs
+                # Extract addIssue value from kv_pairs (issue number format)
                 local add_issue
                 add_issue=$(echo "$kv_pairs" | tr ' ' '\n' | grep "^addIssue=" | cut -d= -f2 | head -1 || echo "")
                 if [ -n "$add_issue" ] && [[ "$add_issue" =~ ^[0-9]+$ ]]; then
@@ -1051,6 +1097,76 @@ NUDGE_EOF
                             || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to update visionQueue for vision-feature $topic"
                         patched=true
                     fi
+                else
+                    # Named feature format (issue #1149): feature=<name> description=<desc>
+                    local feature_name feature_desc vision_entry
+                    feature_name=$(echo "$kv_pairs" | grep -oE 'feature=[^ ]+' | cut -d'=' -f2-)
+                    feature_desc=$(echo "$kv_pairs" | grep -oE 'description=[^ ]+' | cut -d'=' -f2-)
+                    [ -z "$feature_name" ] && feature_name="unnamed-feature-$(date +%s)"
+                    [ -z "$feature_desc" ] && feature_desc=""
+                    vision_entry="${feature_name}:${feature_desc}"
+                    local current_vision_queue
+                    current_vision_queue=$(get_state "visionQueue")
+                    if [ -z "$current_vision_queue" ]; then
+                        update_state "visionQueue" "$vision_entry"
+                    else
+                        if ! echo "$current_vision_queue" | grep -qF "${feature_name}:"; then
+                            update_state "visionQueue" "${current_vision_queue}|${vision_entry}"
+                        fi
+                    fi
+                    patched=true
+                    echo "[$(date -u +%H:%M:%S)] ✓ visionQueue updated with agent-proposed feature: $feature_name"
+                    push_metric "VisionQueueUpdated" 1 "Count" "Feature=${feature_name}"
+                fi
+            fi
+
+            # ── VISION-QUEUE GOVERNANCE (issue #1149) ──────────────────────────────
+            # When agents reach consensus on a #proposal-vision-queue, add the
+            # proposed feature to coordinator-state.visionQueue so planners will
+            # prioritize it — enabling the civilization to SET ITS OWN GOALS.
+            if [ "$topic" = "vision-queue" ]; then
+                local vq_feature=""
+                local vq_description=""
+                while IFS= read -r kv; do
+                    [ -z "$kv" ] && continue
+                    local k="${kv%%=*}"
+                    local v="${kv##*=}"
+                    case "$k" in
+                        feature) vq_feature="$v" ;;
+                        description) vq_description="$v" ;;
+                    esac
+                done <<< "$kv_pairs"
+
+                if [ -n "$vq_feature" ]; then
+                    local ts_vq
+                    ts_vq=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    local vq_entry="${vq_feature}:${vq_description:-no-description}:${ts_vq}:${proposer_agent}"
+
+                    local current_vq
+                    current_vq=$(get_state "visionQueue")
+                    local new_vq
+                    if [ -z "$current_vq" ]; then
+                        new_vq="$vq_entry"
+                    else
+                        new_vq="${current_vq};${vq_entry}"
+                    fi
+                    update_state "visionQueue" "$new_vq"
+
+                    # Audit log
+                    local vq_log_entry="${ts_vq} ADDED feature=${vq_feature} votes=${approve_votes} proposer=${proposer_agent}"
+                    local current_vq_log
+                    current_vq_log=$(get_state "visionQueueLog")
+                    if [ -z "$current_vq_log" ]; then
+                        update_state "visionQueueLog" "$vq_log_entry"
+                    else
+                        update_state "visionQueueLog" "${current_vq_log} | ${vq_log_entry}"
+                    fi
+
+                    push_metric "VisionQueueAdded" 1 "Count" "Feature=${vq_feature}"
+                    echo "[$(date -u +%H:%M:%S)] VISION-QUEUE: Added feature '${vq_feature}' to vision queue (${approve_votes} votes, proposer=${proposer_agent})"
+                    patched=true
+                else
+                    echo "[$(date -u +%H:%M:%S)] VISION-QUEUE: Proposal missing 'feature=' key — cannot add to vision queue"
                 fi
             fi
 
