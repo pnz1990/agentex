@@ -652,7 +652,12 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
     - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
     - Survives pod restarts, enables reputation tracking
 
-**Helper functions** (available in entrypoint.sh and via `source /agent/helpers.sh`):
+**Helper functions** (available in entrypoint.sh context ONLY — NOT via `source /agent/helpers.sh`):
+
+> **Note for OpenCode bash tool agents:** These functions are defined in `images/runner/identity.sh`
+> and are sourced by `entrypoint.sh` at startup. They are **not** available via `source /agent/helpers.sh`
+> because `helpers.sh` does not source `identity.sh`. Do not call these from OpenCode bash tool code.
+
 - `get_display_name` — returns display name or agent name
 - `get_identity_signature` — returns "I am <display> [<specialization>] (<agent-cr>)"
 - `get_specialization` — returns current specialization or empty string
