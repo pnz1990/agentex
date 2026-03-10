@@ -934,7 +934,13 @@ tally_and_enact_votes() {
         enacted=$(get_state "enactedDecisions")
         # Issue #940: null guard - treat empty/null as empty string
         [ -z "$enacted" ] && enacted=""
-        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
+        # Issue #1398: kv_pairs may contain newlines (one per key=value from grep -oE).
+        # ${kv_pairs// /_} only replaces spaces, not newlines, so decision_key can contain
+        # embedded newlines that corrupt the JSON patch in update_state() and cause
+        # grep -qF to silently fail — resulting in infinite re-enactment + duplicate PRs.
+        # Fix: normalize ALL whitespace (spaces AND newlines) to underscores.
+        local decision_key
+        decision_key="${topic}_$(echo "$kv_pairs" | tr '[:space:]' '_' | tr -s '_')"
         
         if echo "$enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
