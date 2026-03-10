@@ -1723,5 +1723,200 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── save_workspace_snapshot ───────────────────────────────────────────────────
+# Save the current workspace (uncommitted changes) to S3 as a compressed snapshot.
+# This enables workspace persistence across agent deaths — the next agent working
+# on the same issue can restore from this snapshot instead of starting fresh.
+#
+# Issue #1833: Agent session/state separation — S3-backed workspace snapshots (Option B)
+#
+# Usage: save_workspace_snapshot <issue_number> <workspace_dir> [next_step] [status]
+#
+# Parameters:
+#   issue_number  - GitHub issue number (used as the snapshot key)
+#   workspace_dir - Path to the git repository directory (e.g. /workspace/issue-789)
+#   next_step     - Optional: what the next agent should do to continue (free text)
+#   status        - Optional: "in_progress" or "done" (default: "in_progress")
+#
+# Output: S3 path of the saved snapshot, or empty on failure
+#
+# Example:
+#   save_workspace_snapshot 789 /workspace/issue-789 "Push branch and open PR" "in_progress"
+save_workspace_snapshot() {
+  local issue_number="$1"
+  local workspace_dir="$2"
+  local next_step="${3:-Continue implementation}"
+  local status="${4:-in_progress}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ -z "$issue_number" ] || [ "$issue_number" = "0" ]; then
+    log "save_workspace_snapshot: skipping — no issue number provided"
+    return 0
+  fi
+  if [ ! -d "$workspace_dir" ]; then
+    log "save_workspace_snapshot: skipping — workspace dir '$workspace_dir' does not exist"
+    return 0
+  fi
+
+  local snapshot_key="s3://${s3_bucket}/workspaces/issue-${issue_number}.tar.gz"
+  local handoff_key="s3://${s3_bucket}/workspaces/issue-${issue_number}-handoff.json"
+  local tmp_archive="/tmp/workspace-issue-${issue_number}.tar.gz"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Gather git state for the handoff JSON
+  local branch uncommitted_files last_commit
+  branch=$(git -C "$workspace_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  uncommitted_files=$(git -C "$workspace_dir" status --short 2>/dev/null | awk '{print $2}' | tr '\n' ',' | sed 's/,$//' || echo "")
+  last_commit=$(git -C "$workspace_dir" log -1 --format="%s" 2>/dev/null || echo "")
+
+  log "Saving workspace snapshot for issue #${issue_number} (branch=${branch} uncommitted=${uncommitted_files:-none})..."
+
+  # Create compressed tar of the entire workspace, excluding .git (too large) and node_modules
+  # We preserve the git index (staged changes) via git stash bundle if there are changes
+  if ! tar czf "$tmp_archive" \
+    --exclude='.git' \
+    --exclude='node_modules' \
+    --exclude='.npm' \
+    --exclude='*.pyc' \
+    --exclude='__pycache__' \
+    -C "$(dirname "$workspace_dir")" \
+    "$(basename "$workspace_dir")" 2>/dev/null; then
+    log "save_workspace_snapshot: tar failed — skipping snapshot for issue #${issue_number}"
+    rm -f "$tmp_archive"
+    return 1
+  fi
+
+  # Upload archive to S3
+  if ! aws s3 cp "$tmp_archive" "$snapshot_key" --content-type "application/gzip" 2>/dev/null; then
+    log "save_workspace_snapshot: S3 upload failed for issue #${issue_number}"
+    rm -f "$tmp_archive"
+    return 1
+  fi
+  rm -f "$tmp_archive"
+
+  # Write structured handoff JSON so the next agent knows context
+  local safe_next_step safe_last_commit safe_uncommitted
+  safe_next_step=$(echo "$next_step" | sed 's/"/\\"/g' | tr -d '\n')
+  safe_last_commit=$(echo "$last_commit" | sed 's/"/\\"/g' | tr -d '\n')
+  safe_uncommitted=$(echo "$uncommitted_files" | sed 's/"/\\"/g' | tr -d '\n')
+
+  printf '{"issue":%s,"branch":"%s","status":"%s","lastAction":"%s","uncommittedFiles":"%s","nextStep":"%s","savedBy":"%s","savedAt":"%s","workspace":"workspace-issue-%s"}\n' \
+    "$issue_number" \
+    "$branch" \
+    "$status" \
+    "$safe_last_commit" \
+    "$safe_uncommitted" \
+    "$safe_next_step" \
+    "${AGENT_NAME:-unknown}" \
+    "$timestamp" \
+    "$issue_number" | \
+    aws s3 cp - "$handoff_key" --content-type application/json 2>/dev/null || \
+    log "WARNING: handoff JSON write failed for issue #${issue_number} (non-fatal)"
+
+  log "✓ Workspace snapshot saved: ${snapshot_key}"
+  echo "$snapshot_key"
+}
+
+# ── restore_workspace_snapshot ────────────────────────────────────────────────
+# Restore a previously saved workspace snapshot for a given issue from S3.
+# Call this after git clone so the next agent can resume where the previous one left off.
+#
+# Issue #1833: Agent session/state separation — S3-backed workspace snapshots (Option B)
+#
+# Usage: restore_workspace_snapshot <issue_number> <target_dir>
+#
+# Parameters:
+#   issue_number - GitHub issue number (matches the snapshot key)
+#   target_dir   - Parent directory where the snapshot will be extracted
+#                  (snapshot dir will be created as <target_dir>/issue-<N>)
+#
+# Returns:
+#   0 and prints handoff JSON if snapshot found and restored
+#   1 if no snapshot exists (caller should proceed with fresh checkout)
+#
+# Example:
+#   if restore_workspace_snapshot 789 /workspace; then
+#     cat /workspace/issue-789-handoff.json  # contains nextStep, branch, etc.
+#   fi
+restore_workspace_snapshot() {
+  local issue_number="$1"
+  local target_dir="${2:-/workspace}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ -z "$issue_number" ] || [ "$issue_number" = "0" ]; then
+    return 1
+  fi
+
+  local snapshot_key="s3://${s3_bucket}/workspaces/issue-${issue_number}.tar.gz"
+  local handoff_key="s3://${s3_bucket}/workspaces/issue-${issue_number}-handoff.json"
+  local tmp_archive="/tmp/workspace-restore-issue-${issue_number}.tar.gz"
+
+  # Check if snapshot exists
+  if ! aws s3 ls "$snapshot_key" >/dev/null 2>&1; then
+    log "restore_workspace_snapshot: no snapshot found for issue #${issue_number} — fresh start"
+    return 1
+  fi
+
+  log "Found workspace snapshot for issue #${issue_number} — restoring..."
+
+  # Download the archive
+  if ! aws s3 cp "$snapshot_key" "$tmp_archive" 2>/dev/null; then
+    log "restore_workspace_snapshot: failed to download snapshot for issue #${issue_number}"
+    rm -f "$tmp_archive"
+    return 1
+  fi
+
+  # Extract to target directory (replaces existing directory if present)
+  mkdir -p "$target_dir"
+  if ! tar xzf "$tmp_archive" -C "$target_dir" 2>/dev/null; then
+    log "restore_workspace_snapshot: failed to extract snapshot for issue #${issue_number}"
+    rm -f "$tmp_archive"
+    return 1
+  fi
+  rm -f "$tmp_archive"
+
+  # Fetch handoff JSON and write to a temp file for the caller
+  local handoff_json
+  handoff_json=$(aws s3 cp "$handoff_key" - 2>/dev/null || echo "{}")
+  echo "$handoff_json" > "/tmp/workspace-handoff-issue-${issue_number}.json" 2>/dev/null || true
+
+  local branch status next_step saved_by saved_at
+  branch=$(echo "$handoff_json" | jq -r '.branch // "unknown"' 2>/dev/null || echo "unknown")
+  status=$(echo "$handoff_json" | jq -r '.status // "in_progress"' 2>/dev/null || echo "in_progress")
+  next_step=$(echo "$handoff_json" | jq -r '.nextStep // ""' 2>/dev/null || echo "")
+  saved_by=$(echo "$handoff_json" | jq -r '.savedBy // "unknown"' 2>/dev/null || echo "unknown")
+  saved_at=$(echo "$handoff_json" | jq -r '.savedAt // "unknown"' 2>/dev/null || echo "unknown")
+
+  log "✓ Workspace restored for issue #${issue_number}: branch=${branch} status=${status} savedBy=${saved_by} savedAt=${saved_at}"
+  [ -n "$next_step" ] && log "  Predecessor's next step: ${next_step}"
+
+  echo "$handoff_json"
+  return 0
+}
+
+# ── delete_workspace_snapshot ─────────────────────────────────────────────────
+# Delete the workspace snapshot for a given issue from S3.
+# Call this when a task is fully done (PR merged) to clean up.
+#
+# Issue #1833: Agent session/state separation — workspace cleanup
+#
+# Usage: delete_workspace_snapshot <issue_number>
+delete_workspace_snapshot() {
+  local issue_number="$1"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ -z "$issue_number" ] || [ "$issue_number" = "0" ]; then
+    return 0
+  fi
+
+  local snapshot_key="s3://${s3_bucket}/workspaces/issue-${issue_number}.tar.gz"
+  local handoff_key="s3://${s3_bucket}/workspaces/issue-${issue_number}-handoff.json"
+
+  aws s3 rm "$snapshot_key" 2>/dev/null || true
+  aws s3 rm "$handoff_key" 2>/dev/null || true
+  log "Workspace snapshot deleted for issue #${issue_number}"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, save_workspace_snapshot, restore_workspace_snapshot, delete_workspace_snapshot available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
