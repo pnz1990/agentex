@@ -302,6 +302,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"lastTallyTimestamp":""}}' 2>/dev/null || true
   fi
 
+  # routingCyclesWithZeroSpec (issue #1568): counts consecutive routing cycles where
+  # specializedAssignments remains 0. When this hits the ESCALATION_THRESHOLD (5),
+  # route_tasks_by_specialization() files a GitHub issue and resets the counter.
+  # This creates self-healing diagnostics that escalate routing failures automatically,
+  # preventing the v0.2 regression from persisting 100+ generations undetected.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("routingCyclesWithZeroSpec")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing routingCyclesWithZeroSpec (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -2524,9 +2535,78 @@ Active agents: $agents_checked checked, $agents_with_spec with specialization da
 To unblock: Workers must complete labeled GitHub issues so update_specialization() builds their history.
 v0.2 criterion: coordinator routes at least 1 task based on agent specialization." \
             "insight"
+
+        # ── Escalation: self-healing diagnostic (issue #1568) ────────────────
+        # Track consecutive zero-spec routing cycles. After ESCALATION_THRESHOLD
+        # cycles (35 min), file a GitHub issue to ensure human/god-delegate visibility.
+        # This prevents routing regressions from persisting undetected for 100+ generations.
+        local ESCALATION_THRESHOLD=5
+        local current_zero_cycles
+        current_zero_cycles=$(get_state "routingCyclesWithZeroSpec" 2>/dev/null || echo "0")
+        [[ "$current_zero_cycles" =~ ^[0-9]+$ ]] || current_zero_cycles=0
+        current_zero_cycles=$((current_zero_cycles + 1))
+        update_state "routingCyclesWithZeroSpec" "$current_zero_cycles"
+
+        if [ "$current_zero_cycles" -ge "$ESCALATION_THRESHOLD" ]; then
+            echo "[$(date -u +%H:%M:%S)] ESCALATION: specializedAssignments=0 after ${current_zero_cycles} routing cycles — filing GitHub issue"
+            push_metric "V02RoutingEscalation" 1 "Count" "Component=Coordinator"
+
+            # Search for existing open routing escalation issue before filing
+            local existing_escalation_issue
+            existing_escalation_issue=$(gh issue list --repo "${GITHUB_REPO}" \
+                --state open --search "v0.2 routing escalation" --json number,title \
+                --jq '.[0].number' 2>/dev/null || echo "")
+            if [ -z "$existing_escalation_issue" ]; then
+                local filed_issue
+                filed_issue=$(gh issue create \
+                    --repo "${GITHUB_REPO}" \
+                    --title "ESCALATION: v0.2 routing still at specializedAssignments=0 after ${current_zero_cycles} cycles" \
+                    --label "bug,self-improvement" \
+                    --body "## Automated Escalation (issue #1568 self-healing diagnostic)
+
+The coordinator has attempted specialization routing ${current_zero_cycles} times (each cycle ~3.5 min, total ~$((current_zero_cycles * 3)) min) without incrementing \`specializedAssignments\`.
+
+**Blocker identified**: ${blocker_reason}
+
+**v0.2 criterion**: coordinator routes at least 1 task based on agent specialization (specializedAssignments > 0)
+
+This issue was auto-filed by \`route_tasks_by_specialization()\` after ${ESCALATION_THRESHOLD}+ consecutive zero-spec cycles. Investigate and fix the routing chain.
+
+**Coordinator-state at time of filing**:
+- specializedAssignments: 0
+- SPECIALIZATION_ROUTING_THRESHOLD: ${SPECIALIZATION_ROUTING_THRESHOLD}
+- Active agents checked: ${agents_checked}
+- Agents with spec data: ${agents_with_spec}
+
+**Likely causes** (based on prior routing bug history):
+1. Workers claim tasks before routing fires (issue #1474 pattern)
+2. Pre-claims race with cleanup_stale_assignments() (issue #1546 pattern)
+3. Identity S3 files have empty specializationLabelCounts
+4. Agent role whitespace causes routing to skip workers (issue #1548 pattern)" \
+                    2>/dev/null | grep -o 'issues/[0-9]*' | cut -d/ -f2 || echo "")
+                if [ -n "$filed_issue" ]; then
+                    echo "[$(date -u +%H:%M:%S)] Filed escalation issue #${filed_issue} for v0.2 routing failure"
+                    # Reset counter after filing so next escalation fires after another THRESHOLD cycles
+                    update_state "routingCyclesWithZeroSpec" "0"
+                    post_coordinator_thought \
+"ESCALATION filed: v0.2 routing at 0 after ${current_zero_cycles} cycles. Filed issue #${filed_issue}.
+Blocker: ${blocker_reason}
+Counter reset — next escalation will fire after ${ESCALATION_THRESHOLD} more zero-spec cycles." \
+                        "blocker"
+                else
+                    echo "[$(date -u +%H:%M:%S)] WARNING: Failed to file escalation issue (API error or duplicate)"
+                fi
+            else
+                echo "[$(date -u +%H:%M:%S)] Escalation issue #${existing_escalation_issue} already open — skipping duplicate"
+                # Reset counter so we don't spam checks every 5 cycles once one is open
+                update_state "routingCyclesWithZeroSpec" "0"
+            fi
+        fi
     else
         echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION PASSED: specializedAssignments=$total_specialized (routing has fired)"
         push_metric "V02RoutingSuccess" "$total_specialized" "Count" "Component=Coordinator"
+        # Reset zero-spec counter when routing succeeds
+        update_state "routingCyclesWithZeroSpec" "0"
     fi
 }
 
