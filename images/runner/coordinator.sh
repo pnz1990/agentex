@@ -29,7 +29,7 @@ set -uo pipefail
 NAMESPACE="${NAMESPACE:-agentex}"
 STATE_CM="coordinator-state"
 HEARTBEAT_INTERVAL=30  # seconds
-VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
+VOTE_THRESHOLD=3        # minimum approve votes to enact a decision (overridden from constitution at startup)
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 
 # Read GitHub repo from constitution for portability (issue #819, #1006)
@@ -44,7 +44,7 @@ echo "COORDINATOR STARTING"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "Namespace: $NAMESPACE"
 echo "State ConfigMap: $STATE_CM"
-echo "Vote threshold: $VOTE_THRESHOLD approvals required"
+echo "Vote threshold: $VOTE_THRESHOLD approvals required (default, overridden from constitution after kubectl ready)"
 echo ""
 
 # ── Configure kubectl ────────────────────────────────────────────────────────
@@ -68,8 +68,14 @@ BEDROCK_REGION_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n
 if [ -n "$BEDROCK_REGION_FROM_CONSTITUTION" ]; then
   BEDROCK_REGION="$BEDROCK_REGION_FROM_CONSTITUTION"
 fi
+VOTE_THRESHOLD_FROM_CONSTITUTION=$(kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.voteThreshold}' 2>/dev/null || echo "")
+if [ -n "$VOTE_THRESHOLD_FROM_CONSTITUTION" ]; then
+  VOTE_THRESHOLD="$VOTE_THRESHOLD_FROM_CONSTITUTION"
+fi
 echo "GitHub repo (from constitution): $GITHUB_REPO"
 echo "Bedrock region (from constitution): $BEDROCK_REGION"
+echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
@@ -734,6 +740,16 @@ tally_and_enact_votes() {
                         -p "{\"data\":${patch_data}}" \
                         && echo "[$(date -u +%H:%M:%S)] ✓ Constitution patched: $kv_pairs" \
                         || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to patch constitution"
+                    
+                    # Issue #1059: Update local VOTE_THRESHOLD if it was changed by governance vote
+                    if echo "$kv_pairs" | grep -q "voteThreshold="; then
+                        local new_vt
+                        new_vt=$(echo "$kv_pairs" | grep -o "voteThreshold=[^ ]*" | cut -d= -f2)
+                        if [ -n "$new_vt" ]; then
+                            VOTE_THRESHOLD="$new_vt"
+                            echo "[$(date -u +%H:%M:%S)] ✓ Local VOTE_THRESHOLD updated to $VOTE_THRESHOLD (effective immediately)"
+                        fi
+                    fi
                     
                     # ISSUE #893: Sync constitution.yaml in git after enacting governance decision
                     # This prevents git repo from drifting out of sync with cluster ConfigMap
