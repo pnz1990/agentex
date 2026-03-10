@@ -2212,6 +2212,113 @@ restart_coordinator_if_unhealthy() {
   fi
 }
 
+# sync_coordinator_configmap_if_stale() - Auto-fix for issue #1682 / issue #1695
+# Problem: CI update step fails due to IAM permissions, so coordinator-script ConfigMap
+# drifts behind git main. Coordinator Deployment mounts coordinator.sh from this ConfigMap,
+# NOT from the Docker image — stale ConfigMap means stale coordinator code indefinitely.
+#
+# Fix: Planners detect drift using git SHA comparison (more reliable than line count):
+#   - Compute git SHA of images/runner/coordinator.sh in the cloned repo
+#   - Read git-sha annotation from the coordinator-script ConfigMap
+#   - If SHA differs (or no annotation exists): update ConfigMap + restart Deployment
+#   - Annotate ConfigMap with new SHA for future comparisons
+#
+# SHA comparison is deterministic: only actual code changes trigger a sync.
+# Line-count comparison (PR #1693) was fragile: comment/whitespace changes caused
+# spurious restarts. Git SHA changes only when file content actually changes.
+#
+# Called by: planner startup block (section 7.5) after git clone
+# Cooldown: 300s — only one planner per 5 min should sync to avoid restart storms
+sync_coordinator_configmap_if_stale() {
+  local coordinator_file="${REPO_DIR:-/workspace/repo}/images/runner/coordinator.sh"
+
+  # Repo must be cloned for this to work — skip if not available
+  if [ ! -f "$coordinator_file" ]; then
+    log "sync_coordinator_configmap: repo not yet cloned, skipping drift check"
+    return 0
+  fi
+
+  # Cooldown guard: only sync once per 300s to prevent restart storms from concurrent planners
+  local last_sync last_sync_ts sync_age now
+  now=$(date +%s)
+  last_sync=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastCoordinatorConfigMapSync}' 2>/dev/null || echo "")
+  if [ -n "$last_sync" ]; then
+    last_sync_ts=$(date -d "$last_sync" +%s 2>/dev/null || echo "0")
+    if [ "$last_sync_ts" -gt 0 ]; then
+      sync_age=$((now - last_sync_ts))
+      if [ "$sync_age" -lt 300 ]; then
+        log "sync_coordinator_configmap: cooldown active (last sync ${sync_age}s ago, cooldown 300s). Skipping."
+        return 0
+      fi
+    fi
+  fi
+
+  # Compute git SHA of coordinator.sh in the cloned repo (using git log, not git hash-object,
+  # to get the commit SHA that identifies which version was last committed)
+  local git_sha cm_sha
+  git_sha=$(git -C "${REPO_DIR:-/workspace/repo}" log -1 --format='%H' -- images/runner/coordinator.sh 2>/dev/null || echo "")
+  if [ -z "$git_sha" ]; then
+    log "sync_coordinator_configmap: could not compute git SHA for coordinator.sh, skipping"
+    return 0
+  fi
+
+  # Read git-sha annotation from the live ConfigMap (set by this function on previous sync)
+  cm_sha=$(kubectl_with_timeout 10 get configmap coordinator-script -n "$NAMESPACE" \
+    -o jsonpath='{.metadata.annotations.git-sha}' 2>/dev/null || echo "")
+
+  log "sync_coordinator_configmap: git_sha=${git_sha} cm_sha=${cm_sha:-<none>}"
+
+  if [ "$git_sha" = "$cm_sha" ] && [ -n "$cm_sha" ]; then
+    log "sync_coordinator_configmap: coordinator.sh is up-to-date (SHA: ${git_sha:0:12}). No sync needed."
+    return 0
+  fi
+
+  if [ -z "$cm_sha" ]; then
+    log "sync_coordinator_configmap: no git-sha annotation on ConfigMap (first sync or pre-#1695). Applying unconditionally."
+  else
+    log "WARNING: coordinator.sh drift detected! ConfigMap SHA=${cm_sha:0:12}, git SHA=${git_sha:0:12}. Syncing..."
+  fi
+
+  # Record sync timestamp BEFORE acting (prevents concurrent planners from double-syncing)
+  local sync_ts
+  sync_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  if ! kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"lastCoordinatorConfigMapSync\":\"${sync_ts}\"}}" 2>/dev/null; then
+    log "WARNING: sync_coordinator_configmap: could not record sync timestamp. Proceeding anyway."
+  fi
+
+  # Update the ConfigMap from git main AND annotate with the git SHA
+  local tmp_manifest
+  tmp_manifest=$(mktemp)
+  if kubectl_with_timeout 30 create configmap coordinator-script \
+      --from-file=coordinator.sh="${coordinator_file}" \
+      -n "$NAMESPACE" --dry-run=client -o yaml 2>/dev/null > "$tmp_manifest"; then
+    # Inject git-sha annotation so future comparisons can use it
+    if kubectl_with_timeout 30 annotate --local -f "$tmp_manifest" \
+        "git-sha=${git_sha}" -o yaml 2>/dev/null | \
+        kubectl_with_timeout 30 apply --validate=false -f - 2>&1; then
+      log "✓ sync_coordinator_configmap: coordinator-script ConfigMap updated and annotated (SHA: ${git_sha:0:12})"
+
+      # Restart deployment to pick up new ConfigMap
+      if kubectl_with_timeout 30 rollout restart deployment coordinator -n "$NAMESPACE" 2>&1; then
+        log "✓ sync_coordinator_configmap: coordinator deployment restarted to load updated script"
+        post_thought "Auto-synced coordinator-script ConfigMap (issues #1682/#1695): git SHA drift detected (${cm_sha:0:12} → ${git_sha:0:12}). Updated ConfigMap and restarted coordinator deployment." "insight" 8
+      else
+        log "WARNING: sync_coordinator_configmap: ConfigMap updated but deployment restart failed"
+        post_thought "Auto-synced coordinator-script ConfigMap (issues #1682/#1695): updated ConfigMap (SHA: ${git_sha:0:12}) but deployment restart FAILED. Manual restart may be needed: kubectl rollout restart deployment coordinator -n agentex" "blocker" 8
+      fi
+    else
+      log "ERROR: sync_coordinator_configmap: failed to apply annotated ConfigMap"
+      post_thought "coordinator-script ConfigMap drift detected (issues #1682/#1695): SHA mismatch (cm=${cm_sha:0:12} vs git=${git_sha:0:12}). Auto-update FAILED. Manual fix: kubectl create configmap coordinator-script --from-file=coordinator.sh=images/runner/coordinator.sh -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -" "blocker" 9
+    fi
+  else
+    log "ERROR: sync_coordinator_configmap: failed to generate ConfigMap manifest"
+    post_thought "coordinator-script ConfigMap drift check FAILED (issues #1682/#1695): could not generate manifest from coordinator.sh. Check repo clone and kubectl permissions." "blocker" 9
+  fi
+  rm -f "$tmp_manifest"
+}
+
 # ── Atomic Spawn Gate (issue #519: TOCTOU fix) ───────────────────────────────
 # The coordinator maintains a spawnSlots counter in coordinator-state.
 # Agents atomically claim a slot before spawning and release it after.
@@ -3331,6 +3438,17 @@ gh auth setup-git
 mkdir -p "$WORKSPACE/repo"
 git clone "https://github.com/$REPO.git" "$WORKSPACE/repo" --depth=1
 cd "$WORKSPACE/repo"
+
+# ── 7.5. Coordinator script drift check (issues #1682, #1695) ────────────────
+# CI step that updates coordinator-script ConfigMap fails due to IAM issue (#1682).
+# Planners detect drift via git SHA comparison (deterministic, no spurious restarts
+# from comment/whitespace changes) and auto-update the ConfigMap + restart coordinator.
+# SHA approach supersedes the fragile line-count comparison proposed in PR #1693.
+# REPO_DIR must be set to $WORKSPACE/repo (just cloned above).
+if [ "$AGENT_ROLE" = "planner" ]; then
+  log "Planner: checking coordinator-script ConfigMap for drift via git SHA (issues #1682/#1695)..."
+  REPO_DIR="$WORKSPACE/repo" sync_coordinator_configmap_if_stale
+fi
 
 # ── 8. Configure OpenCode ─────────────────────────────────────────────────────
 mkdir -p "${HOME}/.config/opencode"
