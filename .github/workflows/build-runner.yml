@@ -103,20 +103,31 @@ jobs:
           echo "::warning::Workaround: kubectl create configmap coordinator-script --from-file=coordinator.sh=images/runner/coordinator.sh -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -"
 
       - name: Restart coordinator deployment to pick up new image
-        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'success'
+        if: github.ref == 'refs/heads/main'
         run: |
-          # Rolling restart — coordinator picks up new :latest image AND updated ConfigMap
-          # This ensures fixes to coordinator.sh take effect immediately after merge.
-          # The ConfigMap was already updated in the previous step. The restart forces
-          # immediate ConfigMap reload (instead of waiting 60s for kubelet propagation).
+          # Rolling restart — coordinator picks up new :latest image.
+          # Issue #1699: Decoupled from ConfigMap update success.
+          # Previously conditioned on ConfigMap update outcome==success, but since that
+          # step fails due to IAM permissions (#1682) with continue-on-error=true, the
+          # step conclusion='success' but outcome='failure', causing this step to be SKIPPED.
+          # Result: coordinator and planner-loop NEVER got restarted after merges to main,
+          # so new Docker images (helpers.sh, entrypoint.sh changes) were never deployed.
+          # Fix: always restart to pick up new Docker image regardless of ConfigMap result.
+          # If ConfigMap update succeeded: coordinator gets new image AND new script.
+          # If ConfigMap update failed: coordinator gets new image only (script stays stale
+          # until agent workaround in #1693 or manual fix in #1682).
           # (issue #1226: coordinator ran stale image missing critical bug fixes)
           kubectl rollout restart deployment/coordinator -n agentex
           kubectl rollout status deployment/coordinator -n agentex --timeout=120s
-          echo "Coordinator restarted successfully — running latest image and script"
+          echo "Coordinator restarted successfully — running latest image"
 
       - name: Restart planner-loop to pick up new image
-        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'success'
+        if: github.ref == 'refs/heads/main'
         run: |
+          # Issue #1699: Decoupled from ConfigMap update success (same root cause as above).
+          # Planner-loop workers source helpers.sh from the Docker image. Without this restart,
+          # merged helpers.sh changes (e.g. planner claim rejection in #1691) never reach
+          # running workers — confirmed: planner-loop ran 19h without restart after 3+ merges.
           echo "Triggering planner-loop rollout to pick up updated runner image..."
           kubectl rollout restart deployment/planner-loop -n agentex
           kubectl rollout status deployment/planner-loop -n agentex --timeout=120s
