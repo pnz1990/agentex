@@ -2026,28 +2026,44 @@ score_agent_for_issue() {
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    local passed_display_name="${5:-}"  # Issue #1515: optional displayName from activeAgents triplet
 
     # Read agent identity from S3 — first try per-session file (may be empty for new agents)
     local identity_json=""
     identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
         --region "$BEDROCK_REGION" 2>/dev/null || echo "")
 
-    # Issue #1475: if per-session file exists, try to upgrade to canonical history.
-    # The per-session file contains only THIS session's data (usually empty for new agents).
+    # Issue #1475 / #1515: try to upgrade to canonical history.
+    # The per-session file contains only THIS session's data (usually empty for new agents
+    # since it is written at EXIT, not at startup).
     # The canonical file at identities/canonical/<displayName>.json contains accumulated
     # history across all sessions using this display name (written by identity.sh PR #1489).
+    #
+    # Bug in PR #1505: canonical lookup was only attempted when per-session file existed.
+    # Fix (issue #1515): try canonical lookup with passed_display_name FIRST (when available),
+    # before giving up on an empty per-session file.
+    local display_name=""
+
     if [ -n "$identity_json" ]; then
-        local display_name
+        # Per-session file exists — extract displayName from it
         display_name=$(echo "$identity_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
-        if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
-            local canonical_json
-            canonical_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
-                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-            if [ -n "$canonical_json" ]; then
-                # Use canonical (accumulated) history instead of per-session (fresh) file
-                identity_json="$canonical_json"
-                echo "[$(date -u +%H:%M:%S)] Routing: using canonical history for $agent_name (displayName=$display_name)" >&2
-            fi
+    fi
+
+    # Prefer the passed displayName from activeAgents registration (more reliable than
+    # per-session file which may be empty or from a prior agent with the same name slot).
+    if [ -n "$passed_display_name" ] && [ "$passed_display_name" != "$agent_name" ]; then
+        display_name="$passed_display_name"
+    fi
+
+    # Try canonical lookup whenever we have a display_name (even if per-session file is empty)
+    if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+        local canonical_json
+        canonical_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        if [ -n "$canonical_json" ]; then
+            # Use canonical (accumulated) history instead of per-session (fresh) file
+            identity_json="$canonical_json"
+            echo "[$(date -u +%H:%M:%S)] Routing: using canonical history for $agent_name (displayName=$display_name)" >&2
         fi
     fi
 
@@ -2177,9 +2193,13 @@ find_best_agent_for_issue() {
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        # Use cut for role: supports both "name:role" and future "name:role:displayName" format
+        # Use cut for role: supports both "name:role" and "name:role:displayName" format
         local agent_role
         agent_role=$(echo "$pair" | cut -d: -f2)
+        # Issue #1515: extract displayName from triplet (name:role:displayName)
+        # Supports old "name:role" format (displayName will be empty string)
+        local agent_display_name
+        agent_display_name=$(echo "$pair" | cut -d: -f3)
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
@@ -2191,10 +2211,12 @@ find_best_agent_for_issue() {
         fi
 
         local agent_score
+        # Issue #1515: pass displayName so score_agent_for_issue() can try canonical
+        # lookup even when the per-session S3 file is empty (new agent pods)
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+            "$issue_labels" "$issue_keywords" "$agent_display_name")
 
-        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
+        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name (displayName=${agent_display_name:-?}) on issue #$issue_number: $agent_score" >&2
 
         if [ "$agent_score" -gt "$best_score" ]; then
             best_score="$agent_score"
