@@ -4010,24 +4010,21 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
    if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
      WORKED_LABELS=""
 
-     # Check 1: temp file cache written at claim time (fastest, most reliable)
-     if [ -f "/tmp/agentex-issue-labels" ]; then
-       local cached_entry
-       cached_entry=$(grep "^${WORKED_ISSUE}:" /tmp/agentex-issue-labels 2>/dev/null || echo "")
-       if [ -n "$cached_entry" ]; then
-         WORKED_LABELS="${cached_entry#*:}"
-         log "Specialization tracking: got labels from claim-time cache for issue #$WORKED_ISSUE: $WORKED_LABELS"
-       fi
-     fi
+      # Check 1: temp file cache written at claim time (fastest, most reliable)
+      if [ -f "/tmp/agentex-issue-labels" ]; then
+        cached_entry=$(grep "^${WORKED_ISSUE}:" /tmp/agentex-issue-labels 2>/dev/null || echo "")
+        if [ -n "$cached_entry" ]; then
+          WORKED_LABELS="${cached_entry#*:}"
+          log "Specialization tracking: got labels from claim-time cache for issue #$WORKED_ISSUE: $WORKED_LABELS"
+        fi
+      fi
 
-     # Check 2: coordinator-state.issueLabels cache (survives pod restart)
-     if [ -z "$WORKED_LABELS" ]; then
-       local labels_cache
-       labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-         -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
-       if [ -n "$labels_cache" ]; then
-         local cached_entry
-         cached_entry=$(echo "$labels_cache" | tr '|' '\n' | grep "^${WORKED_ISSUE}:" | head -1 || echo "")
+      # Check 2: coordinator-state.issueLabels cache (survives pod restart)
+      if [ -z "$WORKED_LABELS" ]; then
+        labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+          -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+        if [ -n "$labels_cache" ]; then
+          cached_entry=$(echo "$labels_cache" | tr '|' '\n' | grep "^${WORKED_ISSUE}:" | head -1 || echo "")
          if [ -n "$cached_entry" ]; then
            WORKED_LABELS="${cached_entry#*:}"
            log "Specialization tracking: got labels from coordinator-state cache for issue #$WORKED_ISSUE: $WORKED_LABELS"
