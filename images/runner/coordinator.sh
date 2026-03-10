@@ -1934,6 +1934,11 @@ route_tasks_by_specialization() {
     local generic_count=0
     local routing_log=""
 
+    # Issue #1430: Pre-fetch issueLabels cache to avoid per-issue GitHub API calls
+    # Cache format: "issue:label1,label2|issue2:label3|..."
+    local labels_cache
+    labels_cache=$(get_state "issueLabels" 2>/dev/null || echo "")
+
     IFS=',' read -ra queue_issues <<< "$task_queue"
     for issue_num in "${queue_issues[@]}"; do
         [ -z "$issue_num" ] && continue
@@ -1946,10 +1951,16 @@ route_tasks_by_specialization() {
             continue
         fi
 
-        # Get issue labels for scoring
-        local issue_labels
-        issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
-            --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        # Get issue labels for scoring — use cache first (issue #1430: rate-limit resilient)
+        local issue_labels=""
+        if [ -n "$labels_cache" ]; then
+            issue_labels=$(echo "$labels_cache" | tr '|' '\n' | grep "^${issue_num}:" | cut -d: -f2- | head -1 || echo "")
+        fi
+        # Fall back to GitHub API on cache miss
+        if [ -z "$issue_labels" ]; then
+            issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+                --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        fi
 
         # Find best specialized agent
         local best_agent
