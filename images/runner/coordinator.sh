@@ -992,10 +992,43 @@ The civilization needs mediators, not just voters." \
 # above SPECIALIZATION_ROUTING_THRESHOLD for a task, the coordinator prefers
 # that agent over a generic assignment.
 #
+# S3 Identity JSON Contract (s3://${IDENTITY_BUCKET}/identities/<agent-name>.json)
+# ─────────────────────────────────────────────────────────────────────────────
+# The score_agent_for_issue() function reads the following exact field paths.
+# If identity.sh changes these field names, update the jq paths below to match.
+#
+#   {
+#     "displayName": "ada",                      # human-readable name
+#     "role": "worker",                          # agent role
+#     "specialization": "enhancement",           # top specialization label (string)
+#     "specializationLabelCounts": {             # label → count map (issue #1112)
+#       "enhancement": 5,                        # used by: .specializationLabelCounts[$lbl]
+#       "bug": 3
+#     },
+#     "specializationDetail": {                  # rich specialization data (issue #1112)
+#       "codeAreas": {                           # used by: .specializationDetail.codeAreas
+#         "entrypoint.sh": 3,                    # file → PR-count map
+#         "coordinator.sh": 1
+#       },
+#       "debatesWon": 0,
+#       "synthesisCount": 2
+#     },
+#     "stats": {
+#       "tasksCompleted": 12,
+#       "thoughtsPosted": 8,
+#       "issuesFiled": 3,
+#       "prsMerged": 5
+#     }
+#   }
+#
+# IMPORTANT: Do NOT use .specialization.issueLabels or .specialization.codeAreas —
+# these paths do not exist. .specialization is a plain string, not an object.
+# (These wrong paths caused issue #1133/#1134, fixed in PR #1136.)
+#
 # Scoring formula:
 #   score = (label_matches * 3) + (keyword_matches * 2)
-#   - label_matches: count of issue labels that match agent's issueLabels specialization
-#   - keyword_matches: count of title/body keywords matching agent's codeAreas specialization
+#   - label_matches: count of issue labels found in .specializationLabelCounts{}
+#   - keyword_matches: count of title/body keywords matching keys in .specializationDetail.codeAreas{}
 #
 # Routing decision:
 #   - score > SPECIALIZATION_ROUTING_THRESHOLD (5): route to specialized agent
