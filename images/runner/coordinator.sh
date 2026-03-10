@@ -409,6 +409,17 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v06CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # activeSwarms (issue #1775): pipe-separated active swarm entries for v0.6 swarm observability.
+  # Format: "swarm-name:goal-summary:member-count|swarm-name2:goal-summary2:member-count2|..."
+  # Written by track_active_swarms() every 5 iterations (~2.5 min).
+  # Read by check_v06_milestone() to count live swarm formations and coalition sizes.
+  # Also displayed by civilization_status() in helpers.sh for swarm health monitoring (issue #1775).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("activeSwarms")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing activeSwarms (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -1288,6 +1299,81 @@ check_swarm_dissolution() {
 
     if [ "$checked" -gt 0 ]; then
         echo "[$(date -u +%H:%M:%S)] Swarm dissolution check: $checked active swarms, $disbanded disbanded"
+    fi
+}
+
+# track_active_swarms — Update coordinator-state.activeSwarms with live swarm summary (issue #1775)
+# v0.6 Swarm Intelligence observability: count non-Disbanded swarm state ConfigMaps and record
+# per-swarm summaries (name:goal:member-count) so check_v06_milestone() and civilization_status()
+# can show real-time swarm health without listing cluster resources directly.
+#
+# Format: "swarm-name:goal-text:N|swarm-name2:goal-text2:M|..."
+#   - swarm-name: the swarm CR name (CM name without -state suffix)
+#   - goal-text: .data.goal from the swarm state CM, truncated to 40 chars, colons replaced
+#   - N: member agent count from .data.memberAgents (comma-separated list)
+#
+# Called every 5 iterations (~2.5 min) in the main loop AND at end of check_swarm_dissolution().
+# On dissolution, the disbanded swarm is removed from the field so it reflects only live swarms.
+track_active_swarms() {
+    # Find all swarm state ConfigMaps (labeled by kro from swarm-graph RGD)
+    local swarm_states
+    swarm_states=$(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
+        -l "kro.run/instance-kind=Swarm" \
+        -o json 2>/dev/null || echo '{"items":[]}')
+
+    local swarm_count
+    swarm_count=$(echo "$swarm_states" | jq '.items | length' 2>/dev/null || echo "0")
+
+    if [ "$swarm_count" -eq 0 ]; then
+        # No swarms at all — clear the field
+        local current
+        current=$(get_state "activeSwarms" 2>/dev/null || echo "")
+        [ -n "$current" ] && update_state "activeSwarms" ""
+        return 0
+    fi
+
+    # Build pipe-separated summary of non-Disbanded swarms
+    local active_entries=""
+    local active_count=0
+
+    while IFS=$'\t' read -r swarm_name phase goal member_agents; do
+        [ -z "$swarm_name" ] && continue
+        [ "$phase" = "Disbanded" ] && continue
+
+        local swarm_ref="${swarm_name%-state}"
+
+        # Count members from comma-separated memberAgents field
+        local member_count=0
+        if [ -n "$member_agents" ]; then
+            member_count=$(echo "$member_agents" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
+        fi
+
+        # Truncate goal to 40 chars and replace colons/pipes (field separators) with hyphens
+        local safe_goal
+        safe_goal=$(echo "${goal:-no-goal-set}" | cut -c1-40 | tr ':|' '--')
+
+        local entry="${swarm_ref}:${safe_goal}:${member_count}"
+        if [ -z "$active_entries" ]; then
+            active_entries="$entry"
+        else
+            active_entries="${active_entries}|${entry}"
+        fi
+        active_count=$((active_count + 1))
+    done < <(echo "$swarm_states" | jq -r \
+        '.items[] | [
+            .metadata.name,
+            (.data.phase // "Forming"),
+            (.data.goal // ""),
+            (.data.memberAgents // "")
+        ] | @tsv' 2>/dev/null)
+
+    # Update coordinator-state.activeSwarms
+    local current
+    current=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if [ "$current" != "$active_entries" ]; then
+        update_state "activeSwarms" "$active_entries"
+        echo "[$(date -u +%H:%M:%S)] activeSwarms updated: ${active_count} active swarm(s)"
+        push_metric "ActiveSwarms" "$active_count" "Count" "Component=Coordinator"
     fi
 }
 
@@ -4477,6 +4563,13 @@ while true; do
     # This coordinator-driven check ensures timely cleanup regardless of agent state.
     if [ $((iteration % 10)) -eq 0 ]; then
         check_swarm_dissolution
+    fi
+
+    # Every 5 iterations (~2.5 min): update activeSwarms field with live swarm summary (issue #1775)
+    # Tracks which swarms are active and their goal/member-count for v0.6 observability.
+    # Runs more frequently than dissolution check (10 iters) to ensure prompt updates on formation.
+    if [ $((iteration % 5)) -eq 0 ]; then
+        track_active_swarms
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.

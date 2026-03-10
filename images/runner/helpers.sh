@@ -888,6 +888,18 @@ civilization_status() {
     output="${output}v0.6 Milestone:          criteria not yet checked (coordinator v0.6 not deployed)\n"
   fi
 
+  # Active swarms (v0.6 swarm health — issue #1775)
+  # activeSwarms field: pipe-separated "swarm-name:goal:member-count" entries for non-Disbanded swarms.
+  # Written by track_active_swarms() in coordinator.sh every ~2.5 min.
+  local active_swarms active_swarm_count=0 active_swarm_display="none"
+  active_swarms=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo "")
+  if [ -n "$active_swarms" ]; then
+    active_swarm_count=$(echo "$active_swarms" | tr '|' '\n' | grep -c '.' 2>/dev/null || echo "0")
+    active_swarm_display="${active_swarms}"
+  fi
+  output="${output}Active swarms:           ${active_swarm_count} — ${active_swarm_display}\n"
+
   # Kill switch status
   local ks_enabled
   ks_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
