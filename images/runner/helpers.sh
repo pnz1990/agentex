@@ -813,11 +813,11 @@ query_thoughts() {
 
 # ── cleanup_old_thoughts ─────────────────────────────────────────────────────
 # Delete thoughts older than 24 hours (or 2h for low-signal types like
-# blockers and observations) to prevent cluster clutter and kubectl performance
-# degradation. Planners should call this periodically.
+# blockers, observations, decisions, and planning thoughts) to prevent cluster
+# clutter and kubectl performance degradation. Planners should call this periodically.
 #
-# Low-signal types (blocker, observation): 2h TTL
-# High-signal types (insight, decision, debate, proposal, vote): 24h TTL
+# Low-signal types (blocker, observation, decision, plan, planning): 2h TTL
+# High-signal types (insight, debate, proposal, vote): 24h TTL
 #
 # Usage: cleanup_old_thoughts
 cleanup_old_thoughts() {
@@ -840,14 +840,15 @@ cleanup_old_thoughts() {
     return 0
   fi
 
-  # Tiered TTL: low-signal types (blocker, observation) expire after 2h
-  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  # Tiered TTL: low-signal types (blocker, observation, decision, plan, planning) expire after 2h
+  # Issue #1614: decision/plan/planning are auto-generated system metadata thoughts (~10/agent/run)
+  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
     --arg cutoff_24h "$cutoff_24h" \
     --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
       then $cutoff_2h
       else $cutoff_24h
       end) as $cutoff |
@@ -865,8 +866,8 @@ cleanup_old_thoughts() {
   log "Deleting $count old thoughts in batches of 50..."
   echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
 
-  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
-  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance" 2>/dev/null || true
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decisions/plan: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: low-signal 2h, high-signal 24h)" "observation" 7 "maintenance" 2>/dev/null || true
 }
 
 # ── cleanup_old_messages ─────────────────────────────────────────────────────
