@@ -2251,8 +2251,11 @@ route_tasks_by_specialization() {
         [[ "$issue_num" =~ ^[0-9]+$ ]] || continue
 
         # Skip if already assigned
-        if echo "$active_assignments" | grep -q ":${issue_num}$" || \
-           echo "$active_assignments" | grep -q ":${issue_num},"; then
+        # Issue #1488: Normalize spaces before grep — activeAssignments can have space-padded entries
+        local normalized_active_assignments
+        normalized_active_assignments=$(echo "$active_assignments" | tr -d ' ')
+        if echo "$normalized_active_assignments" | grep -q ":${issue_num}$" || \
+           echo "$normalized_active_assignments" | grep -q ":${issue_num},"; then
             continue
         fi
 
