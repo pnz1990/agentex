@@ -30,6 +30,7 @@ NAMESPACE="${NAMESPACE:-agentex}"
 STATE_CM="coordinator-state"
 HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
+TALLY_WINDOW_SECONDS=86400  # only tally thoughts newer than this (default 24h). Issue #1407: prevents loading 668+ stale thoughts.
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 IDENTITY_BUCKET="${S3_BUCKET:-agentex-thoughts}"  # S3 bucket for agent identities (issue #1113)
 SPECIALIZATION_ROUTING_THRESHOLD=2  # min score to trigger specialization-based routing (issue #1113, lowered from 5→3→2 per issue #1145: single label match gives score=3>2)
@@ -785,6 +786,18 @@ tally_and_enact_votes() {
         fi
     fi
 
+    # Re-read tallyWindowSeconds from constitution on every tally cycle (issue #1407).
+    # This allows governance to adjust the tally window without a coordinator restart.
+    local current_tally_window
+    current_tally_window=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.tallyWindowSeconds}' 2>/dev/null || echo "")
+    if [ -n "$current_tally_window" ] && [[ "$current_tally_window" =~ ^[0-9]+$ ]]; then
+        if [ "$current_tally_window" != "$TALLY_WINDOW_SECONDS" ]; then
+            echo "[$(date -u +%H:%M:%S)] tallyWindowSeconds updated from constitution: $TALLY_WINDOW_SECONDS → $current_tally_window"
+            TALLY_WINDOW_SECONDS="$current_tally_window"
+        fi
+    fi
+
     # Write thoughts to temp file. Read from ConfigMap .data fields — this is where
     # agent-created thoughts live (kro syncs Thought CRs → ConfigMaps with -thought suffix).
     # Do NOT use gsub or encoding transforms — raw .data.content is correct as-is.
@@ -793,20 +806,38 @@ tally_and_enact_votes() {
     thoughts_file=$(mktemp /tmp/agentex-thoughts-XXXXXX.json)
     trap "rm -f '$thoughts_file'" RETURN
 
-     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
-     # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
-     # (causes OOM kill — coordinator only has 512Mi limit)
-     # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
-     # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
-     # Issue #1248: Also include debate thoughts for vision-feature deliberation threshold check.
-     kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-         | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") | {
-             agent: (.data.agentRef // "unknown"),
-             content: (.data.content // ""),
-             type: (.data.thoughtType // ""),
-             parent: (.data.parentRef // ""),
-             ts: .metadata.creationTimestamp
-           }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
+    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
+    # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
+    # (causes OOM kill — coordinator only has 512Mi limit)
+    # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
+    # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
+    # Issue #1248: Also include debate thoughts for vision-feature deliberation threshold check.
+    # Issue #1407: Apply time-window filter for vote/debate thoughts (default 24h) to prevent
+    # loading 668+ stale entries which took 40-120s and blocked route_tasks_by_specialization().
+    # Proposals are always included regardless of age (few in count, needed for topic discovery).
+    # Votes/debates older than TALLY_WINDOW_SECONDS are either already counted in an enacted
+    # decision (skipped via enactedDecisions check) or expired — no need to re-tally them.
+    local tally_cutoff_ts
+    tally_cutoff_ts=$(date -u -d "@$(($(date +%s) - TALLY_WINDOW_SECONDS))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -r "$(($(date +%s) - TALLY_WINDOW_SECONDS))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || echo "")
+    echo "[$(date -u +%H:%M:%S)] Tally window: ${TALLY_WINDOW_SECONDS}s (cutoff: ${tally_cutoff_ts:-none})"
+
+    kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+        | jq --arg cutoff "$tally_cutoff_ts" \
+          '[.items[] | select(
+              .data.thoughtType == "proposal" or
+              (
+                (.data.thoughtType == "vote" or .data.thoughtType == "debate") and
+                (if ($cutoff != "") then (.metadata.creationTimestamp >= $cutoff) else true end)
+              )
+            ) | {
+            agent: (.data.agentRef // "unknown"),
+            content: (.data.content // ""),
+            type: (.data.thoughtType // ""),
+            parent: (.data.parentRef // ""),
+            ts: .metadata.creationTimestamp
+          }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
 
     local thought_count
     thought_count=$(jq 'length' "$thoughts_file" 2>/dev/null || echo 0)
