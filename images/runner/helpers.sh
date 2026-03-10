@@ -332,6 +332,9 @@ claim_task() {
         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         _cache_issue_labels "$issue"
+        # Issue #1593: Register claim timestamp so cleanup_stale_assignments() gives this
+        # self-claim the same 120s grace window as coordinator pre-claims.
+        _register_claim_timestamp "$issue"
         return 0
       fi
     else
@@ -346,6 +349,9 @@ claim_task() {
         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
         _cache_issue_labels "$issue"
+        # Issue #1593: Register claim timestamp so cleanup_stale_assignments() gives this
+        # self-claim the same 120s grace window as coordinator pre-claims.
+        _register_claim_timestamp "$issue"
         return 0
       fi
     fi
@@ -406,6 +412,47 @@ _cache_issue_labels() {
     --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" \
     2>/dev/null && log "Issue #$issue labels cached in coordinator-state.issueLabels" || \
     log "WARNING: Failed to cache labels for issue #$issue (non-fatal)"
+}
+
+# ── _register_claim_timestamp (internal) ─────────────────────────────────────
+# Write a claim timestamp to coordinator-state.preClaimTimestamps so that
+# cleanup_stale_assignments() gives self-claims (via claim_task) the same 120s
+# grace window as coordinator pre-claims (issue #1593).
+#
+# Without this, the coordinator's 30s stale cleanup can remove an assignment
+# that was just claimed by an agent whose Job hasn't yet become active in k8s
+# (EKS node provisioning + kro latency can exceed 60s). This causes duplicate
+# PRs when a second agent claims and implements the same issue.
+#
+# Called internally by claim_task() — not intended for direct use.
+# Format: coordinator-state.preClaimTimestamps = "agent:issue:epoch;..."
+_register_claim_timestamp() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+  [ -z "$AGENT_NAME" ] && return 0
+
+  local ts_epoch
+  ts_epoch=$(date +%s)
+  local ts_entry="${AGENT_NAME}:${issue}:${ts_epoch}"
+
+  # Read existing preClaimTimestamps
+  local existing_ts
+  existing_ts=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.preClaimTimestamps}' 2>/dev/null || echo "")
+
+  local new_ts
+  if [ -z "$existing_ts" ]; then
+    new_ts="$ts_entry"
+  else
+    new_ts="${existing_ts};${ts_entry}"
+  fi
+
+  # Best-effort update — if this fails, the assignment may still be dropped at
+  # the 30s boundary, but that is the pre-#1593 behaviour and not a regression.
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"preClaimTimestamps\":\"${new_ts}\"}}" \
+    2>/dev/null && log "Claim timestamp registered for issue #$issue (age=0s, grace=${AGENT_NAME}:${issue}:${ts_epoch})" || \
+    log "WARNING: Failed to register claim timestamp for issue #$issue (non-fatal — grace window may not apply)"
 }
 
 # ── civilization_status ───────────────────────────────────────────────────────
