@@ -1865,62 +1865,121 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 }
 
 # proactive_coordinator_scan() - Check coordinator-state for anomalies
+# Issue #1881: Expanded from single stale-assignment check (threshold too high to ever fire)
+# to multiple coordinator health checks that can realistically trigger and increment
+# proactiveIssuesFound — unblocking v0.5 Criterion 3.
 proactive_coordinator_scan() {
   log "Coordinator scan: checking for state anomalies..."
-  
-  # Check for stale assignments (activeAssignments with agents that completed >1 hour ago)
+  local now_epoch
+  now_epoch=$(date +%s)
+
+  # ── Check 1: Stale assignments (lowered threshold ≥1 at 2h, was >3 at 1h) ──────
+  # cleanup_stale_assignments() runs every 30s and clears assignments for completed jobs.
+  # Requiring >3 stale assignments meant the check never fired. Lowered to ≥1 at 2h
+  # (2-hour threshold is safely above the 30s cleanup cycle to avoid false positives).
   local assignments
   assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
-  
+
   if [ -n "$assignments" ]; then
     local stale_count=0
-    # Check each assignment for stale agents
     for assignment in $(echo "$assignments" | tr ',' '\n'); do
       local agent_name
       agent_name=$(echo "$assignment" | cut -d: -f1)
-      
-      # Check if agent's Job completed more than 1 hour ago
       local completion_time
       completion_time=$(kubectl_with_timeout 10 get job -n "$NAMESPACE" "$agent_name" \
         -o jsonpath='{.status.completionTime}' 2>/dev/null || echo "")
-      
       if [ -n "$completion_time" ]; then
-        # Job completed — check if it's been > 1 hour
         local completion_epoch
         completion_epoch=$(date -d "$completion_time" +%s 2>/dev/null || echo "0")
-        local now_epoch
-        now_epoch=$(date +%s)
-        local age_seconds=$((now_epoch - completion_epoch))
-        
-        if [ "$age_seconds" -gt 3600 ]; then
-          stale_count=$((stale_count + 1))
+        local age_seconds=$(( now_epoch - completion_epoch ))
+        # Lowered to 2 hours (7200s) and threshold ≥1 (was >3 at 3600s)
+        if [ "$age_seconds" -gt 7200 ]; then
+          stale_count=$(( stale_count + 1 ))
         fi
       fi
     done
-    
-    if [ "$stale_count" -gt 3 ]; then
-      log "Coordinator scan: found $stale_count stale assignments — filing issue..."
-      file_proactive_issue "coordinator" \
-        "coordinator state: $stale_count stale assignments detected" \
-        "The coordinator has $stale_count assignments for agents whose Jobs completed >1 hour ago.
+    if [ "$stale_count" -ge 1 ]; then
+      log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+      file_proactive_issue "bug" \
+        "coordinator state: $stale_count assignments persisted >2h past job completion" \
+        "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
 This issue was proactively filed by a domain specialist during systematic scan.
 
 ## Context
-The coordinator's cleanup_stale_assignments() runs every 30s and should remove assignments for completed agents. If stale assignments persist for >1 hour, the cleanup logic may be failing.
+\`cleanup_stale_assignments()\` runs every 30s and should remove assignments for completed agents within 1-2 minutes. Assignments persisting >2h indicate a cleanup failure.
 
 ## Action Required
-1. Review cleanup_stale_assignments() in manifests/coordinator/coordinator.sh
+1. Review \`cleanup_stale_assignments()\` in coordinator.sh
 2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is updating (lastHeartbeat in coordinator-state)"
+3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
       return 0
     fi
   fi
-  
-  log "Coordinator scan: no state anomalies detected"
+
+  # ── Check 2: Coordinator heartbeat staleness ──────────────────────────────────
+  # If the coordinator heartbeat is >10 minutes old, the coordinator is likely stuck.
+  local heartbeat
+  heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+  if [ -n "$heartbeat" ]; then
+    local heartbeat_epoch
+    heartbeat_epoch=$(date -d "$heartbeat" +%s 2>/dev/null || echo "$now_epoch")
+    local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
+    if [ "$heartbeat_age" -gt 600 ]; then
+      log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+      file_proactive_issue "bug" \
+        "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
+        "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
+
+Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
+
+This issue was proactively filed by a domain specialist during systematic scan.
+
+## Context
+The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartbeat >10min indicates the coordinator pod has crashed, is OOMKilled, or is blocked.
+
+## Action Required
+1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
+2. Check coordinator logs for errors
+3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
+      return 0
+    fi
+  fi
+
+  # ── Check 3: Unresolved debates backlog ───────────────────────────────────────
+  # If unresolvedDebates count > 50, flag it — the civilization is not synthesizing fast enough.
+  local unresolved_debates
+  unresolved_debates=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+  if [ -n "$unresolved_debates" ]; then
+    local debate_count
+    debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
+    if [ "$debate_count" -gt 50 ]; then
+      log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
+      file_proactive_issue "enhancement" \
+        "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
+        "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
+
+Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
+
+This issue was proactively filed by a domain specialist during systematic scan.
+
+## Context
+The coordinator tracks unresolved debate threads and nudges agents to synthesize. A backlog >50 means agents are debating faster than they're synthesizing — collective intelligence is generating noise without resolution.
+
+## Action Required
+1. Spawn an agent specifically to synthesize the oldest unresolved threads
+2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
+3. Consider increasing synthesis frequency in agent instructions"
+      return 0
+    fi
+  fi
+
+  log "Coordinator scan: no state anomalies detected (stale assignments OK, heartbeat OK, debates OK)"
   return 0
 }
 
