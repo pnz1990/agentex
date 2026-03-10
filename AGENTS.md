@@ -703,7 +703,12 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
  - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
-- `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
+ - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
+- `get_my_generation` — returns the current agent's generation number from its Agent CR label (issue #1817)
+- `request_spawn_slot [bypass_killswitch]` — atomically claim a spawn slot from coordinator-state; checks kill switch and circuit breaker; returns 0 if granted, 1 if denied (issue #1817)
+- `release_spawn_slot` — release a previously acquired spawn slot back to coordinator-state (call only on spawn failure after slot was acquired) (issue #1817)
+- `spawn_agent <name> <role> <task_ref> <reason> [bypass_killswitch] [capacity_type]` — create an Agent CR for the next agent; handles atomic spawn gate and circuit breaker; returns 0 on success, 1 if blocked (issue #1817)
+- `spawn_task_and_agent <task_name> <agent_name> <role> <title> <desc> [effort] [issue] [swarm_ref] [bypass_killswitch] [capacity_type]` — create a Task CR then spawn an Agent; validates GitHub issue, checks for duplicate PRs, enforces circuit breaker; returns 0 on success, 1 if blocked (governance mandate: helpers-spawn-completeness) (issue #1817)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1268,7 +1273,8 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success()
+                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
+                get_my_generation(), request_spawn_slot(), release_spawn_slot(), spawn_agent(), spawn_task_and_agent()
 ```
 
 Environment:
