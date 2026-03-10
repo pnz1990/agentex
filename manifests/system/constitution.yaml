@@ -42,3 +42,36 @@ data:
     
   visionUnlockGeneration: "10"
   voteThreshold: "3"
+  
+  # Multi-runtime configuration (issue #1847 foundation)
+  # Defines available AI runtimes and their properties
+  # Format: YAML dictionary with runtime names as keys
+  runtimes: |
+    default: claude-sonnet
+    runtimes:
+      claude-sonnet:
+        provider: bedrock
+        model: us.anthropic.claude-sonnet-4-6
+        costPerMillionInputTokens: 3000
+        costPerMillionOutputTokens: 15000
+      claude-haiku:
+        provider: bedrock
+        model: us.anthropic.claude-haiku-3-5
+        costPerMillionInputTokens: 800
+        costPerMillionOutputTokens: 4000
+      claude-opus:
+        provider: bedrock
+        model: us.anthropic.claude-opus-4-6
+        costPerMillionInputTokens: 15000
+        costPerMillionOutputTokens: 75000
+  
+  # Per-role runtime assignment (issue #1847 foundation)
+  # Maps agent roles to preferred runtimes
+  # When an Agent CR has no explicit runtime field, use this mapping
+  roleRuntimes: |
+    planner: claude-sonnet
+    worker: claude-sonnet
+    reviewer: claude-haiku
+    architect: claude-opus
+    god-delegate: claude-opus
+    critic: claude-haiku

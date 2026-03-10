@@ -121,9 +121,59 @@ if [[ "$CLUSTER" == "agentex" ]]; then
   log "WARNING: Using default cluster name — new god should set 'clusterName' in constitution"
 fi
 
+# ── Runtime Resolution (issue #1847 multi-runtime support) ────────────────────
+# Resolve BEDROCK_MODEL from Agent CR runtime field or role-based defaults.
+# Precedence: 1. BEDROCK_MODEL env var (from Agent.spec.model), 2. Agent.spec.runtime, 3. roleRuntimes mapping
+AGENT_RUNTIME="${AGENT_RUNTIME:-}"  # Set by Agent CR spec.runtime field
+
+if [ -z "$AGENT_RUNTIME" ] || [ "$AGENT_RUNTIME" = "null" ]; then
+  # No explicit runtime — use role-based default from constitution
+  ROLE_RUNTIMES_YAML=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.roleRuntimes}' 2>/dev/null || echo "")
+  
+  if [ -n "$ROLE_RUNTIMES_YAML" ]; then
+    # Parse roleRuntimes YAML to find runtime for this agent's role
+    # Format: "role: runtime-name" one per line
+    RESOLVED_RUNTIME=$(echo "$ROLE_RUNTIMES_YAML" | grep "^${AGENT_ROLE}:" | cut -d: -f2 | tr -d ' ' || echo "")
+    if [ -n "$RESOLVED_RUNTIME" ]; then
+      AGENT_RUNTIME="$RESOLVED_RUNTIME"
+      log "Using runtime '$AGENT_RUNTIME' from roleRuntimes mapping for role '$AGENT_ROLE'"
+    fi
+  fi
+fi
+
+# If we have a runtime name, resolve it to a model ID
+if [ -n "$AGENT_RUNTIME" ]; then
+  RUNTIMES_YAML=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.runtimes}' 2>/dev/null || echo "")
+  
+  if [ -n "$RUNTIMES_YAML" ]; then
+    # Extract the model ID for this runtime
+    # Format: multi-line YAML with "runtimes:\n  runtime-name:\n    model: model-id"
+    # Using grep + awk to extract model from the runtime block
+    RUNTIME_MODEL=$(echo "$RUNTIMES_YAML" | awk "
+      /^  ${AGENT_RUNTIME}:/ { in_runtime=1; next }
+      in_runtime && /^    model:/ { print \$2; exit }
+      in_runtime && /^  [a-z]/ { exit }
+    " || echo "")
+    
+    if [ -n "$RUNTIME_MODEL" ]; then
+      BEDROCK_MODEL="$RUNTIME_MODEL"
+      log "Resolved runtime '$AGENT_RUNTIME' to model '$BEDROCK_MODEL'"
+    else
+      log "WARNING: Runtime '$AGENT_RUNTIME' not found in constitution.runtimes — using default model"
+    fi
+  fi
+fi
+
+# Fallback: if still using default, log it
+if [ "$BEDROCK_MODEL" = "us.anthropic.claude-sonnet-4-6" ]; then
+  log "Using default model: $BEDROCK_MODEL"
+fi
+
 # Issue #1218: Re-export constitution-derived variables for helpers.sh accessibility.
 # These must be exported AFTER constitution reads so helpers.sh gets the final values.
-export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT
+export REPO CLUSTER BEDROCK_REGION BEDROCK_MODEL S3_BUCKET CIRCUIT_BREAKER_LIMIT
 
 ts() { date +%s; }
 
@@ -274,6 +324,7 @@ spec:
   role: ${emergency_role}
   taskRef: $next_task
   model: ${BEDROCK_MODEL}
+  runtime: ""  # Empty = use roleRuntimes mapping from constitution (issue #1847)
 EOF
       
       # Issue #449: Verify spawn succeeded with clear diagnostics
@@ -2836,6 +2887,7 @@ spec:
   role: "${role}"
   taskRef: "${task_ref}"
   model: "${BEDROCK_MODEL}"
+  runtime: ""  # Empty = use roleRuntimes mapping from constitution (issue #1847)
   swarmRef: "${SWARM_REF}"
   priority: 5
 EOF

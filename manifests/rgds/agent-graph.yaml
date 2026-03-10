@@ -10,6 +10,7 @@ spec:
       role: string | default="worker"
       taskRef: string | required=true
       model: string | default="us.anthropic.claude-sonnet-4-6"
+      runtime: string | default=""  # Runtime name from constitution.runtimes (e.g., "claude-sonnet", "claude-haiku"). Empty = use roleRuntimes mapping.
       swarmRef: string | default=""
       priority: integer | default=5
       imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
@@ -87,6 +88,8 @@ spec:
                       value: ${schema.metadata.name}
                     - name: AGENT_ROLE
                       value: ${schema.spec.role}
+                    - name: AGENT_RUNTIME
+                      value: ${schema.spec.runtime}
                     - name: TASK_CR_NAME
                       value: ${schema.spec.taskRef}
                     - name: SWARM_REF
