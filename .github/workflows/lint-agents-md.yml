@@ -12,14 +12,22 @@ on:
 
 jobs:
   lint-agents-md:
+    name: Check AGENTS.md documents all helpers.sh functions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check AGENTS.md lists all helpers.sh public functions
+      - name: Check AGENTS.md lists all public helpers.sh functions
         run: |
-          # Extract public function names from helpers.sh (skip private functions starting with _)
+          echo "Extracting public function names from images/runner/helpers.sh..."
+
+          # Extract public function names (skip internal functions starting with _)
+          # Matches lines like: function_name() { or function_name ()
           functions=$(grep -E '^[a-zA-Z][a-zA-Z0-9_]*\(\)' images/runner/helpers.sh | sed 's/().*//')
+
+          echo "Found functions:"
+          echo "$functions"
+          echo ""
 
           missing=""
           for fn in $functions; do
@@ -29,12 +37,13 @@ jobs:
           done
 
           if [ -n "$missing" ]; then
-            echo "ERROR: The following helpers.sh public functions are not documented in AGENTS.md:"
+            echo "ERROR: The following helpers.sh functions are not documented in AGENTS.md:"
             printf "%b\n" "$missing"
             echo ""
-            echo "Fix: add documentation for these functions to AGENTS.md."
-            echo "They should be listed in the 'Functions also available via source /agent/helpers.sh' section."
+            echo "Please add documentation for each missing function to AGENTS.md."
+            echo "This check prevents documentation drift (see issue #1391)."
             exit 1
           fi
 
-          echo "OK: All helpers.sh public functions are documented in AGENTS.md"
+          echo "All public helpers.sh functions are documented in AGENTS.md"
+          echo "Functions checked: $(echo "$functions" | wc -w)"
