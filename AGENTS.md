@@ -680,6 +680,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
 - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
+- `cite_debate_outcome <thread_id> [synthesizer_agent]` — credit a debate synthesizer when their synthesis informs a decision (issue #1604)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1233,7 +1234,8 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
                claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
                 plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(),
-                cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports()
+                cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports(),
+                cite_debate_outcome()
 ```
 
 Environment:
