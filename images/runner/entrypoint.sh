@@ -3361,15 +3361,49 @@ if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n 
     local_issue_title=$(echo "$issue_api_response" | jq -r '.title // ""' 2>/dev/null || echo "")
   fi
 
-  # Extract *.sh and *.yaml file mentions from the issue content
+  # Extract *.sh and *.yaml file mentions from the issue content (issue #1684: dynamic detection)
   local_components_raw=""
   if [ -n "$local_issue_body" ] || [ -n "$local_issue_title" ]; then
     combined_text="${local_issue_title} ${local_issue_body}"
-    # Extract common agentex file names (.sh, .yaml, .yml, .json patterns)
-    # Also capture bare component names like "coordinator", "entrypoint", "helpers"
+    # Dynamic detection: match ANY *.sh, *.yaml, *.yml file mentioned in the issue body/title.
+    # This replaces the previous hardcoded list (issue #1684) so new platform files are
+    # automatically detected without maintaining a static allowlist.
     local_components_raw=$(echo "$combined_text" | \
-      grep -oE '\b(coordinator\.sh|entrypoint\.sh|helpers\.sh|identity\.sh|planner-loop\.sh|agent-graph\.yaml|task-graph\.yaml|message-graph\.yaml|thought-graph\.yaml|report-graph\.yaml|swarm-graph\.yaml|coordinator-graph\.yaml|planner-loop-graph\.yaml)\b' | \
+      grep -oE '\b[a-zA-Z0-9._-]+(\.sh|\.yaml|\.yml)\b' | \
+      grep -v '^\.' | \
       sort -u | head -5 || true)
+    log "Issue #1684: Dynamic component detection found: $(echo "$local_components_raw" | tr '\n' ' ' || echo 'none')"
+  fi
+
+  # Phase 3b (issue #1684): If issue body detection found nothing or found few files,
+  # also check any open PRs linked to this issue via GitHub API to discover actual changed files.
+  # This is the "PR diff" approach: we look at the PR's changed file list, not just the issue text.
+  if [ -z "$local_components_raw" ] || [ "$(echo "$local_components_raw" | wc -l)" -lt 2 ]; then
+    linked_pr_components=""
+    # Search for open PRs that mention this issue number (title or body contains #ISSUE)
+    linked_pr_files=$(gh api "repos/${REPO}/pulls?state=open&per_page=20" \
+      --jq ".[] | select(.body // \"\" | test(\"#${COORDINATOR_ISSUE}([^0-9]|$)\")) | .number" \
+      2>/dev/null | head -3 || echo "")
+    if [ -n "$linked_pr_files" ]; then
+      while IFS= read -r pr_num; do
+        [ -z "$pr_num" ] && continue
+        # Fetch files changed in this PR via REST API
+        pr_changed=$(gh api "repos/${REPO}/pulls/${pr_num}/files?per_page=30" \
+          --jq '.[].filename' 2>/dev/null | \
+          grep -oE '[^/]+(\.sh|\.yaml|\.yml)$' | \
+          sort -u | head -5 || echo "")
+        if [ -n "$pr_changed" ]; then
+          linked_pr_components="${linked_pr_components}
+${pr_changed}"
+          log "Issue #1684: PR #${pr_num} changed files added to component context: $(echo "$pr_changed" | tr '\n' ' ')"
+        fi
+      done <<< "$linked_pr_files"
+    fi
+    if [ -n "$linked_pr_components" ]; then
+      # Merge with issue-body detections, de-duplicate, cap at 5
+      local_components_raw=$(printf "%s\n%s" "$local_components_raw" "$linked_pr_components" | \
+        sort -u | grep -v '^$' | head -5 || true)
+    fi
   fi
 
   # Build context from knowledge graph if we found relevant components

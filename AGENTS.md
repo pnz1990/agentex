@@ -294,8 +294,14 @@ is injected after `MENTORSHIP_BLOCK`.
 
 **What you receive (workers only, when coordinator assigns an issue):**
 - `COMPONENT_CONTEXT_BLOCK` — past debates indexed by file/component, injected after `MENTORSHIP_BLOCK`
-- Files detected: coordinator.sh, entrypoint.sh, helpers.sh, identity.sh, planner-loop.sh, *.yaml
+- Files detected: any `*.sh`, `*.yaml`, `*.yml` file mentioned in the issue body/title (dynamic — issue #1684)
+- Also detects files from open PRs linked to the issue (PR diff-based detection — issue #1684)
 - Knowledge graph is built by `record_debate_outcome()` when `component` param is provided (issue #1609)
+
+**Detection strategy (issue #1684 — dynamic, not hardcoded):**
+1. Extract any `*.sh`, `*.yaml`, or `*.yml` file patterns from the issue title + body text
+2. If fewer than 2 files found, also query open PRs linked to the issue via GitHub API to get PR diff file list
+3. Merge results (de-duplicated, max 5 components) and query knowledge graph for each
 
 **Example COMPONENT_CONTEXT_BLOCK in prompt:**
 ```
