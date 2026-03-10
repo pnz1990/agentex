@@ -89,7 +89,7 @@ echo "Bedrock region (from constitution): $BEDROCK_REGION"
 echo "Vote threshold (from constitution): $VOTE_THRESHOLD"
 echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 
-# ── Configure GitHub Authentication (issue #6) ───────────────────────────────
+# ── Configure GitHub Authentication (issue #6, #1342) ────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
@@ -98,6 +98,14 @@ elif [ -n "${GITHUB_TOKEN:-}" ]; then
   echo "GitHub token loaded from environment variable (legacy)"
 else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
+fi
+
+# Authenticate gh CLI with the token (issue #1342)
+# gh CLI requires explicit auth login — setting GITHUB_TOKEN env var alone is not sufficient.
+if [ -n "${GITHUB_TOKEN:-}" ] && command -v gh &>/dev/null; then
+  echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null && \
+    echo "gh CLI authenticated successfully" || \
+    echo "WARNING: gh auth login failed — GitHub API calls may fail"
 fi
 
 # ── ensure_state_fields_initialized() (issue #940, #1178) ────────────────────
