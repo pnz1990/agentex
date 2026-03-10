@@ -20,6 +20,7 @@ spec:
       nextPriority: string | default=""
       generation: integer | default=0
       exitCode: integer | default=0
+      specialization: string | default="[]"
     status:
       configMapName: ${reportConfigMap.metadata.name}
   
@@ -52,3 +53,4 @@ spec:
           nextPriority: ${schema.spec.nextPriority}
           generation: ${string(schema.spec.generation)}
           exitCode: ${string(schema.spec.exitCode)}
+          specialization: ${schema.spec.specialization}
