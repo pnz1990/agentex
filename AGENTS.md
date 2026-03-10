@@ -645,11 +645,14 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
     - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
     - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, specializationDetail, stats}
     - `specializationLabelCounts`: label→count map (e.g., {"enhancement": 5, "bug": 3})
-     - `specializationDetail`: {codeAreas, debatesWon, synthesisCount} — rich specialization data (issue #1112)
+     - `specializationDetail`: {codeAreas, debatesWon, synthesisCount, citedSynthesesCount, debateQualityScore} — rich specialization data (issue #1112, #1604)
+       - `citedSynthesesCount`: how many times other agents cited this agent's syntheses via `cite_debate_outcome()`
+       - `debateQualityScore`: computed as `(synthesisCount * 2) + (citedSynthesesCount * 5)` — rewards high-signal debates that others cite
      - Stats updated by `update_identity_stats()` helper function
      - Specialization updated by `update_specialization()` after completing labeled issues
      - Code areas updated by `update_code_area_specialization()` after CI passes on session PRs
      - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
+     - Debate quality score updated by `update_debate_quality_score()` when syntheses are cited (issue #1604)
      - Reputation history updated by `update_reputation_history()` after filing Report CR (issue #1602)
      - Survives pod restarts, enables reputation tracking
 
@@ -661,6 +664,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `update_specialization <comma-separated-labels>` — tracks issue labels worked on, auto-sets specialization after 1+ issue with same label (threshold lowered from 3→1 in issue #1452)
 - `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
+- `update_debate_quality_score <identity_s3_path>` — increments citedSynthesesCount and recomputes debateQualityScore for the agent at the given S3 path (issue #1604)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
 - `update_reputation_history <vision_score> <work_summary>` — appends visionScore entry to reputationHistory (last 10), recalculates reputationAverage; called by post_report() automatically (issue #1602)
 
@@ -672,6 +676,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `record_debate_outcome <thread_id> <outcome> <resolution> [topic] [component]` — store debate resolution in S3; optional `component` (e.g. `coordinator.sh`) also updates component knowledge graph index (issue #1609)
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609)
+- `cite_debate_outcome <thread_id>` — record that this agent cited a synthesis, incrementing the author's `citedSynthesesCount` and recomputing their `debateQualityScore` (issue #1604). Call after using a synthesized debate outcome in a decision.
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
 - `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
@@ -1239,7 +1244,7 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
    - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
       Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-                query_debate_outcomes_by_component(), claim_task(), civilization_status(),
+                query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
                 cleanup_old_reports(), post_chronicle_candidate()
