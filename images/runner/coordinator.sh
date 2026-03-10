@@ -2129,8 +2129,57 @@ Vision score: 9/10 — prioritize implementation."
             echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned up voteRegistry_${topic} after enaction"
 
             echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Consensus enacted for $topic"
+
+        # Issue #1696: Cleanup definitively REJECTED proposals (reject >= threshold).
+        # Once reject_votes reach the threshold, the proposal can never be enacted.
+        # Remove the voteRegistry key to prevent coordinator-state growing indefinitely.
+        elif [ "${reject_votes:-0}" -ge "$VOTE_THRESHOLD" ]; then
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: $topic definitively REJECTED (reject=$reject_votes >= threshold=$VOTE_THRESHOLD). Cleaning up."
+            post_coordinator_thought "GOVERNANCE: Proposal #proposal-${topic} definitively rejected (reject_votes=${reject_votes} >= threshold=${VOTE_THRESHOLD}). voteRegistry key removed. A new proposal can re-open this topic." "verdict"
+            remove_state "voteRegistry_${topic}"
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned up voteRegistry_${topic} after rejection"
         fi
     done <<< "$topics"
+
+    # Issue #1696: Cleanup zombie voteRegistry_* keys — proposals that had voteRegistry entries
+    # created but whose proposal Thought CRs have since been deleted by the 24h cleanup TTL.
+    # These keys accumulate with 0 votes and no chance of being enacted (no active proposal).
+    #
+    # Strategy: for each voteRegistry_* key in coordinator-state, check if a proposal Thought CR
+    # still exists for that topic. If no active proposal Thought CR exists, the entry is a zombie.
+    # Vision-feature/vision-queue topics are excluded (per-issue entries use suffix keys).
+    local all_vote_keys
+    all_vote_keys=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq -r '.data | keys[] | select(startswith("voteRegistry_"))' 2>/dev/null || true)
+
+    if [ -n "$all_vote_keys" ]; then
+        # Get all active proposal topics from current in-cluster Thought CRs
+        local active_proposal_topics
+        active_proposal_topics=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+            -l agentex/thought -o json 2>/dev/null \
+            | jq -r '[.items[] | select(.data.thoughtType == "proposal") | .data.content] | .[] ' \
+            | grep -oE '#proposal-[a-zA-Z0-9_-]+' | sed 's/#proposal-//' | sort -u 2>/dev/null || true)
+
+        local zombie_count=0
+        while IFS= read -r vote_key; do
+            [ -z "$vote_key" ] && continue
+            local vote_topic="${vote_key#voteRegistry_}"
+            # Skip vision-feature/vision-queue keys (per-issue suffix keys handled separately)
+            if [[ "$vote_topic" == *"vision-feature"* || "$vote_topic" == *"vision-queue"* ]]; then
+                continue
+            fi
+            # If no active proposal Thought CR exists for this topic, it's a zombie
+            if ! echo "$active_proposal_topics" | grep -qxF "$vote_topic"; then
+                # Check if it's already enacted — enacted topics were cleaned up on enaction.
+                # A zombie is an entry with no active proposal AND not enacted.
+                if ! echo "$loop_enacted" | grep -qF "enacted_topic_${vote_topic}"; then
+                    remove_state "$vote_key" 2>/dev/null && zombie_count=$((zombie_count + 1)) || true
+                    echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Removed zombie voteRegistry_${vote_topic} (no active proposal Thought CR found)"
+                fi
+            fi
+        done <<< "$all_vote_keys"
+        [ "$zombie_count" -gt 0 ] && echo "[$(date -u +%H:%M:%S)] GOVERNANCE: Cleaned $zombie_count zombie voteRegistry keys (issue #1696)"
+    fi
 }
 
 # record_synthesis_debates_to_s3: Write synthesis debate thoughts to S3 for collective memory
