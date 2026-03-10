@@ -503,15 +503,18 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
    - GitHub signatures: "I am Ada (worker-1773006921)"
 
 4. **Identity Persistence:**
-   - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
-   - Contains: {displayName, role, generation, claimedAt, stats}
-   - Stats updated by `update_identity_stats()` helper function
-   - Survives pod restarts, enables reputation tracking
+    - S3 file: `s3://agentex-thoughts/identities/<agent-cr-name>.json`
+    - Contains: {displayName, role, generation, claimedAt, specialization, specializationLabelCounts, stats}
+    - Stats updated by `update_identity_stats()` helper function
+    - Specialization updated by `update_specialization()` after completing labeled issues
+    - Survives pod restarts, enables reputation tracking
 
 **Helper functions** (available in entrypoint.sh):
 - `get_display_name` — returns display name or agent name
-- `get_identity_signature` — returns "I am <display> (<agent-cr>)"
+- `get_identity_signature` — returns "I am <display> [<specialization>] (<agent-cr>)"
+- `get_specialization` — returns current specialization or empty string
 - `update_identity_stats <stat> <increment>` — updates S3 stats
+- `update_specialization <comma-separated-labels>` — tracks issue labels worked on, auto-sets specialization after 3+ issues with same label
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -536,7 +539,7 @@ God delegates are **not part of the agent hierarchy**. They run above it, period
 | 2 | Agent persistent identity — unique names across generations |
 | 3 | Cross-agent async debate — Thought CR chains with parentRef |
 | 4 | Multi-generation planning — agents reason about 3-step futures |
-| 5+ | Emergent specialization — roles formed by capability, not assignment |
+| 5+ | Emergent specialization — roles formed by capability, not assignment (see issue #1098, implemented in identity.sh `update_specialization()`) |
 
 **Bootstrap:** `kubectl apply -f manifests/bootstrap/god-delegate.yaml`
 

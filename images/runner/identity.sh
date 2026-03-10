@@ -8,6 +8,7 @@ set -euo pipefail
 # Global variables exported for use by entrypoint.sh
 export AGENT_DISPLAY_NAME=""
 export AGENT_IDENTITY_FILE=""
+export AGENT_SPECIALIZATION=""
 
 # S3 bucket for identity persistence
 # Read from S3_BUCKET env var (set by entrypoint.sh from constitution ConfigMap)
@@ -39,8 +40,10 @@ claim_identity() {
     
     if [[ -n "$identity_json" ]]; then
       AGENT_DISPLAY_NAME=$(echo "$identity_json" | jq -r '.displayName // ""')
+      AGENT_SPECIALIZATION=$(echo "$identity_json" | jq -r '.specialization // ""')
       if [[ -n "$AGENT_DISPLAY_NAME" ]]; then
         echo "[identity] Restored identity: $AGENT_DISPLAY_NAME"
+        [[ -n "$AGENT_SPECIALIZATION" ]] && echo "[identity] Specialization: $AGENT_SPECIALIZATION"
         return 0
       fi
     fi
@@ -138,14 +141,37 @@ generate_identity() {
 
 #######################################
 # Save identity to S3 for persistence across restarts
-# Stores: {displayName, role, generation, stats}
+# Stores: {displayName, role, generation, specialization, stats}
 # Globals:
-#   AGENT_NAME, AGENT_DISPLAY_NAME, AGENT_ROLE
+#   AGENT_NAME, AGENT_DISPLAY_NAME, AGENT_ROLE, AGENT_SPECIALIZATION
 #######################################
 save_identity() {
   local generation
   generation=$(timeout 10s kubectl get agent.kro.run "$AGENT_NAME" -n agentex \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
+  
+  # Read existing stats if available, to preserve them
+  local existing_json=""
+  local s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${AGENT_NAME}.json"
+  if aws s3 ls "$s3_path" >/dev/null 2>&1; then
+    existing_json=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "")
+  fi
+  
+  local tasks_completed=0
+  local issues_filed=0
+  local prs_merged=0
+  local thoughts_posted=0
+  local spec_label_counts="{}"
+  
+  if [[ -n "$existing_json" ]]; then
+    tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
+    issues_filed=$(echo "$existing_json" | jq -r '.stats.issuesFiled // 0')
+    prs_merged=$(echo "$existing_json" | jq -r '.stats.prsMerged // 0')
+    thoughts_posted=$(echo "$existing_json" | jq -r '.stats.thoughtsPosted // 0')
+    spec_label_counts=$(echo "$existing_json" | jq -c '.specializationLabelCounts // {}')
+  fi
+  
+  local specialization_value="${AGENT_SPECIALIZATION:-}"
   
   local identity_json
   identity_json=$(cat <<EOF
@@ -155,17 +181,17 @@ save_identity() {
   "role": "$AGENT_ROLE",
   "generation": $generation,
   "claimedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "specialization": "$specialization_value",
+  "specializationLabelCounts": $spec_label_counts,
   "stats": {
-    "tasksCompleted": 0,
-    "issuesFiled": 0,
-    "prsMerged": 0,
-    "thoughtsPosted": 0
+    "tasksCompleted": $tasks_completed,
+    "issuesFiled": $issues_filed,
+    "prsMerged": $prs_merged,
+    "thoughtsPosted": $thoughts_posted
   }
 }
 EOF
 )
-  
-  local s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${AGENT_NAME}.json"
   
   if echo "$identity_json" | aws s3 cp - "$s3_path" 2>/dev/null; then
     echo "[identity] Saved identity to S3: $s3_path"
@@ -222,6 +248,100 @@ update_identity_stats() {
 }
 
 #######################################
+# Update specialization based on issue labels worked on
+# Tracks how many issues with each label the agent has completed.
+# Sets AGENT_SPECIALIZATION to the label with the highest count (>= 3).
+# Arguments:
+#   $1 - comma-separated list of GitHub issue labels (e.g., "bug,coordinator,self-improvement")
+#######################################
+update_specialization() {
+  local issue_labels="${1:-}"
+  
+  if [[ -z "$issue_labels" ]] || [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity for specialization update"
+    return 0
+  fi
+  
+  # Increment count for each label
+  local updated_json="$identity_json"
+  IFS=',' read -ra label_array <<< "$issue_labels"
+  for label in "${label_array[@]}"; do
+    label=$(echo "$label" | tr -d ' ')
+    [[ -z "$label" ]] && continue
+    updated_json=$(echo "$updated_json" | jq \
+      --arg lbl "$label" \
+      '.specializationLabelCounts[$lbl] = (.specializationLabelCounts[$lbl] // 0) + 1')
+  done
+  
+  # Determine dominant specialization (label count >= 3 and highest)
+  local top_label top_count
+  top_label=$(echo "$updated_json" | jq -r '
+    .specializationLabelCounts | to_entries |
+    sort_by(-.value) | .[0] |
+    select(.value >= 3) | .key // ""')
+  top_count=$(echo "$updated_json" | jq -r '
+    .specializationLabelCounts | to_entries |
+    sort_by(-.value) | .[0].value // 0')
+  
+  if [[ -n "$top_label" ]]; then
+    # Map label to specialization name
+    local specialization="$top_label"
+    case "$top_label" in
+      collective-intelligence|debate|governance) specialization="governance-specialist" ;;
+      coordinator|self-improvement) specialization="platform-specialist" ;;
+      security) specialization="security-specialist" ;;
+      identity|memory) specialization="memory-specialist" ;;
+      bug) specialization="debugger" ;;
+      *) specialization="${top_label}-specialist" ;;
+    esac
+    
+    if [[ "$specialization" != "$AGENT_SPECIALIZATION" ]]; then
+      AGENT_SPECIALIZATION="$specialization"
+      echo "[identity] Specialization updated: $AGENT_SPECIALIZATION (top label: $top_label x$top_count)"
+    fi
+    
+    updated_json=$(echo "$updated_json" | jq --arg spec "$specialization" '.specialization = $spec')
+  fi
+  
+  # Save updated identity
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    echo "[identity] Updated specialization tracking: labels=$issue_labels"
+  else
+    echo "[identity] WARNING: Could not save specialization update to S3"
+  fi
+}
+
+#######################################
+# Get current agent specialization
+# Returns: specialization string or empty if none
+#######################################
+get_specialization() {
+  if [[ -n "$AGENT_SPECIALIZATION" ]]; then
+    echo "$AGENT_SPECIALIZATION"
+    return 0
+  fi
+  
+  if [[ -n "$AGENT_IDENTITY_FILE" ]]; then
+    local identity_json
+    identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+    if [[ -n "$identity_json" ]]; then
+      AGENT_SPECIALIZATION=$(echo "$identity_json" | jq -r '.specialization // ""')
+      echo "$AGENT_SPECIALIZATION"
+      return 0
+    fi
+  fi
+  echo ""
+}
+
+#######################################
 # Get display name with fallback
 # Returns the display name or agent name if not set
 #######################################
@@ -235,16 +355,27 @@ get_display_name() {
 
 #######################################
 # Get identity signature for GitHub comments
-# Format: "I am Ada (worker-1773006921)"
+# Format: "I am Ada (worker-1773006921)" or "I am Ada [coordinator-specialist] (worker-123)"
 #######################################
 get_identity_signature() {
   local display_name
   display_name=$(get_display_name)
   
+  local spec=""
+  spec=$(get_specialization)
+  
   if [[ "$display_name" != "$AGENT_NAME" ]]; then
-    echo "I am $display_name ($AGENT_NAME)"
+    if [[ -n "$spec" ]]; then
+      echo "I am $display_name [$spec] ($AGENT_NAME)"
+    else
+      echo "I am $display_name ($AGENT_NAME)"
+    fi
   else
-    echo "I am $AGENT_NAME"
+    if [[ -n "$spec" ]]; then
+      echo "I am $AGENT_NAME [$spec]"
+    else
+      echo "I am $AGENT_NAME"
+    fi
   fi
 }
 
@@ -270,6 +401,9 @@ init_identity() {
   echo "[identity] Identity initialization complete"
   echo "[identity] Display name: $(get_display_name)"
   echo "[identity] Signature: $(get_identity_signature)"
+  local spec
+  spec=$(get_specialization)
+  [[ -n "$spec" ]] && echo "[identity] Specialization: $spec"
 }
 
 # Auto-initialize if sourced (not if this file is run directly for testing)

@@ -1145,6 +1145,8 @@ claim_task() {
 # Returns: sets COORDINATOR_ISSUE to the claimed issue number, or 0 if none available
 # This is the mechanism that makes planners coordinate instead of acting independently.
 # Uses claim_task() for atomic assignment to prevent duplicate work (issue #859).
+# Supports specialization-aware routing (issue #1098): if agent has a specialization,
+# prefer issues whose labels match. Falls back to queue order if no match.
 request_coordinator_task() {
   local max_retries=3
   local retry=0
@@ -1160,9 +1162,41 @@ request_coordinator_task() {
       return 0
     fi
 
-    # Pick the first issue in the queue
-    local claimed_issue
-    claimed_issue=$(echo "$queue" | tr ',' '\n' | head -1 | tr -d ' ')
+    # Specialization-aware selection (issue #1098)
+    # If this agent has a specialization, try to find a matching issue in the queue first.
+    local claimed_issue=""
+    local my_specialization="${AGENT_SPECIALIZATION:-}"
+    
+    if [ -n "$my_specialization" ]; then
+      # Map specialization back to label keywords for matching
+      local spec_label=""
+      case "$my_specialization" in
+        governance-specialist) spec_label="governance\|debate\|collective-intelligence" ;;
+        platform-specialist) spec_label="coordinator\|self-improvement" ;;
+        security-specialist) spec_label="security" ;;
+        memory-specialist) spec_label="identity\|memory" ;;
+        debugger) spec_label="bug" ;;
+        *) spec_label=$(echo "$my_specialization" | sed 's/-specialist//') ;;
+      esac
+      
+      # Scan queue for a matching issue
+      for candidate in $(echo "$queue" | tr ',' ' '); do
+        [ -z "$candidate" ] && continue
+        local issue_labels
+        issue_labels=$(gh issue view "$candidate" --repo "$REPO" \
+          --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        if echo "$issue_labels" | grep -qi "$spec_label"; then
+          claimed_issue="$candidate"
+          log "Coordinator: specialization-matched issue #$claimed_issue (spec=$my_specialization, labels=$issue_labels)"
+          break
+        fi
+      done
+    fi
+    
+    # Fall back to first issue in queue if no specialization match
+    if [ -z "$claimed_issue" ]; then
+      claimed_issue=$(echo "$queue" | tr ',' '\n' | head -1 | tr -d ' ')
+    fi
 
     if [ -z "$claimed_issue" ] || [ "$claimed_issue" = "0" ]; then
       COORDINATOR_ISSUE=0
@@ -2946,6 +2980,17 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   fi
   log "All PRs from this session passed CI."
   push_metric "CIPassOnExit" 1
+  
+  # Update specialization based on issue labels worked on this session (issue #1098)
+  # Fetch labels from the GitHub issue claimed/worked on this session
+  if type update_specialization &>/dev/null && [ -n "${COORDINATOR_ISSUE:-}" ] && [ "$COORDINATOR_ISSUE" != "0" ]; then
+    WORKED_LABELS=$(gh issue view "$COORDINATOR_ISSUE" --repo "$REPO" \
+      --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+    if [ -n "$WORKED_LABELS" ]; then
+      update_specialization "$WORKED_LABELS" 2>/dev/null || true
+      log "Specialization tracking updated: labels=$WORKED_LABELS"
+    fi
+  fi
 fi
 
 # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
