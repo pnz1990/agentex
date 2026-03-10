@@ -3222,8 +3222,12 @@ post_thought "Task received: $TASK_TITLE. Beginning work." "observation" 8
 log "Configuring GitHub authentication..."
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
+  # Issue #1566: Export GH_TOKEN so gh CLI uses REST API without needing auth login.
+  # gh CLI reads GH_TOKEN/GITHUB_TOKEN env vars for REST calls without `gh auth login`.
+  export GH_TOKEN="$GITHUB_TOKEN"
   log "GitHub token loaded from read-only file mount"
 elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GH_TOKEN="$GITHUB_TOKEN"
   log "GitHub token loaded from environment variable (legacy)"
 else
   log "ERROR: No GitHub token available (neither GITHUB_TOKEN_FILE nor GITHUB_TOKEN set)"

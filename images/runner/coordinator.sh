@@ -162,17 +162,21 @@ unset _early_limit _early_active _early_slots
 
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
+  # Issue #1566: Export GH_TOKEN so gh CLI uses REST API for all operations.
+  # gh CLI reads GH_TOKEN/GITHUB_TOKEN env vars for REST API calls without
+  # needing `gh auth login --with-token` (which uses GraphQL and hits rate limits).
+  export GH_TOKEN="$GITHUB_TOKEN"
   echo "GitHub token loaded from read-only file mount"
-  # Authenticate gh CLI with the token (issue #coordinator-gh-auth)
-  # gh auth status checks fail even with GITHUB_TOKEN exported - need explicit login
+  # Attempt gh auth login as best-effort (improves some gh features like notifications).
+  # GH_TOKEN export above is sufficient for gh issue/pr/api commands even if this fails.
   if command -v gh &>/dev/null; then
-    gh_auth_with_retry "$GITHUB_TOKEN" || true
+    gh_auth_with_retry "$GITHUB_TOKEN" || echo "gh auth login failed (GH_TOKEN env var still available for REST calls)"
   fi
 elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GH_TOKEN="$GITHUB_TOKEN"
   echo "GitHub token loaded from environment variable (legacy)"
-  # Authenticate gh CLI with the token
   if command -v gh &>/dev/null; then
-    gh_auth_with_retry "$GITHUB_TOKEN" || true
+    gh_auth_with_retry "$GITHUB_TOKEN" || echo "gh auth login failed (GH_TOKEN env var still available for REST calls)"
   fi
 else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
@@ -2827,13 +2831,14 @@ while true; do
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime
     # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
 
-    # Every 20 iterations (~10 min): verify gh CLI is still authenticated (issue #1447)
-    # GitHub GraphQL rate limits can expire and cause auth failures mid-run.
-    # Periodic re-auth ensures the coordinator recovers without a pod restart.
+    # Every 20 iterations (~10 min): verify gh CLI can still make REST API calls (issue #1447, #1566)
+    # Issue #1566: Use `gh api /user` (REST) instead of `gh auth status` (GraphQL) to avoid
+    # rate limit failures. Re-auth only if REST API calls fail.
     if [ $((iteration % 20)) -eq 0 ]; then
-        if ! gh auth status &>/dev/null 2>&1; then
-            echo "[$(date -u +%H:%M:%S)] gh CLI auth check FAILED — attempting re-authentication (issue #1447)"
+        if ! gh api /user >/dev/null 2>&1; then
+            echo "[$(date -u +%H:%M:%S)] gh CLI REST API check FAILED — attempting re-authentication (issue #1447)"
             if [ -n "${GITHUB_TOKEN:-}" ]; then
+                export GH_TOKEN="$GITHUB_TOKEN"
                 gh_auth_with_retry "$GITHUB_TOKEN" || \
                     echo "[$(date -u +%H:%M:%S)] WARNING: gh re-authentication failed — gh commands may not work until next retry"
             fi
