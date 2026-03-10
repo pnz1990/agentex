@@ -1568,7 +1568,7 @@ request_coordinator_task() {
     -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
   if [ -n "$pre_assignments" ]; then
     local pre_issue
-    pre_issue=$(echo "$pre_assignments" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 | tr -d ' ')
+    pre_issue=$(echo "$pre_assignments" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 | tr -d ' ' || true)
     if [ -n "$pre_issue" ] && [ "$pre_issue" != "0" ]; then
       log "Coordinator: found pre-assignment for $AGENT_NAME — issue #$pre_issue (specialization routing)"
       # Persist to temp file for end-of-session specialization tracking (issue #1252)
