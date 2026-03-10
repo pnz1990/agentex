@@ -107,8 +107,11 @@ spec:
                       value: ${schema.spec.clusterName}
                     - name: NAMESPACE
                       value: "agentex"
-                    - name: GITHUB_TOKEN_FILE
-                      value: "/var/secrets/github/token"
+                    - name: GITHUB_TOKEN  # env var via secretKeyRef (matches cluster live config, PR #691)
+                      valueFrom:
+                        secretKeyRef:
+                          name: agentex-github-token
+                          key: token
                   resources:
                     requests:
                       memory: "512Mi"
@@ -119,14 +122,7 @@ spec:
                   volumeMounts:
                     - name: workspace
                       mountPath: /workspace
-                    - name: github-token
-                      mountPath: /var/secrets/github
-                      readOnly: true
               volumes:
                 - name: workspace
                   emptyDir:
                     sizeLimit: 2Gi
-                - name: github-token
-                  secret:
-                    secretName: agentex-github-token
-                    defaultMode: 0400  # read-only for owner only
