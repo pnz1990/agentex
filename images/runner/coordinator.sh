@@ -596,32 +596,47 @@ sync_constitution_to_git() {
     local branch_name="governance-enacted-${topic}-$(date +%s)"
     git checkout -b "$branch_name" 2>/dev/null || return 1
     
-    # Read current constitution ConfigMap from cluster
-    local current_cm
-    current_cm=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" -o json 2>/dev/null)
-    if [ -z "$current_cm" ]; then
-        echo "[$(date -u +%H:%M:%S)] ERROR: Could not read agentex-constitution ConfigMap"
+    # Verify cluster is reachable (connectivity check before git operations)
+    if ! kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" -o name 2>/dev/null | grep -q constitution; then
+        echo "[$(date -u +%H:%M:%S)] ERROR: Could not verify agentex-constitution ConfigMap"
         return 1
     fi
     
-    # Update constitution.yaml data section to match cluster ConfigMap
-    # Strategy: Extract .data from ConfigMap JSON and rebuild YAML file
+    # Update constitution.yaml — surgically update only the changed keys (issue #1317)
+    # Strategy: parse kv_pairs to find which keys changed, then use sed to update ONLY
+    # those keys in the existing file. This preserves all comments, annotations, and
+    # documentation. Previously used head -16 + full data rebuild which DESTROYED all docs.
     local constitution_file="manifests/system/constitution.yaml"
     
-    # Preserve metadata section (lines 1-16) and rebuild data section from ConfigMap
-    head -16 "$constitution_file" > "${constitution_file}.new"
-    echo "data:" >> "${constitution_file}.new"
-    
-    # Extract each key=value from ConfigMap .data and format as YAML
-    # Issue #1260: Add 2>/dev/null to suppress jq parse errors when current_cm is empty/invalid
-    echo "$current_cm" | jq -r '.data | to_entries[] | 
-        if (.value | contains("\n")) then
-            "  \(.key): |\n    \(.value | gsub("\n"; "\n    "))"
+    # Parse kv_pairs (format: "key1=value1 key2=value2") and update each changed key.
+    # Skip meta-keys that are not real constitution fields (reason=, proposalRef=).
+    local meta_keys="reason proposalRef"
+    local updated_any=false
+    while IFS= read -r pair || [ -n "$pair" ]; do
+        [ -z "$pair" ] && continue
+        [[ "$pair" != *"="* ]] && continue
+        local key="${pair%%=*}"
+        local value="${pair#*=}"
+        # Skip meta-keys
+        local is_meta=false
+        for mk in $meta_keys; do
+            [ "$key" = "$mk" ] && is_meta=true && break
+        done
+        "$is_meta" && continue
+        # Surgically update the key in constitution.yaml using sed
+        # Pattern: "  key: ..." (exactly 2-space indent, matches data section keys)
+        # The sed replacement preserves the line format with quoted value
+        if grep -q "^  ${key}: " "$constitution_file" 2>/dev/null; then
+            # Escape any forward slashes in value for sed
+            local escaped_value
+            escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
+            sed -i "s/^  ${key}: .*$/  ${key}: \"${escaped_value}\"/" "$constitution_file"
+            echo "[$(date -u +%H:%M:%S)] ✓ Updated constitution.yaml: ${key}=${value}"
+            updated_any=true
         else
-            "  \(.key): \"\(.value)\""
-        end' 2>/dev/null >> "${constitution_file}.new"
-    
-    mv "${constitution_file}.new" "$constitution_file"
+            echo "[$(date -u +%H:%M:%S)] WARNING: key '${key}' not found in constitution.yaml — skipping"
+        fi
+    done <<< "$(echo "$kv_pairs" | tr ' ' '\n')"
     
     # Check if there are changes
     if ! git diff --quiet "$constitution_file"; then
