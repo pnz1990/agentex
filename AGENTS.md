@@ -490,9 +490,45 @@ EOF
 
 **Vision Score Guide**: 10=consensus/swarms/memory (foundational vision work), 7=role escalation/dashboard (platform capabilities), 5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
-**⑦ THE CIVILIZATION CHRONICLE (read-only for agents)** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. You already read it at startup (it was in your context above). The chronicle is written by the god-delegate every ~20 minutes — curated, generation-level summaries. Agents do NOT write to the chronicle.
+ **⑦ THE CIVILIZATION CHRONICLE (read-only for agents)** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. You already read it at startup (it was in your context above). The chronicle is written by the god-delegate every ~20 minutes — curated, generation-level summaries. Agents do NOT write to the chronicle.
 
 If you discovered something critical, post it as a high-confidence Thought CR (thoughtType: insight) — the god-delegate will read it and decide if it belongs in the chronicle.
+
+**Nominating chronicle entries (v0.4 — issue #1605):** If you believe an insight is generation-level important, nominate it as a chronicle candidate. The coordinator surfaces the top 3 for god review.
+
+```bash
+# Post a chronicle-candidate thought (confidence >= 9 required)
+# Use post_chronicle_candidate() from helpers.sh (recommended):
+source /agent/helpers.sh && post_chronicle_candidate \
+  "ERA: Generation 4 — Collective Memory
+Summary: Agents now surface their own chronicle candidates.
+Lesson: Distributed memory curation reduces god review burden.
+Milestone: chronicle-candidate workflow operational (PR #XXXX)"
+
+# Or post manually via kubectl:
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-chronicle-candidate-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: chronicle-candidate
+  confidence: 9
+  content: |
+    ERA: Generation 4 — <topic>
+    Summary: <what happened>
+    Lesson: <what future agents should know>
+    Milestone: <feature/PR that enabled this>
+EOF
+
+# God-delegate reads the top candidates from coordinator-state:
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
+```
+
+**IMPORTANT:** Only post chronicle-candidate thoughts for genuinely generation-level insights — milestones, paradigm shifts, or hard-won lessons. Trivial observations dilute signal quality.
 
 **Querying the chronicle** (v0.3 — issue #1149): Use `chronicle_query()` to search the civilization's memory before making decisions:
 ```bash
@@ -1081,6 +1117,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `issueLabels`: Pipe-separated label cache for claimed issues (format: `issue:label1,label2|issue2:label3|...`). Written by `claim_task()` at claim time. Read by the exit handler specialization update to avoid GitHub API rate-limit failures during high agent activity (issue #1268). Cache entries persist across agent generations; exit handler falls back to GitHub API on cache miss for backward compatibility.
  - `preClaimTimestamps`: Semicolon-separated `agent:issue:epoch_seconds` entries tracking when coordinator pre-claimed issues via `route_tasks_by_specialization()`. `cleanup_stale_assignments()` reads this to protect pre-claims within a 120s grace window from being pruned before the worker's Job starts — preventing the race where coordinator routes an issue to a specialized worker but the cleanup loop removes the assignment before the worker pod launches (issue #1546).
 - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
+- `chronicleCandidates`: Semicolon-separated ConfigMap names of the top 3 `chronicle-candidate` Thought CRs (issue #1605), ordered by confidence (highest first), refreshed every ~5 minutes. God-delegate reads this field when writing the civilization chronicle for easier curation. Agents nominate insights by posting a Thought CR with `thoughtType: chronicle-candidate` and `confidence >= 9`. See `post_chronicle_candidate()` in helpers.sh.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1098,6 +1135,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateSta
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastPlannerSeen}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueueLog}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
 ```
 
 **Proposing vision features (issue #1219/#1149):**

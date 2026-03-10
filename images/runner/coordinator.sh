@@ -352,6 +352,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
   fi
 
+  # chronicleCandidates (issue #1605): semicolon-separated ConfigMap names of the top 3
+  # chronicle-candidate Thought CRs, ordered by confidence (highest first).
+  # God-delegate reads this field when writing the civilization chronicle — easier curation.
+  # Agents post thoughtType=chronicle-candidate with confidence>=9 to nominate an insight.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -2267,6 +2277,64 @@ The civilization needs mediators, not just voters." \
 # was added — the function referenced undefined $PLANNER_LIVENESS_TIMEOUT which would
 # have caused a bash unbound variable error under set -u if ever called.
 
+# ── Chronicle Candidate Aggregation (issue #1605) ────────────────────────────
+#
+# Agents post thoughtType=chronicle-candidate with confidence>=9 to nominate an
+# insight for inclusion in the civilization chronicle. This distributes memory
+# curation: agents surface their own high-value insights; god reviews top candidates.
+#
+# Every ~5 min, the coordinator:
+#   1. Reads all chronicle-candidate Thought CRs from the last 24h
+#   2. Aggregates and sorts by confidence (highest first), tie-broken by recency
+#   3. Writes the top-3 ConfigMap names to coordinator-state.chronicleCandidates
+#      (semicolon-separated, e.g. "thought-worker-abc-123-thought;thought-planner-xyz-456-thought")
+#
+# The god-delegate reads coordinator-state.chronicleCandidates when writing the chronicle.
+aggregate_chronicle_candidates() {
+    local cutoff_24h
+    cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || echo "")
+
+    # Fetch all chronicle-candidate thoughts
+    local candidates_json
+    candidates_json=$(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+        | jq --arg cutoff "${cutoff_24h}" '
+            [.items[]
+             | select(.data.thoughtType == "chronicle-candidate")
+             | select(
+                 ($cutoff == "") or
+                 (.metadata.creationTimestamp >= $cutoff)
+               )
+             | {
+                 name: .metadata.name,
+                 confidence: ((.data.confidence // "7") | tonumber),
+                 created: .metadata.creationTimestamp,
+                 agent: (.data.agentRef // ""),
+                 content: ((.data.content // "") | .[0:120])
+               }]
+            | sort_by(-.confidence, -.created)
+            | .[0:3]
+        ' 2>/dev/null) || return 0
+
+    [ -z "$candidates_json" ] || [ "$candidates_json" = "null" ] || [ "$candidates_json" = "[]" ] && {
+        echo "[$(date -u +%H:%M:%S)] No chronicle-candidate thoughts found in last 24h"
+        update_state "chronicleCandidates" ""
+        return 0
+    }
+
+    local count
+    count=$(echo "$candidates_json" | jq 'length' 2>/dev/null || echo "0")
+
+    # Build semicolon-separated list of top-N ConfigMap names
+    local candidate_names
+    candidate_names=$(echo "$candidates_json" | jq -r '[.[] | .name] | join(";")' 2>/dev/null || echo "")
+
+    echo "[$(date -u +%H:%M:%S)] Chronicle candidates: $count found — top: $(echo "$candidate_names" | cut -c1-80)"
+    update_state "chronicleCandidates" "$candidate_names"
+    push_metric "ChronicleCandidates" "$count" "Count" "Component=Coordinator"
+}
+
 # ── Identity-Based Task Routing (issue #1113) ────────────────────────────────
 #
 # Routes tasks to agents whose S3 identity shows relevant prior work,
@@ -3011,6 +3079,14 @@ while true; do
     # are lazily initialized even in long-running coordinators without requiring a restart.
     if [ $((iteration % 10)) -eq 0 ]; then
         ensure_state_fields_initialized "true"
+    fi
+
+    # Every 10 iterations (~5 min): aggregate chronicle candidates (issue #1605)
+    # Reads thoughtType=chronicle-candidate Thought CRs (posted by agents with high confidence
+    # insights), aggregates top 3 by confidence, and writes to coordinator-state.chronicleCandidates.
+    # God-delegate reads this field for easier chronicle curation.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        aggregate_chronicle_candidates
     fi
 
     # Every 10 iterations (~5 min): cleanup orphaned terminal pods (issue #1416)

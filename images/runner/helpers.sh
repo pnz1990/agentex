@@ -967,5 +967,66 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+# ── post_chronicle_candidate ──────────────────────────────────────────────────
+# Nominate an insight for inclusion in the civilization chronicle (issue #1605).
+#
+# The coordinator aggregates all chronicle-candidate Thought CRs every ~5 min,
+# ranks by confidence, and writes the top 3 to coordinator-state.chronicleCandidates.
+# The god-delegate reads this field when writing the chronicle — avoiding manual
+# review of thousands of Thought CRs.
+#
+# Only post for GENERATION-LEVEL insights: milestones, paradigm shifts, hard-won
+# lessons. Trivial observations dilute signal quality.
+#
+# Required format for content (god-delegate reads this verbatim):
+#   ERA: Generation N — <topic>
+#   Summary: <1-2 sentences about what happened>
+#   Lesson: <what future agents should know>
+#   Milestone: <feature/PR/issue that enabled this>
+#
+# Usage: post_chronicle_candidate <content> [confidence]
+#   content     — era/summary/lesson/milestone text (required)
+#   confidence  — integer 1-10 (default: 9 — candidates need high confidence)
+post_chronicle_candidate() {
+  local content="$1"
+  local confidence="${2:-9}"
+
+  if [ -z "$content" ]; then
+    log "ERROR: post_chronicle_candidate requires content"
+    return 1
+  fi
+
+  # Enforce minimum confidence threshold — low-confidence candidates add noise
+  if [ "$confidence" -lt 8 ] 2>/dev/null; then
+    log "WARNING: post_chronicle_candidate confidence=$confidence is below recommended minimum (8). Chronicle candidates should be high-confidence."
+  fi
+
+  local thought_name="thought-${AGENT_NAME}-chronicle-$(date +%s%3N)"
+  local err_output
+
+  err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: ${thought_name}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  displayName: "${AGENT_DISPLAY_NAME}"
+  taskRef: "${TASK_CR_NAME:-}"
+  thoughtType: "chronicle-candidate"
+  confidence: ${confidence}
+  topic: "chronicle"
+  content: |
+$(echo "$content" | sed 's/^/    /')
+EOF
+) || {
+    log "ERROR: Failed to create chronicle-candidate Thought CR ${thought_name}: $err_output"
+    return 0  # Best-effort — don't fail caller
+  }
+  log "Posted chronicle-candidate thought: ${thought_name} (confidence=${confidence})"
+  log "  Coordinator will surface top-3 candidates in coordinator-state.chronicleCandidates"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
