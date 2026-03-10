@@ -1702,5 +1702,189 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── WORKSPACE PERSISTENCE FUNCTIONS (issue #1833) ────────────────────────────
+# S3-backed workspace snapshots for cross-session task continuity.
+# Enables workers to survive context refreshes without losing uncommitted work.
+#
+# Usage:
+#   source /agent/helpers.sh
+#   save_workspace_snapshot 1234 /workspace/repo
+#   restore_workspace_snapshot 1234 /workspace/repo
+#   write_context_handoff 1234 "in_progress" "Implemented X" "Push branch and open PR"
+#   cleanup_workspace_snapshot 1234
+
+# save_workspace_snapshot <issue_number> [workspace_dir]
+save_workspace_snapshot() {
+  local issue_number="${1:-0}"
+  local workspace_dir="${2:-/workspace/repo}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    log "save_workspace_snapshot: no issue number — skipping"
+    return 0
+  fi
+
+  if [ ! -d "$workspace_dir/.git" ]; then
+    log "save_workspace_snapshot: $workspace_dir is not a git repo — skipping"
+    return 0
+  fi
+
+  local s3_prefix="s3://${s3_bucket}/workspaces/issue-${issue_number}"
+  local snapshot_path="/tmp/workspace-snapshot-${issue_number}.tar.gz"
+
+  local branch
+  branch=$(git -C "$workspace_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  local uncommitted_files
+  uncommitted_files=$(git -C "$workspace_dir" status --porcelain 2>/dev/null | awk '{print $2}' | tr '\n' ',' | sed 's/,$//')
+
+  if ! tar czf "$snapshot_path" \
+    --exclude='.git/objects/pack' \
+    --exclude='*.log' \
+    -C "$(dirname "$workspace_dir")" \
+    "$(basename "$workspace_dir")" 2>/dev/null; then
+    log "WARNING: save_workspace_snapshot: tar failed (non-fatal)"
+    return 0
+  fi
+
+  if ! aws s3 cp "$snapshot_path" "${s3_prefix}/snapshot.tar.gz" \
+    --content-type "application/gzip" >/dev/null 2>&1; then
+    log "WARNING: save_workspace_snapshot: S3 upload failed (non-fatal)"
+    rm -f "$snapshot_path"
+    return 0
+  fi
+
+  rm -f "$snapshot_path"
+  log "Workspace snapshot saved: issue=#${issue_number} branch=$branch files=$uncommitted_files"
+}
+
+# restore_workspace_snapshot <issue_number> [workspace_dir]
+# Returns 0 if restored, 1 if no snapshot found.
+restore_workspace_snapshot() {
+  local issue_number="${1:-0}"
+  local workspace_dir="${2:-/workspace/repo}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 1
+  fi
+
+  local s3_prefix="s3://${s3_bucket}/workspaces/issue-${issue_number}"
+  local snapshot_path="/tmp/workspace-restore-${issue_number}.tar.gz"
+
+  if ! aws s3 ls "${s3_prefix}/snapshot.tar.gz" >/dev/null 2>&1; then
+    log "restore_workspace_snapshot: no snapshot for issue #${issue_number}"
+    return 1
+  fi
+
+  if ! aws s3 cp "${s3_prefix}/snapshot.tar.gz" "$snapshot_path" >/dev/null 2>&1; then
+    log "WARNING: restore_workspace_snapshot: download failed (non-fatal)"
+    return 1
+  fi
+
+  local workspace_parent
+  workspace_parent="$(dirname "$workspace_dir")"
+
+  mv "$workspace_dir" "${workspace_dir}.fresh-clone" 2>/dev/null || true
+  if ! tar xzf "$snapshot_path" -C "$workspace_parent" 2>/dev/null; then
+    log "WARNING: restore_workspace_snapshot: extract failed — reverting to fresh clone"
+    mv "${workspace_dir}.fresh-clone" "$workspace_dir" 2>/dev/null || true
+    rm -f "$snapshot_path"
+    return 1
+  fi
+
+  rm -rf "${workspace_dir}.fresh-clone" 2>/dev/null || true
+  rm -f "$snapshot_path"
+
+  local branch
+  branch=$(git -C "$workspace_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  log "Workspace snapshot restored: issue=#${issue_number} branch=$branch"
+
+  # Load handoff JSON if available
+  if aws s3 ls "${s3_prefix}/handoff.json" >/dev/null 2>&1; then
+    WORKSPACE_HANDOFF=$(aws s3 cp "${s3_prefix}/handoff.json" - 2>/dev/null || echo "")
+    export WORKSPACE_HANDOFF
+    log "Workspace handoff loaded: $(echo "$WORKSPACE_HANDOFF" | jq -r '.lastAction // "unknown"' 2>/dev/null)"
+  fi
+
+  return 0
+}
+
+# write_context_handoff <issue_number> <status> <last_action> <next_step> [branch]
+write_context_handoff() {
+  local issue_number="${1:-0}"
+  local status="${2:-in_progress}"
+  local last_action="${3:-}"
+  local next_step="${4:-}"
+  local branch="${5:-}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local workspace_dir="/workspace/repo"
+  if [ -z "$branch" ] && [ -d "$workspace_dir/.git" ]; then
+    branch=$(git -C "$workspace_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  fi
+
+  local uncommitted_files=""
+  if [ -d "$workspace_dir/.git" ]; then
+    uncommitted_files=$(git -C "$workspace_dir" status --porcelain 2>/dev/null | awk '{print $2}' | tr '\n' ',' | sed 's/,$//')
+  fi
+
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local safe_last_action
+  safe_last_action=$(echo "$last_action" | sed 's/["\\/]/\\&/g' | tr -d '\n')
+  local safe_next_step
+  safe_next_step=$(echo "$next_step" | sed 's/["\\/]/\\&/g' | tr -d '\n')
+
+  local handoff_json
+  handoff_json=$(printf '{
+  "issue": %s,
+  "branch": "%s",
+  "status": "%s",
+  "lastAction": "%s",
+  "uncommittedFiles": "%s",
+  "nextStep": "%s",
+  "workspace": "workspace-issue-%s",
+  "savedBy": "%s",
+  "savedAt": "%s"
+}' \
+    "$issue_number" \
+    "${branch:-main}" \
+    "${status:-in_progress}" \
+    "${safe_last_action}" \
+    "${uncommitted_files}" \
+    "${safe_next_step}" \
+    "$issue_number" \
+    "${AGENT_NAME:-unknown}" \
+    "$timestamp")
+
+  local s3_path="s3://${s3_bucket}/workspaces/issue-${issue_number}/handoff.json"
+  if echo "$handoff_json" | aws s3 cp - "$s3_path" --content-type "application/json" >/dev/null 2>&1; then
+    log "Context handoff written: issue=#${issue_number} status=$status"
+  else
+    log "WARNING: write_context_handoff: S3 write failed (non-fatal)"
+  fi
+}
+
+# cleanup_workspace_snapshot <issue_number>
+# Removes S3 snapshot when task is done (called by release_coordinator_task).
+cleanup_workspace_snapshot() {
+  local issue_number="${1:-0}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  if [ "$issue_number" = "0" ] || [ -z "$issue_number" ]; then
+    return 0
+  fi
+
+  local s3_prefix="s3://${s3_bucket}/workspaces/issue-${issue_number}"
+  aws s3 rm "${s3_prefix}/snapshot.tar.gz" >/dev/null 2>&1 || true
+  aws s3 rm "${s3_prefix}/handoff.json" >/dev/null 2>&1 || true
+  log "Workspace snapshot cleaned up: issue #${issue_number}"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, save_workspace_snapshot, restore_workspace_snapshot, write_context_handoff, cleanup_workspace_snapshot available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
