@@ -754,6 +754,8 @@ plan_for_n_plus_2() {
 # Constitution-mandated security self-awareness. Planners run this check each
 # generation to detect and file issues for open security vulnerabilities.
 # Deduplicates: only creates issue if no existing open security issue found.
+# After filing, atomically claims the issue via claim_task() to prevent duplicate
+# PRs from concurrent agents (fix for issue #997).
 check_security_alerts() {
   log "Checking for open code scanning alerts (issue #652)..."
   
@@ -777,12 +779,16 @@ check_security_alerts() {
     return 0
   fi
   
-  # Check if there's already an open security issue to avoid duplicate filings
+  # Check if there's already an open security issue to avoid duplicate filings (issue #997).
+  # Use label-based search (not title-match) so dedup works even when alert count changes.
   local existing_issue
   existing_issue=$(gh issue list --repo "$REPO" --label security --state open --limit 1 --json number -q '.[0].number' 2>/dev/null || echo "")
   
   if [ -n "$existing_issue" ]; then
     log "Security issue already exists: #$existing_issue (not filing duplicate)"
+    # Attempt to claim the existing issue so this planner does not spawn duplicate workers.
+    # If already claimed by another agent, claim_task returns 1 — that is fine, just skip.
+    claim_task "$existing_issue" 2>/dev/null || true
     return 0
   fi
   
@@ -809,9 +815,20 @@ gh api /repos/${REPO}/code-scanning/alerts --paginate | jq '.[] | select(.state=
 Agents should prioritize high-severity alerts and create PRs to remediate them." 2>&1)
   
   if [ $? -eq 0 ]; then
-    local issue_num=$(echo "$new_issue" | grep -oP 'https://github.com/[^/]+/[^/]+/issues/\K[0-9]+' || echo "")
+    local issue_num
+    issue_num=$(echo "$new_issue" | grep -oP 'https://github.com/[^/]+/[^/]+/issues/\K[0-9]+' || echo "")
     if [ -n "$issue_num" ]; then
       log "✓ Filed security issue #$issue_num for $alert_count alerts"
+      # Atomically claim the newly filed issue (issue #997).
+      # This registers ownership in coordinator-state.activeAssignments so concurrent
+      # planners that also check for security issues see it is already claimed and skip.
+      # Without this claim, multiple planners can file separate issues concurrently
+      # (TOCTOU: each sees no existing issue, each files one, each opens a competing PR).
+      if claim_task "$issue_num" 2>/dev/null; then
+        log "✓ Claimed security issue #$issue_num to prevent duplicate PRs"
+      else
+        log "Security issue #$issue_num filed but could not be claimed (already taken — expected if concurrent agent also filed)"
+      fi
       post_thought "Filed security issue #$issue_num for $alert_count open code scanning alerts (constitution-mandated)" "observation" 8 "security"
     else
       log "✓ Filed security issue (number not parsed from output)"
@@ -2197,6 +2214,9 @@ WORKER RULES:
 - COORDINATOR INTEGRATION (issue #938): Check COORDINATOR_CONTEXT above for your assigned issue.
   If coordinator assigned you an issue, work on that. If queue is empty, pick from GitHub but
   ALWAYS call claim_task <issue_number> BEFORE starting work to prevent duplicate PRs.
+- SECURITY ISSUES (issue #997): Security issues (label=security) are claimed when filed.
+  ALWAYS use claim_task before working on any security issue. If claim fails, skip it —
+  another agent is already implementing it. Never open a security PR without a successful claim.
 - Do NOT read entrypoint.sh, RGDs, or AGENTS.md for step ② improvements
   (that is the planner's job — workers doing architecture pollutes the thought stream)
 - Do NOT post insight or planning thoughts (blockers ONLY)
@@ -2219,6 +2239,9 @@ PLANNER RULES:
 - CRITICAL (issue #956): Before implementing ANY issue (including step ② improvements),
   ALWAYS call claim_task <issue_number> to atomically claim it. If claim fails, the issue
   is already being worked on — pick a different one. This prevents duplicate PRs.
+- SECURITY ISSUES (issue #997): When check_security_alerts() runs, it auto-claims the filed
+  issue. Do NOT spawn workers for security issues unless you have a successful claim_task.
+  If check_security_alerts already claimed it for you, you may spawn ONE worker for it.
 - If the backlog contains structural/architectural issues (#867, kro bugs, RGD redesigns),
   spawn an ARCHITECT not a worker: spawn_task_and_agent ... 'architect' ...
 - Post planning thoughts and N+2 coordination for your successors
