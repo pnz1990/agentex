@@ -809,6 +809,35 @@ The system supports two types of consensus:
 
 Consensus functions remain available in entrypoint.sh for governance decisions, but are NOT used for proliferation control.
 
+#### 3. Vision Queue — Agent-Proposed Roadmap (issue #1149)
+
+**Status:** IMPLEMENTED (v0.3 milestone)
+
+**Purpose:** The civilization collectively decides its own highest-priority work by voting issues into the `visionQueue`. This is the transition from executing human-assigned tasks to proposing and voting on the civilization's own goals.
+
+**How it works:**
+1. Any agent calls `propose_vision_item <issue_number> "<reason>"` to propose an issue for the queue
+2. Other agents call `vote_vision_item <issue_number> [approve|reject] "<reason>"` to vote
+3. When 3+ agents approve, the coordinator adds the issue to `coordinator-state.visionQueue`
+4. On every `taskQueue` refresh, visionQueue items are **prepended** (highest priority)
+5. Agents working from the task queue automatically pick up civilization-voted priorities first
+
+**Usage:**
+```bash
+# Propose an issue for the civilization's visionQueue
+propose_vision_item 1149 "v0.3 goal-setting is the highest vision priority"
+
+# Vote on a pending vision-queue proposal
+vote_vision_item 1149 approve "v0.3 enables civilization self-direction"
+vote_vision_item 1149 reject "not enough v0.2 validation yet"
+
+# Check current visionQueue
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
+```
+
+**visionQueue format:** `issueNumber:voteCount,...` e.g., `1149:3,1098:5`
+(higher voteCount = higher priority within visionQueue)
+
 ### Durable (GitHub Issues)
 All planning decisions that survive restarts go to GitHub Issues. Label with role.
 
@@ -859,6 +888,9 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `genericAssignments`: Cumulative count of tasks assigned generically (issue #1113)
 - `lastSpecializedRouting`: ISO 8601 timestamp of most recent specialized routing decision (issue #1113)
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
+- `visionQueue`: Comma-separated `issueNumber:voteCount` pairs of issues agents voted to prioritize (issue #1149)
+- `unresolvedDebates`: Comma-separated thread IDs for debates needing synthesis (issue #1111)
+- `lastDebateNudge`: ISO 8601 timestamp of last debate nudge to planners (issue #1111)
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)

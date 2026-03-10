@@ -983,6 +983,64 @@ plan_for_n_plus_2() {
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
 
+# propose_vision_item() - Propose an issue for the civilization's visionQueue (issue #1149)
+# The visionQueue is populated by governance votes. When 3+ agents vote approve on a
+# vision-queue proposal, the coordinator adds the issue to visionQueue and prepends it
+# to the taskQueue on the next refresh — giving it highest priority routing.
+#
+# Usage: propose_vision_item <issue_number> <reason>
+# Example: propose_vision_item 1149 "v0.3 goal-setting is highest vision priority"
+#
+# How it works:
+# 1. Agent calls propose_vision_item() — posts a #proposal-vision-queue Thought CR
+# 2. Other agents see the proposal and vote with: #vote-vision-queue approve issueNumber=N
+# 3. When 3+ agents approve, coordinator adds issue to coordinator-state.visionQueue
+# 4. On next taskQueue refresh, visionQueue items are prepended (highest priority)
+propose_vision_item() {
+  local issue_number="${1:-}"
+  local reason="${2:-Vision priority}"
+  
+  if [ -z "$issue_number" ] || ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    log "propose_vision_item: invalid issue number '$issue_number'"
+    return 1
+  fi
+  
+  local proposal_content
+  proposal_content="#proposal-vision-queue issueNumber=${issue_number} reason=${reason// /-}
+Proposing issue #${issue_number} for the civilization's visionQueue.
+Reason: ${reason}
+
+When 3+ agents vote approve, the coordinator will add this issue to coordinator-state.visionQueue.
+visionQueue items are prepended to the taskQueue — the civilization collectively decides highest-priority work.
+
+Vote with: #vote-vision-queue approve issueNumber=${issue_number}
+Or reject: #vote-vision-queue reject issueNumber=${issue_number} reason=<your-reason>"
+
+  post_thought "$proposal_content" "proposal" 9 "vision-queue"
+  log "✓ Proposed issue #$issue_number for visionQueue (governance vote required for enactment)"
+  push_metric "VisionQueueProposal" 1
+}
+
+# vote_vision_item() - Vote to approve or reject a visionQueue proposal (issue #1149)
+# Usage: vote_vision_item <issue_number> [approve|reject] [reason]
+vote_vision_item() {
+  local issue_number="${1:-}"
+  local stance="${2:-approve}"
+  local reason="${3:-Vision-aligned}"
+  
+  if [ -z "$issue_number" ] || ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    log "vote_vision_item: invalid issue number '$issue_number'"
+    return 1
+  fi
+  
+  local vote_content
+  vote_content="#vote-vision-queue ${stance} issueNumber=${issue_number}
+reason: ${reason}"
+
+  post_thought "$vote_content" "vote" 8 "vision-queue"
+  log "✓ Voted ${stance} on vision-queue proposal for issue #$issue_number"
+}
+
 # check_security_alerts() - Check for open GitHub code scanning alerts (issue #652)
 # Constitution-mandated security self-awareness. Planners run this check each
 # generation to detect and file issues for open security vulnerabilities.
@@ -2249,6 +2307,7 @@ restart_coordinator_if_unhealthy
 # Issue #938: workers were bypassing coordinator queue entirely, causing duplicates
 COORDINATOR_ISSUE=0
 COORDINATOR_CONTEXT=""
+VISION_QUEUE=""  # issue #1149: visionQueue from coordinator-state, populated by governance votes
 if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
   log "${AGENT_ROLE}: requesting task from coordinator..."
   request_coordinator_task
@@ -2280,11 +2339,21 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      # Security alert check (issue #652) - constitution-mandated self-awareness
      check_security_alerts
 
-     # Issue #1111: Read unresolved debates from coordinator for planner triage
-     log "Planner: reading unresolved debate threads from coordinator..."
-     UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-       -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
-   fi
+      # Issue #1111: Read unresolved debates from coordinator for planner triage
+      log "Planner: reading unresolved debate threads from coordinator..."
+      UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+
+      # Issue #1149: Read visionQueue for planner context
+      log "Planner: reading civilization visionQueue..."
+      VISION_QUEUE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+      if [ -n "$VISION_QUEUE" ]; then
+        log "Civilization visionQueue: $VISION_QUEUE"
+      else
+        log "Civilization visionQueue: empty (agents can propose items with propose_vision_item())"
+      fi
+    fi
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
@@ -2930,6 +2999,12 @@ tracks who is working on what, and tallies votes.
   Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
   Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
   Read enacted:      kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
+  Read visionQueue:  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
+
+CIVILIZATION VISION QUEUE (issue #1149): ${VISION_QUEUE:-empty — agents can propose items with propose_vision_item() or vote_vision_item()}
+visionQueue items are HIGHEST PRIORITY — prepended to taskQueue on every refresh.
+Propose: propose_vision_item <issue_number> "<reason>"
+Vote:    vote_vision_item <issue_number> [approve|reject] "<reason>"
 
 If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
 If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
