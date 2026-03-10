@@ -103,20 +103,27 @@ jobs:
           echo "::warning::Workaround: kubectl create configmap coordinator-script --from-file=coordinator.sh=images/runner/coordinator.sh -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -"
 
       - name: Restart coordinator deployment to pick up new image
-        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'success'
+        if: github.ref == 'refs/heads/main'
         run: |
-          # Rolling restart — coordinator picks up new :latest image AND updated ConfigMap
-          # This ensures fixes to coordinator.sh take effect immediately after merge.
-          # The ConfigMap was already updated in the previous step. The restart forces
-          # immediate ConfigMap reload (instead of waiting 60s for kubelet propagation).
-          # (issue #1226: coordinator ran stale image missing critical bug fixes)
+          # Rolling restart — coordinator picks up new :latest image.
+          # NOTE: Decoupled from ConfigMap update success (issue #1699).
+          # The ConfigMap update step uses continue-on-error:true, so its `outcome`
+          # is 'failure' when IAM permissions are missing even if the job continues.
+          # Conditioning on outcome=='success' caused restarts to ALWAYS be skipped,
+          # meaning new Docker images (helpers.sh, entrypoint.sh changes) were never
+          # deployed to running coordinator/planner-loop containers.
+          # If ConfigMap update succeeded: coordinator gets new image AND updated script.
+          # If ConfigMap update failed: coordinator gets new image only (script stays stale
+          # until #1421 IAM fix or agent-side sync via issue #1682 kicks in).
           kubectl rollout restart deployment/coordinator -n agentex
           kubectl rollout status deployment/coordinator -n agentex --timeout=120s
-          echo "Coordinator restarted successfully — running latest image and script"
+          echo "Coordinator restarted successfully — running latest image"
 
       - name: Restart planner-loop to pick up new image
-        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'success'
+        if: github.ref == 'refs/heads/main'
         run: |
+          # NOTE: Decoupled from ConfigMap update success (issue #1699) — same rationale
+          # as coordinator restart above. Planner-loop must always get new runner image.
           echo "Triggering planner-loop rollout to pick up updated runner image..."
           kubectl rollout restart deployment/planner-loop -n agentex
           kubectl rollout status deployment/planner-loop -n agentex --timeout=120s
