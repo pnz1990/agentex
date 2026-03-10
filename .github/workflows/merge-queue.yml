@@ -1,0 +1,394 @@
+name: Automated Merge Queue
+
+# Processes agent PRs automatically:
+# 1. Detects duplicate PRs (same issue, multiple agents)
+# 2. Auto-rebases PR branches on current main
+# 3. Validates PRs have closing keywords and proper format
+# 4. Merges PRs that pass CI and do not touch protected files
+# 5. Flags PRs touching protected files for god review
+#
+# Solution to issue #1828: reduces god's manual PR management tax.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: On PR open/sync - rebase, classify, detect issues
+  # -------------------------------------------------------------------------
+  rebase-and-label:
+    name: Rebase and Classify PR
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.name "agentex-bot"
+          git config --global user.email "agentex-bot@users.noreply.github.com"
+
+      - name: Attempt rebase on main
+        id: rebase
+        run: |
+          git fetch origin main
+          COMMITS_BEHIND=$(git rev-list --count HEAD..origin/main)
+          echo "commits_behind=${COMMITS_BEHIND}" >> "$GITHUB_OUTPUT"
+
+          if [ "$COMMITS_BEHIND" -eq 0 ]; then
+            echo "rebase_status=up_to_date" >> "$GITHUB_OUTPUT"
+            echo "Branch is already up to date with main"
+            exit 0
+          fi
+
+          echo "Branch is ${COMMITS_BEHIND} commits behind main - rebasing..."
+          if git rebase origin/main; then
+            echo "rebase_status=success" >> "$GITHUB_OUTPUT"
+            echo "Rebase succeeded"
+          else
+            echo "rebase_status=conflict" >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+            echo "Rebase failed with conflicts"
+          fi
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.rebase_status == 'success'
+        run: |
+          git push --force-with-lease origin "${{ github.event.pull_request.head.ref }}"
+
+      - name: Create required labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create "needs-god-review" --color "e11d48" \
+            --description "PR touches protected files - requires god review before merge" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "missing-closes" --color "f97316" \
+            --description "PR body missing Closes #N keyword - issue will not auto-close" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "needs-rebase" --color "dc2626" \
+            --description "PR has merge conflicts with main requiring manual resolution" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "duplicate-pr" --color "6b7280" \
+            --description "Another PR already targets this issue" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "auto-merge-ready" --color "16a34a" \
+            --description "PR passed all merge queue checks - eligible for auto-merge" \
+            --repo "$REPO" 2>/dev/null || true
+
+      - name: Check for protected file changes
+        id: protected
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          CHANGED=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '[.files[].path] | join("\n")')
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          PROTECTED=false
+          while IFS= read -r f; do
+            case "$f" in
+              images/runner/entrypoint.sh|AGENTS.md|manifests/rgds/*)
+                PROTECTED=true
+                echo "PROTECTED FILE DETECTED: $f"
+                ;;
+            esac
+          done <<< "$CHANGED"
+          echo "is_protected=${PROTECTED}" >> "$GITHUB_OUTPUT"
+
+      - name: Label protected PR for god review
+        if: steps.protected.outputs.is_protected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr edit "$PR_NUMBER" --add-label "needs-god-review" --repo "$REPO"
+          BODY="WARNING: Protected File Detected - Manual Review Required\n\nThis PR modifies protected platform files (entrypoint.sh, AGENTS.md, or manifests/rgds/). These files require god review before merge.\n\nAction required (god only): Add the god-approved label to allow merge."
+          printf "%b" "$BODY" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+
+      - name: Check for Closes keyword
+        id: closes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body')
+          if echo "$PR_BODY" | grep -qiE '(closes|fixes|resolves) #[0-9]+'; then
+            echo "has_closes=true" >> "$GITHUB_OUTPUT"
+            echo "PR body contains closing keyword - OK"
+          else
+            echo "has_closes=false" >> "$GITHUB_OUTPUT"
+            echo "WARNING: PR body missing Closes #N keyword"
+          fi
+
+      - name: Warn about missing Closes keyword
+        if: steps.closes.outputs.has_closes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr edit "$PR_NUMBER" --add-label "missing-closes" --repo "$REPO"
+          BODY="WARNING: Missing Closes #N in PR body\n\nThis PR does not contain a closing keyword (Closes #N or Fixes #N). Without this, the linked issue will not auto-close on merge, causing future agents to open duplicate PRs.\n\nPlease update the PR body to include: Closes #<issue-number>"
+          printf "%b" "$BODY" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+
+      - name: Detect duplicate PRs for same issue
+        if: steps.closes.outputs.has_closes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body')
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oiE '(closes|fixes|resolves) #([0-9]+)' | grep -oE '[0-9]+' | head -1)
+          [ -z "$ISSUE_NUM" ] && exit 0
+
+          echo "Checking for duplicate PRs referencing issue #${ISSUE_NUM}..."
+          DUPE_COUNT=0
+          DUPE_LIST=""
+          while IFS= read -r pn; do
+            if [ -n "$pn" ] && [ "$pn" != "$PR_NUMBER" ]; then
+              DUPE_COUNT=$((DUPE_COUNT + 1))
+              DUPE_LIST="${DUPE_LIST} #${pn}"
+            fi
+          done < <(gh pr list --repo "$REPO" --state open --json number,body \
+            --jq ".[] | select(.body | test(\"(closes|fixes|resolves) #${ISSUE_NUM}\"; \"i\")) | .number" 2>/dev/null || true)
+
+          if [ "$DUPE_COUNT" -gt 0 ]; then
+            echo "Found ${DUPE_COUNT} duplicate PR(s):${DUPE_LIST}"
+            gh pr edit "$PR_NUMBER" --add-label "duplicate-pr" --repo "$REPO"
+            BODY="WARNING: Duplicate PR Detected\n\nThis PR references issue #${ISSUE_NUM}, but other PRs also target the same issue:${DUPE_LIST}\n\nThe merge queue will keep the PR that passes CI first (or has more changed files if tied) and close the others."
+            printf "%b" "$BODY" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+          fi
+
+      - name: Comment on rebase conflict
+        if: steps.rebase.outputs.rebase_status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr edit "$PR_NUMBER" --add-label "needs-rebase" --repo "$REPO"
+          BODY="ERROR: Auto-Rebase Failed - Merge Conflicts Detected\n\nThis PR has conflicts with main that could not be resolved automatically. The merge queue will skip this PR until conflicts are resolved.\n\nA fresh worker can re-implement this issue on current main if needed."
+          printf "%b" "$BODY" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+
+  # -------------------------------------------------------------------------
+  # Job 2: Scheduled - resolve duplicates and merge eligible PRs
+  # -------------------------------------------------------------------------
+  process-merge-queue:
+    name: Process Merge Queue
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.name "agentex-bot"
+          git config --global user.email "agentex-bot@users.noreply.github.com"
+
+      - name: Create required labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create "needs-god-review" --color "e11d48" \
+            --description "PR touches protected files - requires god review before merge" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "missing-closes" --color "f97316" \
+            --description "PR body missing Closes #N keyword - issue will not auto-close" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "needs-rebase" --color "dc2626" \
+            --description "PR has merge conflicts with main requiring manual resolution" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create "duplicate-pr" --color "6b7280" \
+            --description "Another PR already targets this issue" \
+            --repo "$REPO" 2>/dev/null || true
+
+      - name: Fetch open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr list --repo "$REPO" --state open \
+            --json number,headRefName,labels,body,createdAt,mergeable \
+            --jq '.[] | [(.number | tostring), .headRefName, (.labels | map(.name) | join(",")), .body, .createdAt, (.mergeable // "UNKNOWN")] | @tsv' \
+            > /tmp/open_prs.tsv 2>/dev/null || true
+          echo "Open PRs found: $(wc -l < /tmp/open_prs.tsv)"
+
+      - name: Resolve duplicate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          declare -A ISSUE_TO_PRS=()
+
+          while IFS=$'\t' read -r pr_num head_ref labels body created_at mergeable; do
+            [ -z "$pr_num" ] && continue
+            ISSUE=$(echo "$body" | grep -oiE '(closes|fixes|resolves) #([0-9]+)' | grep -oE '[0-9]+' | head -1)
+            [ -z "$ISSUE" ] && continue
+            if [ -n "${ISSUE_TO_PRS[$ISSUE]+x}" ]; then
+              ISSUE_TO_PRS[$ISSUE]="${ISSUE_TO_PRS[$ISSUE]} $pr_num"
+            else
+              ISSUE_TO_PRS[$ISSUE]="$pr_num"
+            fi
+          done < /tmp/open_prs.tsv
+
+          for issue in "${!ISSUE_TO_PRS[@]}"; do
+            pr_list="${ISSUE_TO_PRS[$issue]}"
+            pr_count=$(echo "$pr_list" | wc -w)
+            [ "$pr_count" -le 1 ] && continue
+
+            echo "Issue #${issue} has ${pr_count} duplicate PRs: ${pr_list}"
+            BEST_PR=""
+            BEST_SCORE=-1
+
+            for pr_num in $pr_list; do
+              CI_STATUS=$(gh pr view "$pr_num" --repo "$REPO" --json statusCheckRollup \
+                --jq '.statusCheckRollup | if . == null then "no-ci" elif length == 0 then "no-ci" elif any(.[]; .conclusion == "failure" or .conclusion == "FAILURE") then "failure" elif all(.[]; .conclusion == "SUCCESS" or .conclusion == "success" or .conclusion == "SKIPPED" or .conclusion == "skipped" or .conclusion == "NEUTRAL" or .conclusion == "neutral") then "success" else "pending" end' \
+                2>/dev/null || echo "unknown")
+
+              FILES_CHANGED=$(gh pr view "$pr_num" --repo "$REPO" --json files \
+                --jq '.files | length' 2>/dev/null || echo "0")
+
+              SCORE=0
+              case "$CI_STATUS" in
+                success) SCORE=$((SCORE + 100)) ;;
+                no-ci)   SCORE=$((SCORE + 50)) ;;
+                pending) SCORE=$((SCORE + 10)) ;;
+                failure) SCORE=$((SCORE - 50)) ;;
+              esac
+              SCORE=$((SCORE + FILES_CHANGED))
+              echo "  PR #${pr_num}: CI=${CI_STATUS}, files=${FILES_CHANGED}, score=${SCORE}"
+
+              if [ "$SCORE" -gt "$BEST_SCORE" ]; then
+                BEST_SCORE=$SCORE
+                BEST_PR=$pr_num
+              fi
+            done
+
+            echo "Keeping PR #${BEST_PR} for issue #${issue}"
+            for pr_num in $pr_list; do
+              [ "$pr_num" = "$BEST_PR" ] && continue
+              echo "Closing duplicate PR #${pr_num}"
+              BODY="Closed as Duplicate by Merge Queue\n\nPR #${BEST_PR} was selected for issue #${issue} (better CI status or more files changed). This PR is closed to prevent duplicate merges."
+              printf "%b" "$BODY" | gh pr comment "$pr_num" --repo "$REPO" --body-file -
+              gh pr close "$pr_num" --repo "$REPO"
+            done
+          done
+
+      - name: Auto-merge eligible PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          MERGED_COUNT=0
+          SKIPPED_COUNT=0
+
+          while IFS=$'\t' read -r pr_num head_ref labels body created_at mergeable; do
+            [ -z "$pr_num" ] && continue
+            echo ""
+            echo "Evaluating PR #${pr_num} (branch: ${head_ref})"
+
+            # Skip if blocking label present
+            if echo "$labels" | grep -qE "needs-god-review|needs-rebase|missing-closes|duplicate-pr|do-not-merge"; then
+              echo "SKIP: blocking label present - ${labels}"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+
+            # Require Closes keyword
+            if ! echo "$body" | grep -qiE '(closes|fixes|resolves) #[0-9]+'; then
+              echo "SKIP: missing Closes #N keyword"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+
+            # Check mergeability
+            if [ "$mergeable" = "CONFLICTING" ]; then
+              echo "SKIP: PR has conflicts"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+
+            # Check CI status
+            CI_STATUS=$(gh pr view "$pr_num" --repo "$REPO" --json statusCheckRollup \
+              --jq '.statusCheckRollup | if . == null then "no-ci" elif length == 0 then "no-ci" elif any(.[]; .conclusion == "failure" or .conclusion == "FAILURE") then "failure" elif any(.[]; .status == "IN_PROGRESS" or .status == "QUEUED" or (.conclusion == null and .status != null)) then "pending" elif all(.[]; .conclusion == "SUCCESS" or .conclusion == "success" or .conclusion == "SKIPPED" or .conclusion == "skipped" or .conclusion == "NEUTRAL" or .conclusion == "neutral") then "success" else "pending" end' \
+              2>/dev/null || echo "unknown")
+
+            echo "CI status: ${CI_STATUS}"
+            if [ "$CI_STATUS" = "failure" ]; then
+              echo "SKIP: CI failing"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+            if [ "$CI_STATUS" = "pending" ]; then
+              echo "SKIP: CI still running"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+
+            # Check for protected files
+            CHANGED_FILES=$(gh pr view "$pr_num" --repo "$REPO" --json files \
+              --jq '[.files[].path] | join("\n")' 2>/dev/null || echo "")
+            PROTECTED=false
+            while IFS= read -r f; do
+              case "$f" in
+                images/runner/entrypoint.sh|AGENTS.md|manifests/rgds/*)
+                  PROTECTED=true
+                  break
+                  ;;
+              esac
+            done <<< "$CHANGED_FILES"
+
+            if [ "$PROTECTED" = "true" ]; then
+              echo "SKIP: touches protected files - requires god review"
+              gh pr edit "$pr_num" --add-label "needs-god-review" --repo "$REPO" 2>/dev/null || true
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+
+            # All checks passed - merge
+            echo "PR #${pr_num} eligible for auto-merge (CI=${CI_STATUS})"
+            PR_TITLE=$(gh pr view "$pr_num" --repo "$REPO" --json title --jq '.title' 2>/dev/null || echo "PR #${pr_num}")
+
+            if gh pr merge "$pr_num" --repo "$REPO" --squash \
+              --subject "${PR_TITLE} (#${pr_num})" 2>/dev/null; then
+              echo "Merged PR #${pr_num}"
+              MERGED_COUNT=$((MERGED_COUNT + 1))
+              BODY="Auto-merged by merge queue\n\nThis PR was automatically merged: CI passed, no protected files modified, Closes #N keyword present, no unresolved conflicts.\n\nThe referenced issue has been auto-closed."
+              printf "%b" "$BODY" | gh pr comment "$pr_num" --repo "$REPO" --body-file - 2>/dev/null || true
+            else
+              echo "WARNING: merge failed for PR #${pr_num}"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            fi
+
+          done < /tmp/open_prs.tsv
+
+          echo ""
+          echo "Merge queue complete: merged=${MERGED_COUNT} skipped=${SKIPPED_COUNT}"
