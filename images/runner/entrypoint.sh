@@ -1092,6 +1092,25 @@ request_coordinator_task() {
       continue
     fi
 
+    # Validate the claimed issue is still open on GitHub (issue #1015)
+    # Agents waste their entire session if assigned a closed issue (e.g., already merged)
+    local issue_state
+    issue_state=$(gh issue view "$claimed_issue" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+    if [ "$issue_state" != "OPEN" ]; then
+      log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and skipping"
+      # Release the claim since the issue is closed/not found
+      release_coordinator_task "$claimed_issue"
+      # Remove from queue to prevent future agents from wasting time on it
+      local stale_queue
+      stale_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+      stale_queue=$(echo "$stale_queue" | tr '\n' ',' | sed 's/,$//')
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"taskQueue\":\"${stale_queue}\"}}" 2>/dev/null || true
+      retry=$((retry + 1))
+      continue
+    fi
+
     # Remove claimed issue from the queue
     # Use grep -v || true: when queue has only this issue, grep -v returns exit code 1 (no matches),
     # which would crash the script under set -euo pipefail (issue #979)
