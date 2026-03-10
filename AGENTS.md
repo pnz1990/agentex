@@ -1083,7 +1083,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
 
 **Cleanup:**
-- `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
+- `activeAssignments`: Cleaned every 30s (stale assignments returned to queue). Assignments from completed jobs are kept for up to 4 hours if the issue remains OPEN (PR pending merge). After 4 hours, the assignment is released to prevent permanent locks from agents that claimed but didn't open a PR (issue #1610).
 - `activeAgents`: Cleaned every 30s (completed agents removed)
 - `taskQueue`: Refreshed from GitHub every ~2.5 min
 

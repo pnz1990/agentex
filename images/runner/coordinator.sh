@@ -903,6 +903,22 @@ cleanup_stale_assignments() {
             # Race condition: Worker opens PR → Job completes → Coordinator releases claim
             # → Second worker claims same issue → duplicate PR.
             # Fix: Keep assignment if issue still OPEN (PR pending merge). Only release when CLOSED.
+            # Issue #1610: Add TTL for "job complete + issue open" case. If job completed
+            # >4h ago AND issue is still OPEN, assume no PR was opened (agent analyzed and
+            # exited, or failed) → release the assignment. This prevents permanent locks
+            # from planners that claimed issues but didn't open PRs.
+            local STALE_PR_WAIT_TTL=14400  # 4 hours in seconds
+            local job_completion_time
+            job_completion_time=$(echo "${raw_job_json:-{\}}" | jq -r '.status.completionTime // ""' 2>/dev/null || echo "")
+            local job_age=0
+            if [ -n "$job_completion_time" ]; then
+                local completion_epoch
+                completion_epoch=$(date -d "$job_completion_time" +%s 2>/dev/null || echo "0")
+                if [[ "$completion_epoch" =~ ^[0-9]+$ ]] && [ "$completion_epoch" -gt 0 ]; then
+                    job_age=$(( now_epoch - completion_epoch ))
+                fi
+            fi
+
             if [[ "$issue" =~ ^[0-9]+$ ]]; then
                 local issue_state
                 # Issue #1561: use cache to avoid duplicate gh issue view calls
@@ -911,12 +927,18 @@ cleanup_stale_assignments() {
                     echo "[$(date -u +%H:%M:%S)] Complete: $agent_name → issue #$issue CLOSED, releasing assignment"
                     stale_count=$((stale_count + 1))
                 elif [ "$issue_state" = "OPEN" ]; then
-                    # Job done but issue still open - likely PR pending merge. Keep assignment.
-                    echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (PR likely pending), keeping assignment"
-                    local clean_pair="${agent_name}:${issue}"
-                    [ -n "$cleaned_assignments" ] \
-                        && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
-                        || cleaned_assignments="${clean_pair}"
+                    # Issue #1610: Check if job completed more than TTL ago (no PR was opened)
+                    if [ "$job_age" -gt "$STALE_PR_WAIT_TTL" ]; then
+                        echo "[$(date -u +%H:%M:%S)] Expired: $agent_name → issue #$issue OPEN but job completed ${job_age}s ago (>${STALE_PR_WAIT_TTL}s TTL, no PR opened), releasing"
+                        stale_count=$((stale_count + 1))
+                    else
+                        # Job done but issue still open within TTL - likely PR pending merge. Keep assignment.
+                        echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (PR likely pending, job_age=${job_age}s < ${STALE_PR_WAIT_TTL}s TTL), keeping assignment"
+                        local clean_pair="${agent_name}:${issue}"
+                        [ -n "$cleaned_assignments" ] \
+                            && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                            || cleaned_assignments="${clean_pair}"
+                    fi
                 else
                     # UNKNOWN state (API error or non-issue task) - release to be safe
                     echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue state UNKNOWN, releasing assignment"
