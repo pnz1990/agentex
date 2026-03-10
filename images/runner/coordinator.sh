@@ -555,6 +555,40 @@ cleanup_active_agents() {
     fi
 }
 
+# Cleanup orphaned pods — delete Failed/Succeeded pods with no ownerReferences (issue #1416)
+# When Jobs are deleted (manually or by cleanup), Kubernetes normally cascade-deletes owned pods.
+# However, historical pods from before TTL governance vote were created differently, resulting in
+# orphaned pods that accumulate and pollute kubectl output / consume cluster resources.
+# Runs every 10 iterations (~5 min) to keep the namespace clean.
+cleanup_orphaned_pods() {
+    # Find pods with no ownerReferences that are in terminal phases (Failed or Succeeded)
+    local orphaned_pods
+    orphaned_pods=$(kubectl_with_timeout 15 get pods -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq -r '.items[] | select(
+            (.metadata.ownerReferences == null or .metadata.ownerReferences == []) and
+            (.status.phase == "Failed" or .status.phase == "Succeeded")
+        ) | .metadata.name' 2>/dev/null || true)
+
+    [ -z "$orphaned_pods" ] && return 0
+
+    local orphaned_count
+    orphaned_count=$(echo "$orphaned_pods" | grep -c . || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] Cleaning $orphaned_count orphaned terminal pods (no ownerReferences)..."
+    push_metric "OrphanedPodsFound" "$orphaned_count" "Count" "Component=Coordinator"
+
+    local deleted_count=0
+    while IFS= read -r pod_name; do
+        [ -z "$pod_name" ] && continue
+        if kubectl_with_timeout 10 delete pod "$pod_name" -n "$NAMESPACE" --ignore-not-found 2>/dev/null; then
+            deleted_count=$((deleted_count + 1))
+        fi
+    done <<< "$orphaned_pods"
+
+    echo "[$(date -u +%H:%M:%S)] Deleted $deleted_count orphaned pods"
+    push_metric "OrphanedPodsDeleted" "$deleted_count" "Count" "Component=Coordinator"
+}
+
 # Reconcile spawnSlots against actual running job count (leak recovery)
 # If agents crash before releasing slots, spawnSlots drifts low.
 # This function resets spawnSlots = max(0, circuitBreakerLimit - activeJobs).
@@ -2186,6 +2220,13 @@ while true; do
     # are lazily initialized even in long-running coordinators without requiring a restart.
     if [ $((iteration % 10)) -eq 0 ]; then
         ensure_state_fields_initialized "true"
+    fi
+
+    # Every 10 iterations (~5 min): cleanup orphaned terminal pods (issue #1416)
+    # Deletes Failed/Succeeded pods with no ownerReferences that accumulate when Jobs
+    # are deleted without cascade-deleting their pods (historical behavior pre-TTL governance).
+    if [ $((iteration % 10)) -eq 0 ]; then
+        cleanup_orphaned_pods
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.
