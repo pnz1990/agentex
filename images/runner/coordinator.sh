@@ -319,7 +319,10 @@ update_state() {
     # in JSON. Embedded newlines cause 'invalid character \n in string literal' errors that are
     # swallowed by 2>/dev/null, causing silent failures (e.g., enactedDecisions never updated).
     local safe_value
-    safe_value=$(echo "$value" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+    # Issue #1470: Use printf '%s' instead of echo to avoid trailing newline that tr '\n\r' converts
+    # to trailing space, causing spawnSlots='6 ' instead of '6'. The trailing space breaks CAS
+    # operations in request_spawn_slot() and triggers false spawnSlots reconciliation every 30s.
+    safe_value=$(printf '%s' "$value" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
         --type=merge -p "{\"data\":{\"$field\":\"$safe_value\"}}" 2>/dev/null || true
