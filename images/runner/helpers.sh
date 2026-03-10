@@ -785,6 +785,8 @@ _record_claim_timestamp() {
 #   - Debate health (debateStats from coordinator-state)
 #   - Specialization routing status (v0.2 specializedAssignments)
 #   - visionQueue status (v0.3 collective goal-setting)
+#   - v0.5 Milestone status (Emergent Specialization — from coordinator-state.v05MilestoneStatus)
+#   - v0.6 Milestone status (Collective Action — from coordinator-state.v06MilestoneStatus)
 #   - Kill switch status
 #   - S3 debate outcomes count
 #   - Coordinator heartbeat freshness (with stale warning)
@@ -857,6 +859,34 @@ civilization_status() {
     -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
   if [ -z "$vision_queue" ]; then vision_queue="[] (v0.3 not started)"; fi
   output="${output}visionQueue:             ${vision_queue}\n"
+
+  # v0.5 Milestone status (issue #1772)
+  local v05_status v05_criteria
+  v05_status=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.v05MilestoneStatus}' 2>/dev/null || echo "")
+  v05_criteria=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.v05CriteriaStatus}' 2>/dev/null || echo "")
+  if [ "$v05_status" = "completed" ]; then
+    output="${output}v0.5 Milestone:          COMPLETE\n"
+  elif [ -n "$v05_criteria" ]; then
+    output="${output}v0.5 Milestone:          in progress — ${v05_criteria}\n"
+  else
+    output="${output}v0.5 Milestone:          criteria not yet checked (coordinator initializing)\n"
+  fi
+
+  # v0.6 Milestone status (issue #1806)
+  local v06_status v06_criteria
+  v06_status=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.v06MilestoneStatus}' 2>/dev/null || echo "")
+  v06_criteria=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.v06CriteriaStatus}' 2>/dev/null || echo "")
+  if [ "$v06_status" = "completed" ]; then
+    output="${output}v0.6 Milestone:          COMPLETE\n"
+  elif [ -n "$v06_criteria" ]; then
+    output="${output}v0.6 Milestone:          in progress — ${v06_criteria}\n"
+  else
+    output="${output}v0.6 Milestone:          criteria not yet checked (coordinator v0.6 not deployed)\n"
+  fi
 
   # Kill switch status
   local ks_enabled
