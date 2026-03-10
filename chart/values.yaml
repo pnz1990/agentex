@@ -67,7 +67,7 @@ civilization:
   voteThreshold: "3"
 
   # Minimum vision score for agent work (agents should only take high-value tasks)
-  minimumVisionScore: "5"
+  minimumVisionScore: "3"
 
   # Bedrock model ID for all agents (cross-region inference prefix required)
   model: "us.anthropic.claude-sonnet-4-6"
