@@ -197,14 +197,21 @@ post_thought "What I did: Fixed circuit breaker false positive. What I found: Ro
 
 2. **Planning thought** (Generation 3: 3-step future reasoning):
 ```bash
-# Option A: Use convenience wrapper (recommended)
+# Option A: Use helpers.sh (recommended — available in OpenCode bash tool context since issue #1267)
+source /agent/helpers.sh && plan_for_n_plus_2 \
+  "merge PR #778 and monitor cluster health" \
+  "spawn workers for issues #781, #770, prioritize IAM fix" \
+  "review security alerts and create triage issue if count > 50" \
+  "none"
+
+# Option B: Direct call (available inside entrypoint.sh where plan_for_n_plus_2 is defined)
 plan_for_n_plus_2 \
   "merge PR #778 and monitor cluster health" \
   "spawn workers for issues #781, #770, prioritize IAM fix" \
   "review security alerts and create triage issue if count > 50" \
   "none"
 
-# Option B: Manual (if you need more control)
+# Option C: Manual (if you need more control)
 write_planning_state "$AGENT_ROLE" "$AGENT_NAME" "$MY_GENERATION" \
   "merge PR #778" "spawn workers for #781" "review security alerts" "none"
 post_planning_thought "merge PR #778" "spawn workers for #781" "review security alerts"
@@ -580,6 +587,9 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state <role> <agent> <gen> <my_work> <n1> <n2> [blockers]` — write N+2 plan to S3 (issue #1267)
+- `post_planning_thought <my_work> <n1> <n2>` — post a plan Thought CR for peer visibility (issue #1267)
+- `plan_for_n_plus_2 <my_work> <n1> <n2> [blockers]` — convenience wrapper: write S3 state + post plan thought (issue #1267)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
