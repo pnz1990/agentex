@@ -649,6 +649,35 @@ cleanup_stale_assignments() {
     local cleaned_assignments=""
     local stale_count=0
 
+    # Issue #1561: Per-run issue-state cache to deduplicate gh issue view API calls.
+    # cleanup_stale_assignments() runs every coordinator iteration (~30s) and calls
+    # `gh issue view` for EACH assignment — both active (closed-issue check, #1094) and
+    # inactive (open-issue check, #1556). With N assignments that's up to 2N API calls
+    # per 30s cycle. This cache ensures each issue number is looked up at most once per run.
+    # Format: space-separated "ISSUE=STATE" pairs (no associative arrays for bash 3 compat).
+    local issue_state_cache=""
+
+    # Helper: look up issue state from cache, or fetch and cache.
+    # Usage: _get_issue_state <issue_number>
+    # Prints: OPEN | CLOSED | UNKNOWN
+    _get_issue_state() {
+        local iss="$1"
+        # Search cache for existing entry
+        local cached
+        cached=$(echo "$issue_state_cache" | tr ' ' '\n' | grep "^${iss}=" | cut -d= -f2 | head -1)
+        if [ -n "$cached" ]; then
+            echo "$cached"
+            return 0
+        fi
+        # Not cached — fetch from GitHub API
+        local fetched
+        fetched=$(gh issue view "$iss" --repo "${GITHUB_REPO}" --json state \
+            --jq '.state' 2>/dev/null || echo "UNKNOWN")
+        # Add to cache
+        issue_state_cache="${issue_state_cache} ${iss}=${fetched}"
+        echo "$fetched"
+    }
+
     IFS=',' read -ra PAIRS <<< "$assignments"
     for pair in "${PAIRS[@]}"; do
         [ -z "$pair" ] && continue
@@ -678,8 +707,8 @@ cleanup_stale_assignments() {
             # task slot is freed for other work. Skip numeric check to handle non-issue refs.
             if [[ "$issue" =~ ^[0-9]+$ ]]; then
                 local issue_state
-                issue_state=$(gh issue view "$issue" --repo "${GITHUB_REPO}" --json state \
-                    --jq '.state' 2>/dev/null || echo "UNKNOWN")
+                # Issue #1561: use cache to avoid duplicate gh issue view calls
+                issue_state=$(_get_issue_state "$issue")
                 if [ "$issue_state" = "CLOSED" ]; then
                     echo "[$(date -u +%H:%M:%S)] Closed issue: $agent_name → issue #$issue is CLOSED, releasing assignment (agent may continue but task slot freed)"
                     stale_count=$((stale_count + 1))
@@ -699,8 +728,8 @@ cleanup_stale_assignments() {
             # Fix: Keep assignment if issue still OPEN (PR pending merge). Only release when CLOSED.
             if [[ "$issue" =~ ^[0-9]+$ ]]; then
                 local issue_state
-                issue_state=$(gh issue view "$issue" --repo "${GITHUB_REPO}" --json state \
-                    --jq '.state' 2>/dev/null || echo "UNKNOWN")
+                # Issue #1561: use cache to avoid duplicate gh issue view calls
+                issue_state=$(_get_issue_state "$issue")
                 if [ "$issue_state" = "CLOSED" ]; then
                     echo "[$(date -u +%H:%M:%S)] Complete: $agent_name → issue #$issue CLOSED, releasing assignment"
                     stale_count=$((stale_count + 1))
@@ -726,6 +755,8 @@ cleanup_stale_assignments() {
 
     update_state "activeAssignments" "$cleaned_assignments"
     [ $stale_count -gt 0 ] && echo "[$(date -u +%H:%M:%S)] Cleaned $stale_count stale assignments"
+    # Clean up local helper function to avoid name pollution
+    unset -f _get_issue_state 2>/dev/null || true
 }
 
 # Cleanup activeAgents list - remove agents whose Jobs have completed (issue #676)
