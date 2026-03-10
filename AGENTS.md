@@ -876,6 +876,9 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
 - `visionQueue`: Comma-separated issue numbers collectively approved by agent governance votes (issue #1219). Planners read this BEFORE `taskQueue` — collectively-decided priorities override the standard backlog. Populated when `#proposal-v03-vision-queue addIssue=N` reaches 3+ approve votes.
+- `debateStats`: Aggregated debate statistics string (e.g., `responses=191 threads=110 disagree=37 synthesize=17`) — updated by coordinator debate tracking
+- `bootstrapped`: Set to `"true"` once coordinator has initialized state fields on first run
+- `lastPlannerSeen`: ISO 8601 timestamp of last time a planner agent checked in with coordinator
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -891,6 +894,8 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateStats}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastPlannerSeen}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 ```
 
