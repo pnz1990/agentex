@@ -160,6 +160,14 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # Issue #1240: Detect and fix negative spawnSlots during health check.
+  # A negative value permanently blocks all agent spawning — reset via reconciliation.
+  spawn_slots_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.spawnSlots}' 2>/dev/null)
+  if [[ "$spawn_slots_val" =~ ^-[0-9]+$ ]]; then
+    [ "$silent" = "false" ] && echo "  WARNING: spawnSlots=$spawn_slots_val is negative — civilization frozen! Will reconcile (issue #1240)."
+    reconcile_spawn_slots
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -489,7 +497,14 @@ reconcile_spawn_slots() {
 
     local current_slots
     current_slots=$(get_state "spawnSlots")
-    if [ -z "$current_slots" ] || ! [[ "$current_slots" =~ ^[0-9]+$ ]]; then
+    # Handle empty, non-numeric, OR NEGATIVE values (issue #1240)
+    # Negative spawnSlots blocks ALL agent spawning until reconciled.
+    # The ^[0-9]+$ regex correctly rejects negative values (which contain '-'),
+    # but we add an explicit integer check too for clarity.
+    if [ -z "$current_slots" ] || ! [[ "$current_slots" =~ ^-?[0-9]+$ ]]; then
+        current_slots=0
+    elif [ "$current_slots" -lt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: spawnSlots is negative ($current_slots) — civilization frozen! Forcing reconciliation."
         current_slots=0
     fi
 
@@ -1669,9 +1684,10 @@ while true; do
         cleanup_active_agents
     fi
 
-    # ADAPTIVE SPAWN SLOT RECONCILIATION (issue #669)
+    # ADAPTIVE SPAWN SLOT RECONCILIATION (issue #669, #1240)
     # When system is near capacity, reconcile every cycle (~30s) to prevent proliferation bursts.
     # When idle, reconcile every 4 iterations (~2 min) to reduce overhead.
+    # Issue #1240: ALSO reconcile IMMEDIATELY if spawnSlots is negative (civilization frozen guard).
     # This prevents the 2-minute reconciliation gap from allowing excess agents at capacity.
     
     # Read current circuit breaker limit
@@ -1687,8 +1703,15 @@ while true; do
     
     # Near capacity threshold: reconcile if within 3 slots of limit
     near_capacity_threshold=$((cb_limit - 3))
-    
-    if [ "$current_active" -ge "$near_capacity_threshold" ]; then
+
+    # Issue #1240: Fast check for negative spawnSlots (civilization-freeze guard)
+    # Read raw value; if it looks like a negative number, trigger immediate reconciliation.
+    # This check is O(1) (single ConfigMap read) and runs every iteration.
+    current_slots_raw=$(get_state "spawnSlots")
+    if [[ "$current_slots_raw" =~ ^-[0-9]+$ ]]; then
+        echo "[$(date -u +%H:%M:%S)] EMERGENCY: spawnSlots=$current_slots_raw is negative — civilization frozen! Reconciling immediately (issue #1240)."
+        reconcile_spawn_slots
+    elif [ "$current_active" -ge "$near_capacity_threshold" ]; then
         # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
         reconcile_spawn_slots
     elif [ $((iteration % 4)) -eq 0 ]; then
