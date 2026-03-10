@@ -3155,13 +3155,27 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   push_metric "CIPassOnExit" 1
   
   # Update specialization based on issue labels worked on this session (issue #1098)
-  # Fetch labels from the GitHub issue claimed/worked on this session
-  if type update_specialization &>/dev/null && [ -n "${COORDINATOR_ISSUE:-}" ] && [ "$COORDINATOR_ISSUE" != "0" ]; then
-    WORKED_LABELS=$(gh issue view "$COORDINATOR_ISSUE" --repo "$REPO" \
-      --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-    if [ -n "$WORKED_LABELS" ]; then
-      update_specialization "$WORKED_LABELS" 2>/dev/null || true
-      log "Specialization tracking updated: labels=$WORKED_LABELS"
+  # Fetch labels from the GitHub issue claimed/worked on this session.
+  # Fix (issue #1147): When coordinator queue was empty and agent self-selected an issue,
+  # COORDINATOR_ISSUE remains 0. Resolve the worked issue from activeAssignments in that case.
+  if type update_specialization &>/dev/null; then
+    WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
+    if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+      # Self-selected path: look up this agent's entry in coordinator-state activeAssignments
+      ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+      WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
+      if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+        log "Resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments for specialization tracking"
+      fi
+    fi
+    if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+      WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
+        --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+      if [ -n "$WORKED_LABELS" ]; then
+        update_specialization "$WORKED_LABELS" 2>/dev/null || true
+        log "Specialization tracking updated: labels=$WORKED_LABELS (issue #$WORKED_ISSUE)"
+      fi
     fi
   fi
   
