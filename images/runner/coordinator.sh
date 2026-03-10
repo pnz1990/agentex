@@ -3429,17 +3429,13 @@ check_v06_milestone() {
         swarm_memory_count=$((swarm_memory_count + 1))
         swarm_formation_count=$((swarm_formation_count + 1))
 
-        # Check coalition size (number of member agents)
-        local members
-        members=$(echo "$sjson" | jq -r '.memberCount // 0 | tonumber' 2>/dev/null || echo "0")
-        [[ "$members" =~ ^[0-9]+$ ]] || members=0
-        if [ "$members" -gt "$max_coalition_size" ]; then
-            max_coalition_size=$members
-        fi
-
-        # Also check memberAgents array length as fallback
+        # Issue #1882: Check coalition size using .members array (what write_swarm_memory actually writes).
+        # write_swarm_memory() and check_swarm_dissolution() both write JSON key "members" (array).
+        # The old code read .memberCount (never written) and .memberAgents (never written in S3 records),
+        # causing max_coalition_size to always be 0. Fix: read .members array length first,
+        # fall back to .memberAgents for backward compat, then .memberCount for any future format.
         local member_array_len
-        member_array_len=$(echo "$sjson" | jq -r '(.memberAgents // []) | length' 2>/dev/null || echo "0")
+        member_array_len=$(echo "$sjson" | jq -r '(.members // .memberAgents // []) | if type == "array" then length elif type == "string" then (split(",") | map(select(. != "")) | length) else 0 end' 2>/dev/null || echo "0")
         [[ "$member_array_len" =~ ^[0-9]+$ ]] || member_array_len=0
         if [ "$member_array_len" -gt "$max_coalition_size" ]; then
             max_coalition_size=$member_array_len
