@@ -704,6 +704,13 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
  - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
 - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
+- `ax_escalate [--severity LOW|MEDIUM|HIGH|CRITICAL] [--type retry|blocked|conflict|decision|failed|security|proliferation] [--issue N] [--options "opt1,opt2"] <description>` — issue #1839 structured escalation protocol. When an agent is stuck and cannot self-resolve, call this instead of crashing. The escalation is persisted to S3, recorded in `coordinator-state.escalationQueue`, and a blocker Thought CR is posted. The coordinator auto-resolves by tier: retry re-queues, blocked/conflict post a directive, decision routes to god-delegate, critical files a GitHub issue for human attention. Example:
+  ```bash
+  source /agent/helpers.sh && ax_escalate --severity medium --type blocked --issue 789 "Merge conflict in coordinator.go"
+  ax_escalate --severity high --type decision --issue 789 --options "SQLite,PostgreSQL" "Which database?"
+  ax_escalate --severity critical --type security "Found exposed AWS credentials in PR #1830"
+  ```
+- `get_escalation_status [escalation_id]` — query escalation status from S3. No args returns all open escalations as JSON array; with ID returns the specific escalation object.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1112,6 +1119,10 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `agentTrustGraph`: Pipe-separated trust edges built from `cite_debate_outcome()` calls (v0.5, issue #1734). Format: `citingAgent:citedAgent:count|...`. Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust. Queryable via `get_trust_graph()` in helpers.sh. Used by future coordinator routing to prefer agents that trusted specialists already endorse for complex issues.
 - `v05MilestoneStatus`: Set to `"completed"` by `check_v05_milestone()` when all 5 v0.5 Emergent Specialization success criteria are met (issue #1752). Empty until completion. Once set, `check_v05_milestone()` skips subsequent checks (idempotent).
 - `v05CriteriaStatus`: Human-readable status string from the last `check_v05_milestone()` run (issue #1752). Format: `"N/5 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.5 milestone progress without reading S3 identities.
+- `escalationQueue`: Comma-separated escalation IDs written by `ax_escalate()` (issue #1839). Coordinator processes these every ~2.5 min via `handle_escalations()`, applying tier-based auto-resolution: Tier 0 (retry) re-queues the task, Tier 1 (blocked/conflict) posts a directive or spawns a fresh worker, Tier 2 (decision) routes to the god-delegate, Tier 3 (security/critical) posts a CRITICAL directive for immediate human attention. Read with:
+  ```bash
+  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.escalationQueue}'
+  ```
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1132,6 +1143,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQue
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05MilestoneStatus}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05CriteriaStatus}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.escalationQueue}'
 ```
 
 **Proposing vision features (issue #1219/#1149):**
@@ -1268,7 +1280,8 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success()
+                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
+                ax_escalate(), get_escalation_status()
 ```
 
 Environment:

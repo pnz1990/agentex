@@ -4658,6 +4658,27 @@ fi
 # Uses --watch with timeout for push notifications instead of polling.
 check_new_messages
 
+# ── 10.6. DETECT AGENT ESCALATION (issue #1839) ─────────────────────────────
+# Check if the agent called ax_escalate() and wrote an escalation state file.
+# If so, read the structured exit state and log it for visibility.
+# The escalation was already submitted to S3 + coordinator-state by ax_escalate().
+# Here we just log it and ensure the coordinator knows about it before we exit.
+if [ -f /tmp/agentex-escalation-state.json ]; then
+  ESCALATION_STATE=$(cat /tmp/agentex-escalation-state.json 2>/dev/null || echo "")
+  if [ -n "$ESCALATION_STATE" ]; then
+    ESC_SEVERITY=$(echo "$ESCALATION_STATE" | jq -r '.severity // "MEDIUM"' 2>/dev/null)
+    ESC_CATEGORY=$(echo "$ESCALATION_STATE" | jq -r '.category // "blocked"' 2>/dev/null)
+    ESC_TIER=$(echo "$ESCALATION_STATE" | jq -r '.tier // 1' 2>/dev/null)
+    ESC_ID=$(echo "$ESCALATION_STATE" | jq -r '.escalationId // ""' 2>/dev/null)
+    ESC_ISSUE=$(echo "$ESCALATION_STATE" | jq -r '.issue // ""' 2>/dev/null)
+    log "ESCALATION DETECTED: severity=${ESC_SEVERITY} category=${ESC_CATEGORY} tier=${ESC_TIER} id=${ESC_ID}"
+    push_metric "AgentEscalation" 1 "None"
+    push_metric "AgentEscalationTier${ESC_TIER}" 1 "None"
+    post_thought "Agent escalated: severity=${ESC_SEVERITY} category=${ESC_CATEGORY} tier=${ESC_TIER} issue=${ESC_ISSUE:-none}. Coordinator will process escalation ${ESC_ID} on next cycle." "observation" 7
+  fi
+  rm -f /tmp/agentex-escalation-state.json 2>/dev/null || true
+fi
+
 # ── 11.1. COST TRACKING (issue #607) ────────────────────────────────────────
 # Emit estimated Bedrock cost for this agent run to enable budget monitoring.
 # Sonnet 4.5 pricing: ~$3/M input tokens, ~$15/M output tokens.

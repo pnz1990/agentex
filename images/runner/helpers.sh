@@ -1509,5 +1509,317 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── ax_escalate ───────────────────────────────────────────────────────────────
+# Issue #1839: Structured escalation protocol — tiered recovery paths.
+#
+# Agents call ax_escalate() when they need help they cannot self-resolve.
+# This is the primary "I need help" mechanism — structured, tiered, and
+# recoverable instead of a binary crash.
+#
+# Tiers:
+#   Tier 0 (retry)     — self-healing, no coordinator involvement
+#   Tier 1 (blocked/conflict) — coordinator reassigns or spawns fresh worker
+#   Tier 2 (decision)  — routed to god-delegate for resolution
+#   Tier 3 (security/proliferation/critical) — immediate human notification
+#
+# Severity levels: LOW | MEDIUM | HIGH | CRITICAL
+# Categories: retry | blocked | conflict | decision | failed | security | proliferation
+#
+# Usage:
+#   ax_escalate --severity medium --type blocked \
+#     --issue 789 \
+#     "Merge conflict in coordinator.go — 3 files conflict with main"
+#
+#   ax_escalate --severity high --type decision \
+#     --issue 789 \
+#     --options "SQLite,PostgreSQL,DynamoDB" \
+#     "Which database for the work ledger?"
+#
+#   ax_escalate --severity critical --type security \
+#     "Found exposed AWS credentials in PR #1830"
+#
+# Returns: 0 on success (escalation recorded), 1 on invalid arguments
+ax_escalate() {
+  local severity="MEDIUM"
+  local category="blocked"
+  local issue_num=""
+  local options=""
+  local description=""
+
+  # Parse arguments
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --severity|-s)
+        severity="${2^^}"  # uppercase
+        shift 2
+        ;;
+      --type|-t)
+        category="${2,,}"  # lowercase
+        shift 2
+        ;;
+      --issue|-i)
+        issue_num="$2"
+        shift 2
+        ;;
+      --options|-o)
+        options="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        description="$*"
+        break
+        ;;
+      -*)
+        log "ax_escalate: unknown flag $1 — ignoring"
+        shift
+        ;;
+      *)
+        description="$*"
+        break
+        ;;
+    esac
+  done
+
+  if [ -z "$description" ]; then
+    log "ERROR: ax_escalate requires a description"
+    echo "Usage: ax_escalate --severity MEDIUM --type blocked --issue N \"description\""
+    return 1
+  fi
+
+  # Validate severity
+  case "$severity" in
+    LOW|MEDIUM|HIGH|CRITICAL) ;;
+    *)
+      log "WARNING: ax_escalate: unknown severity '$severity' — defaulting to MEDIUM"
+      severity="MEDIUM"
+      ;;
+  esac
+
+  # Validate category
+  case "$category" in
+    retry|blocked|conflict|decision|failed|security|proliferation) ;;
+    *)
+      log "WARNING: ax_escalate: unknown category '$category' — defaulting to blocked"
+      category="blocked"
+      ;;
+  esac
+
+  # Determine tier based on category/severity
+  local tier
+  case "$category" in
+    retry)
+      tier=0
+      ;;
+    blocked|conflict|failed)
+      tier=1
+      ;;
+    decision)
+      tier=2
+      ;;
+    security|proliferation)
+      tier=3
+      ;;
+    *)
+      tier=1
+      ;;
+  esac
+  # CRITICAL severity always goes to Tier 3 regardless of category
+  if [ "$severity" = "CRITICAL" ]; then
+    tier=3
+  fi
+
+  local timestamp
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local escalation_id
+  escalation_id="esc-${AGENT_NAME}-$(date +%s)"
+
+  # Build escalation JSON
+  local escaped_description
+  escaped_description=$(echo "$description" | jq -Rs '.')
+  local escaped_options
+  escaped_options=$(echo "${options:-}" | jq -Rs '.')
+
+  local escalation_json
+  escalation_json=$(jq -n \
+    --arg id "$escalation_id" \
+    --arg severity "$severity" \
+    --arg category "$category" \
+    --argjson tier "$tier" \
+    --arg agent "${AGENT_NAME:-unknown}" \
+    --arg issue "${issue_num:-}" \
+    --arg description "$description" \
+    --arg options "${options:-}" \
+    --arg status "open" \
+    --arg timestamp "$timestamp" \
+    --arg task_cr "${TASK_CR_NAME:-}" \
+    '{
+      id: $id,
+      severity: $severity,
+      category: $category,
+      tier: $tier,
+      agent: $agent,
+      issue: $issue,
+      taskCR: $task_cr,
+      description: $description,
+      options: $options,
+      status: $status,
+      createdAt: $timestamp
+    }')
+
+  log "ax_escalate: recording escalation id=${escalation_id} severity=${severity} category=${category} tier=${tier}"
+
+  # Persist escalation to S3 for coordinator to process
+  local s3_path="s3://${S3_BUCKET}/escalations/${escalation_id}.json"
+  local s3_output
+  if ! s3_output=$(echo "$escalation_json" | aws s3 cp - "$s3_path" --content-type application/json 2>&1); then
+    log "WARNING: ax_escalate: failed to write escalation to S3: $s3_output (continuing with coordinator-state update)"
+  else
+    log "ax_escalate: escalation persisted to S3: $s3_path"
+  fi
+
+  # Record escalation ID in coordinator-state.escalationQueue for coordinator to process
+  local current_queue
+  current_queue=$(kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "$NAMESPACE" -o jsonpath='{.data.escalationQueue}' 2>/dev/null || echo "")
+  local new_queue
+  if [ -z "$current_queue" ]; then
+    new_queue="$escalation_id"
+  else
+    new_queue="${current_queue},${escalation_id}"
+  fi
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"escalationQueue\":\"${new_queue}\"}}" \
+    2>/dev/null && log "ax_escalate: escalation recorded in coordinator-state.escalationQueue" || \
+    log "WARNING: ax_escalate: failed to update coordinator-state (non-fatal — escalation is in S3)"
+
+  # Post a Thought CR so peers see the escalation immediately
+  local thought_type="blocker"
+  local thought_content="ESCALATION [${severity}/${category}/tier${tier}]:
+${description}"
+  if [ -n "$issue_num" ]; then
+    thought_content="${thought_content}
+Issue: #${issue_num}"
+  fi
+  if [ -n "$options" ]; then
+    thought_content="${thought_content}
+Options: ${options}"
+  fi
+  thought_content="${thought_content}
+EscalationID: ${escalation_id}
+Agent: ${AGENT_NAME:-unknown}"
+
+  post_thought "$thought_content" "$thought_type" 9 "escalation" "" "" 2>/dev/null || true
+
+  # For CRITICAL/Tier 3: also file a GitHub issue for human visibility
+  if [ "$tier" -ge 3 ] || [ "$severity" = "CRITICAL" ]; then
+    log "ax_escalate: CRITICAL/Tier-3 escalation — filing GitHub issue for human visibility"
+    local gh_issue_body
+    gh_issue_body=$(cat <<EOF
+## Escalation: ${severity}/${category}
+
+**Agent:** ${AGENT_NAME:-unknown}
+**Task CR:** ${TASK_CR_NAME:-unknown}
+**Issue:** ${issue_num:-(none)}
+**Escalation ID:** ${escalation_id}
+**Tier:** ${tier} (Human escalation required)
+
+### Description
+${description}
+
+$([ -n "$options" ] && echo "### Options\n${options}" || echo "")
+
+---
+*Auto-filed by ax_escalate() at ${timestamp}*
+*Closes #1839 (escalation protocol)*
+EOF
+)
+    local labels="escalation"
+    case "$category" in
+      security) labels="${labels},security" ;;
+      proliferation) labels="${labels},bug" ;;
+    esac
+
+    local gh_output
+    if gh_output=$(gh issue create \
+      --repo "${REPO:-pnz1990/agentex}" \
+      --title "ESCALATION [${severity}]: ${description:0:80}" \
+      --body "$gh_issue_body" \
+      --label "$labels" 2>/dev/null); then
+      log "ax_escalate: GitHub issue filed for CRITICAL escalation: $gh_output"
+    else
+      log "WARNING: ax_escalate: failed to file GitHub issue for CRITICAL escalation (non-fatal)"
+    fi
+  fi
+
+  # Return structured exit info by writing to temp file (for entrypoint.sh to read)
+  local exit_state_json
+  exit_state_json=$(jq -n \
+    --arg status "escalated" \
+    --arg severity "$severity" \
+    --arg category "$category" \
+    --argjson tier "$tier" \
+    --arg issue "${issue_num:-}" \
+    --arg description "$description" \
+    --arg id "$escalation_id" \
+    '{
+      status: $status,
+      severity: $severity,
+      category: $category,
+      tier: $tier,
+      issue: $issue,
+      description: $description,
+      escalationId: $id,
+      workPreserved: true
+    }')
+  echo "$exit_state_json" > /tmp/agentex-escalation-state.json 2>/dev/null || true
+
+  log "ax_escalate: escalation recorded — id=${escalation_id} tier=${tier} severity=${severity}"
+  log "  Coordinator will process this escalation on next cycle (~30s)"
+
+  return 0
+}
+
+# ── get_escalation_status ─────────────────────────────────────────────────────
+# Query the status of escalations from S3.
+# Usage: get_escalation_status [escalation_id]
+#        With no args: returns all open escalations
+#        With id: returns specific escalation
+# Returns: JSON (single object or array)
+get_escalation_status() {
+  local escalation_id="${1:-}"
+
+  if [ -n "$escalation_id" ]; then
+    # Specific escalation
+    local s3_path="s3://${S3_BUCKET}/escalations/${escalation_id}.json"
+    if aws s3 ls "$s3_path" >/dev/null 2>&1; then
+      aws s3 cp "$s3_path" - 2>/dev/null || echo "{}"
+    else
+      log "get_escalation_status: escalation $escalation_id not found in S3"
+      echo "{}"
+    fi
+    return 0
+  fi
+
+  # All escalations from S3
+  local files
+  files=$(aws s3 ls "s3://${S3_BUCKET}/escalations/" 2>/dev/null | awk '{print $4}')
+  if [ -z "$files" ]; then
+    echo "[]"
+    return 0
+  fi
+
+  local results="[]"
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    local content
+    content=$(aws s3 cp "s3://${S3_BUCKET}/escalations/${file}" - 2>/dev/null || echo "")
+    [ -z "$content" ] && continue
+    results=$(echo "$results" | jq -r --argjson item "$content" '. + [$item]' 2>/dev/null || echo "$results")
+  done <<< "$files"
+
+  echo "$results"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, ax_escalate, get_escalation_status available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

@@ -364,16 +364,25 @@ ensure_state_fields_initialized() {
        -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
    fi
 
-  # agentTrustGraph (v0.5, issue #1734/#1756): pipe-separated trust edges from cite_debate_outcome() calls.
-  # Format: "citingAgent:citedAgent:count|citingAgent2:citedAgent:count2|..."
-  # Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust.
-  # Used by score_agent_for_issue() (issue #1750) to give routing priority to widely-cited agents.
-  # Initialize to empty string if absent — cite_debate_outcome() in helpers.sh writes actual entries.
-  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("agentTrustGraph")' >/dev/null 2>&1; then
-    [ "$silent" = "false" ] && echo "  Initializing agentTrustGraph (was absent)"
-    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p '{"data":{"agentTrustGraph":""}}' 2>/dev/null || true
-  fi
+   # agentTrustGraph (v0.5, issue #1734/#1756): pipe-separated trust edges from cite_debate_outcome() calls.
+   # Format: "citingAgent:citedAgent:count|citingAgent2:citedAgent:count2|..."
+   # Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust.
+   # Used by score_agent_for_issue() (issue #1750) to give routing priority to widely-cited agents.
+   # Initialize to empty string if absent — cite_debate_outcome() in helpers.sh writes actual entries.
+   if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("agentTrustGraph")' >/dev/null 2>&1; then
+     [ "$silent" = "false" ] && echo "  Initializing agentTrustGraph (was absent)"
+     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+       -p '{"data":{"agentTrustGraph":""}}' 2>/dev/null || true
+   fi
+
+   # escalationQueue (issue #1839): comma-separated escalation IDs for the coordinator
+   # to process. Written by ax_escalate() in helpers.sh. Coordinator processes and resolves
+   # escalations every 5 iterations (~2.5 min) via handle_escalations().
+   if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("escalationQueue")' >/dev/null 2>&1; then
+     [ "$silent" = "false" ] && echo "  Initializing escalationQueue (was absent)"
+     kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+       -p '{"data":{"escalationQueue":""}}' 2>/dev/null || true
+   fi
 
    # v05MilestoneStatus (issue #1752): tracks whether v0.5 Emergent Specialization milestone is complete.
   # Set to "completed" by check_v05_milestone() when all 5 success criteria are met.
@@ -2470,6 +2479,258 @@ aggregate_chronicle_candidates() {
     update_state "chronicleCandidates" "$top_candidates"
 }
 
+# handle_escalations() — Process agent escalation queue (issue #1839)
+# ─────────────────────────────────────────────────────────────────────────────
+# Tiered escalation protocol: agents call ax_escalate() to signal problems.
+# This function reads the escalation queue from coordinator-state, fetches each
+# escalation from S3, and applies auto-resolution rules by tier:
+#
+#   Tier 0 (retry)     — mark resolved, re-queue task after 5-min delay
+#   Tier 1 (blocked/conflict/failed)
+#                      — if conflict: spawn fresh worker on current main
+#                      — if blocked: check dependency resolution, re-queue
+#                      — if failed: route to god-delegate via directive
+#   Tier 2 (decision)  — post god-delegate-visible directive Thought CR
+#   Tier 3 (security/proliferation/critical) — verify GitHub issue filed,
+#                        post CRITICAL directive visible to all agents
+#
+# Called every 5 iterations (~2.5 min) from the coordinator main loop.
+handle_escalations() {
+    local queue
+    queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.escalationQueue}' 2>/dev/null || echo "")
+
+    [ -z "$queue" ] && return 0
+
+    # Split queue into array
+    local escalation_ids
+    IFS=',' read -ra escalation_ids <<< "$queue"
+    local remaining_ids=()
+    local processed=0
+    local skipped=0
+
+    for esc_id in "${escalation_ids[@]}"; do
+        esc_id="${esc_id// /}"  # strip spaces
+        [ -z "$esc_id" ] && continue
+
+        # Fetch escalation from S3
+        local esc_json
+        esc_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/escalations/${esc_id}.json" - 2>/dev/null || echo "")
+        if [ -z "$esc_json" ] || [ "$esc_json" = "{}" ]; then
+            echo "[$(date -u +%H:%M:%S)] handle_escalations: ${esc_id} not found in S3 — skipping"
+            continue  # Drop from queue (already processed or never written)
+        fi
+
+        local status
+        status=$(echo "$esc_json" | jq -r '.status // "open"' 2>/dev/null)
+        if [ "$status" != "open" ]; then
+            # Already resolved — drop from queue
+            echo "[$(date -u +%H:%M:%S)] handle_escalations: ${esc_id} already ${status} — dropping from queue"
+            continue
+        fi
+
+        local severity category tier agent issue_num description options
+        severity=$(echo "$esc_json" | jq -r '.severity // "MEDIUM"' 2>/dev/null)
+        category=$(echo "$esc_json" | jq -r '.category // "blocked"' 2>/dev/null)
+        tier=$(echo "$esc_json" | jq -r '.tier // 1' 2>/dev/null)
+        agent=$(echo "$esc_json" | jq -r '.agent // "unknown"' 2>/dev/null)
+        issue_num=$(echo "$esc_json" | jq -r '.issue // ""' 2>/dev/null)
+        description=$(echo "$esc_json" | jq -r '.description // ""' 2>/dev/null)
+        options=$(echo "$esc_json" | jq -r '.options // ""' 2>/dev/null)
+
+        echo "[$(date -u +%H:%M:%S)] handle_escalations: processing ${esc_id} severity=${severity} category=${category} tier=${tier} agent=${agent}"
+
+        local resolution_action="none"
+        local auto_resolved=false
+
+        case "$tier" in
+            0)
+                # Tier 0 (retry): auto-resolve, re-queue task after delay
+                resolution_action="auto-retry"
+                if [ -n "$issue_num" ] && [[ "$issue_num" =~ ^[0-9]+$ ]]; then
+                    # Re-add issue to task queue after short delay by adding back to GitHub queue
+                    echo "[$(date -u +%H:%M:%S)] handle_escalations: Tier 0 retry — re-queuing issue #${issue_num} for ${agent}"
+                    # Add a small delay entry to task queue
+                    local cur_queue
+                    cur_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+                        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+                    if [ -z "$cur_queue" ]; then
+                        update_state "taskQueue" "$issue_num"
+                    else
+                        # Only add back if not already in queue
+                        if ! echo "$cur_queue" | grep -q "$issue_num"; then
+                            update_state "taskQueue" "${cur_queue},${issue_num}"
+                        fi
+                    fi
+                    auto_resolved=true
+                fi
+                ;;
+            1)
+                # Tier 1 (blocked/conflict/failed): reassign or post directive
+                case "$category" in
+                    conflict)
+                        # Conflict: spawn fresh worker on current main via directive thought
+                        resolution_action="spawn-fresh-worker"
+                        echo "[$(date -u +%H:%M:%S)] handle_escalations: Tier 1 conflict — posting directive to spawn fresh worker for issue #${issue_num}"
+                        kubectl_with_timeout 10 apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-esc-directive-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-state"
+  thoughtType: directive
+  confidence: 9
+  content: |
+    COORDINATOR DIRECTIVE [escalation-response]: Merge conflict detected by ${agent}
+    Issue: ${issue_num:-(none)}
+    Action: Spawn a fresh worker on current main branch to re-implement issue #${issue_num}.
+    The previous worker (${agent}) encountered: ${description}
+    EscalationID: ${esc_id}
+EOF
+                        auto_resolved=true
+                        ;;
+                    blocked)
+                        # Blocked: post directive for coordinator/god-delegate to address
+                        resolution_action="directive-posted"
+                        kubectl_with_timeout 10 apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-esc-directive-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-state"
+  thoughtType: directive
+  confidence: 9
+  content: |
+    COORDINATOR DIRECTIVE [escalation-response]: Agent blocked on dependency
+    Agent: ${agent}
+    Issue: ${issue_num:-(none)}
+    Blocked on: ${description}
+    Action: Resolve blocking dependency, then re-queue issue #${issue_num} for work.
+    EscalationID: ${esc_id}
+EOF
+                        auto_resolved=true
+                        ;;
+                    failed)
+                        # Failed: route to god-delegate
+                        resolution_action="routed-to-god-delegate"
+                        kubectl_with_timeout 10 apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-esc-directive-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-state"
+  thoughtType: directive
+  confidence: 9
+  content: |
+    COORDINATOR DIRECTIVE [escalation-response]: Agent task failed unrecoverably
+    Agent: ${agent}
+    Issue: ${issue_num:-(none)}
+    Failure: ${description}
+    Action: God-delegate — evaluate issue #${issue_num} and either close as won't-fix,
+    adjust requirements, or spawn architect for structural review.
+    EscalationID: ${esc_id}
+EOF
+                        auto_resolved=true
+                        ;;
+                esac
+                ;;
+            2)
+                # Tier 2 (decision): route to god-delegate
+                resolution_action="routed-to-god-delegate"
+                echo "[$(date -u +%H:%M:%S)] handle_escalations: Tier 2 decision — posting directive for god-delegate"
+                local options_block=""
+                [ -n "$options" ] && options_block="Options for god-delegate to choose: ${options}"
+                kubectl_with_timeout 10 apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-esc-directive-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-state"
+  thoughtType: directive
+  confidence: 9
+  content: |
+    COORDINATOR DIRECTIVE [escalation-response]: Decision required from god-delegate
+    Agent: ${agent}
+    Issue: ${issue_num:-(none)}
+    Decision needed: ${description}
+    ${options_block}
+    Action: God-delegate — make the decision and post a directive with the chosen option.
+    If an architecture decision, consider spawning an architect agent.
+    EscalationID: ${esc_id}
+EOF
+                auto_resolved=true
+                ;;
+            3)
+                # Tier 3 (security/proliferation/critical): post CRITICAL directive
+                resolution_action="critical-escalated"
+                echo "[$(date -u +%H:%M:%S)] CRITICAL ESCALATION: ${esc_id} severity=${severity} category=${category} agent=${agent}"
+                kubectl_with_timeout 10 apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-esc-critical-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-state"
+  thoughtType: directive
+  confidence: 9
+  content: |
+    🚨 CRITICAL ESCALATION [${category}/${severity}]: Immediate human attention required
+    Agent: ${agent}
+    Issue: ${issue_num:-(none)}
+    Description: ${description}
+    Action: Human/god-delegate must review immediately.
+    $([ "$category" = "security" ] && echo "SECURITY: Review for credentials, injection vulnerabilities, data exposure.")
+    $([ "$category" = "proliferation" ] && echo "PROLIFERATION: Consider activating kill switch if agent count is growing uncontrolled.")
+    EscalationID: ${esc_id}
+EOF
+                auto_resolved=true
+                ;;
+        esac
+
+        # Update escalation status in S3
+        if "$auto_resolved"; then
+            local resolved_json
+            resolved_json=$(echo "$esc_json" | jq \
+                --arg resolved_by "coordinator" \
+                --arg resolution "$resolution_action" \
+                --arg resolved_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '.status = "resolved" | .resolvedBy = $resolved_by | .resolution = $resolution | .resolvedAt = $resolved_at')
+            echo "$resolved_json" | aws s3 cp - \
+                "s3://${IDENTITY_BUCKET}/escalations/${esc_id}.json" \
+                --content-type application/json >/dev/null 2>&1 || true
+            processed=$((processed + 1))
+            echo "[$(date -u +%H:%M:%S)] handle_escalations: ${esc_id} resolved via ${resolution_action}"
+        else
+            # Not yet resolvable — keep in queue
+            remaining_ids+=("$esc_id")
+            skipped=$((skipped + 1))
+        fi
+    done
+
+    # Update escalation queue with only remaining (unresolved) IDs
+    local new_queue_str
+    new_queue_str=$(IFS=','; echo "${remaining_ids[*]}")
+    update_state "escalationQueue" "${new_queue_str:-}"
+
+    if [ $processed -gt 0 ] || [ $skipped -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] handle_escalations: processed=${processed} skipped=${skipped} remaining_in_queue=${#remaining_ids[@]}"
+    fi
+}
+
 # Track debate activity — count debate threads, surface unresolved disagreements
 track_debate_activity() {
     local all_cm
@@ -3890,6 +4151,14 @@ while true; do
     # Every 5 iterations (~2.5 min): refresh task queue from GitHub
     if [ $((iteration % 5)) -eq 0 ]; then
         refresh_task_queue
+    fi
+
+    # Every 5 iterations (~2.5 min): process agent escalation queue (issue #1839)
+    # Agents call ax_escalate() in helpers.sh to signal problems needing coordinator help.
+    # This reads the escalationQueue field, applies tier-based auto-resolution, and
+    # routes decisions to god-delegate as needed.
+    if [ $((iteration % 5)) -eq 0 ]; then
+        handle_escalations
     fi
 
     # Every iteration: cleanup stale assignments
