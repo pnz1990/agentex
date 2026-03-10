@@ -296,12 +296,16 @@ update_specialization() {
       '.specializationLabelCounts[$lbl] = (.specializationLabelCounts[$lbl] // 0) + 1')
   done
   
-  # Determine dominant specialization (label count >= 3 and highest)
+  # Determine dominant specialization (label count >= 1 and highest)
+  # Threshold lowered from 3 → 1 (issue #1456): most agents work on exactly 1 labeled
+  # issue per run and exit — requiring 3 means specialization NEVER accumulates.
+  # With threshold=1, any agent completing a labeled issue gets a specialization entry,
+  # enabling identity-based routing (v0.2 milestone, coordinator specializedAssignments).
   local top_label top_count
   top_label=$(echo "$updated_json" | jq -r '
     .specializationLabelCounts | to_entries |
     sort_by(-.value) | .[0] |
-    select(.value >= 3) | .key // ""')
+    select(.value >= 1) | .key // ""')
   top_count=$(echo "$updated_json" | jq -r '
     .specializationLabelCounts | to_entries |
     sort_by(-.value) | .[0].value // 0')
