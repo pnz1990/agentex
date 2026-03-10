@@ -1765,16 +1765,22 @@ register_with_coordinator() {
   current=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.activeAgents}' 2>/dev/null || echo "")
 
+  # Issue #1515: Include displayName in registration triplet (name:role:displayName)
+  # so coordinator's score_agent_for_issue() can look up canonical S3 identity even
+  # when the per-session identity file is empty (new agent pods always start empty).
+  local display_name="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
+  local agent_entry="${AGENT_NAME}:${AGENT_ROLE}:${display_name}"
+
   local new_val
   if [ -z "$current" ]; then
-    new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    new_val="$agent_entry"
   else
     # Deduplicate: remove any prior entry for this agent then add fresh
     # Use grep -v || true: if this agent is the only registered agent, grep -v returns exit code 1
     # (no matches), which would crash the script under set -euo pipefail
     new_val=$(echo "$current" | tr ',' '\n' | grep -v "^${AGENT_NAME}:" || true)
     new_val=$(echo "$new_val" | tr '\n' ',' | sed 's/,$//')
-    [ -n "$new_val" ] && new_val="${new_val},${AGENT_NAME}:${AGENT_ROLE}" || new_val="${AGENT_NAME}:${AGENT_ROLE}"
+    [ -n "$new_val" ] && new_val="${new_val},${agent_entry}" || new_val="$agent_entry"
   fi
 
   # Build patch data — include lastPlannerSeen timestamp for planners (issue #1274)
@@ -1792,7 +1798,7 @@ register_with_coordinator() {
     return 1
   fi
   
-  log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE})"
+  log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE}) displayName=${display_name}"
   [ "${AGENT_ROLE}" = "planner" ] && log "Coordinator: updated lastPlannerSeen=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   return 0
 }
