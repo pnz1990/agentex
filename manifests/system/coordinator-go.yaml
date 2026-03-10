@@ -1,0 +1,111 @@
+---
+# PersistentVolumeClaim for SQLite database storage
+# Replaces the transient ConfigMap string state with durable SQLite on a PV
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: coordinator-db
+  namespace: agentex
+  labels:
+    app: agentex-coordinator-go
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi  # SQLite with debate history and task queue is small
+
+---
+# Service for the Go coordinator HTTP API
+# Agents call this instead of patching ConfigMaps
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator-go
+  namespace: agentex
+  labels:
+    app: agentex-coordinator-go
+spec:
+  selector:
+    app: agentex-coordinator-go
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Deployment for the Go coordinator
+# Runs alongside the bash coordinator during migration (feature-flagged)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentex-coordinator-go
+  namespace: agentex
+  labels:
+    app: agentex-coordinator-go
+    agentex/component: coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentex-coordinator-go
+  strategy:
+    type: Recreate  # SQLite is single-writer; RollingUpdate would cause two writers
+  template:
+    metadata:
+      labels:
+        app: agentex-coordinator-go
+    spec:
+      serviceAccountName: agentex-agent-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: coordinator
+          # Read ECR registry from constitution at deploy time
+          # Replaced by CI with: ${ECR_REGISTRY}/agentex/coordinator-go:latest
+          image: PLACEHOLDER_ECR_REGISTRY/agentex/coordinator-go:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DB_PATH
+              value: /data/coordinator.db
+            - name: LISTEN_ADDR
+              value: ":8080"
+            # REPO, S3_BUCKET, BEDROCK_REGION read from constitution ConfigMap at runtime
+          volumeMounts:
+            - name: coordinator-db
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: coordinator-db
+          persistentVolumeClaim:
+            claimName: coordinator-db
