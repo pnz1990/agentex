@@ -1292,10 +1292,14 @@ claim_task() {
         --type=json \
         -p "[{\"op\":\"add\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
         2>/dev/null; then
-        log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
-        push_metric "TaskClaimed" 1
-        return 0
-      fi
+         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
+         push_metric "TaskClaimed" 1
+         # Persist claimed issue to temp file so end-of-session specialization
+         # tracking works even if coordinator cleans up activeAssignments before then.
+         # (issue #1252: WORKED_ISSUE=0 race with coordinator 30s cleanup)
+         echo "$issue" > /tmp/my_worked_issue 2>/dev/null || true
+         return 0
+       fi
     else
       # Field exists: use test+replace for atomic CAS
       if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
@@ -1304,8 +1308,12 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Persist claimed issue to temp file so end-of-session specialization
+        # tracking works even if coordinator cleans up activeAssignments before then.
+        # (issue #1252: WORKED_ISSUE=0 race with coordinator 30s cleanup)
+        echo "$issue" > /tmp/my_worked_issue 2>/dev/null || true
         return 0
-      fi
+       fi
     fi
 
     # CAS failed: another agent concurrently modified activeAssignments — retry with fresh read
@@ -3406,15 +3414,29 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   
   # Update specialization based on issue labels worked on this session (issue #1098)
   # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147)
+  # Fix for issue #1252: claim_task() now writes to /tmp/my_worked_issue at claim time.
+  # This temp file is the most reliable source because it is written atomically when the
+  # issue is claimed, before any coordinator cleanup can race and remove the assignment.
   WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
   if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
-    # Self-selected path: COORDINATOR_ISSUE was never set (queue was empty).
-    # Look up this agent's active assignment in coordinator-state to find the issue claimed.
+    # Primary fallback: read from temp file written by claim_task() at claim time.
+    # This is resistant to the 30s coordinator cleanup race that previously zeroed WORKED_ISSUE.
+    if [ -f /tmp/my_worked_issue ]; then
+      WORKED_ISSUE=$(cat /tmp/my_worked_issue 2>/dev/null | tr -d '[:space:]' || echo "0")
+      if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
+        log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from /tmp/my_worked_issue (claim_task persisted)"
+      else
+        WORKED_ISSUE="0"
+      fi
+    fi
+  fi
+  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+    # Secondary fallback: coordinator activeAssignments (may already be cleaned up, but try anyway).
     ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
     WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
     if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
-      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments"
+      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments (fallback)"
     fi
   fi
   # Fetch labels from the GitHub issue worked on this session
