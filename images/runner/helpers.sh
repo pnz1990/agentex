@@ -234,5 +234,82 @@ query_debate_outcomes() {
   echo "$results"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes available"
+# ── claim_task ────────────────────────────────────────────────────────────────
+# Atomically claim a GitHub issue from coordinator to prevent duplicate work.
+# Fix (issue #1252): writes issue number to /tmp/agentex-worked-issue at claim time
+# so specialization tracking works even if coordinator cleanup races end-of-session.
+#
+# Usage: claim_task <issue_number>
+# Returns: 0 if claimed (or already claimed by us), 1 if claimed by another agent
+#
+# Example:
+#   source /agent/helpers.sh && claim_task 1252
+claim_task() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
+
+  local max_attempts=5
+  local attempt=0
+
+  while [ $attempt -lt $max_attempts ]; do
+    attempt=$((attempt + 1))
+
+    local assignments
+    assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+
+    # Check if issue is already claimed by any agent
+    if echo "$assignments" | grep -qE "(^|,)[^,]+:${issue}(,|$)"; then
+      local claimer
+      claimer=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
+      if [ "$claimer" = "$AGENT_NAME" ]; then
+        log "Coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
+        # Write to worked-issue file (issue #1252 fix — race-free specialization tracking)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        return 0
+      fi
+      log "Coordinator: issue #$issue already claimed by $claimer — skipping"
+      return 1
+    fi
+
+    # Build new assignments value
+    local new_assignments
+    if [ -z "$assignments" ]; then
+      new_assignments="${AGENT_NAME}:${issue}"
+    else
+      new_assignments="${assignments},${AGENT_NAME}:${issue}"
+    fi
+
+    local expected_value="$assignments"
+    if [ -z "$expected_value" ]; then
+      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=json \
+        -p "[{\"op\":\"add\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+        2>/dev/null; then
+        log "Coordinator: claimed issue #$issue (was: empty)"
+        # Write to worked-issue file (issue #1252 fix)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        return 0
+      fi
+    else
+      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=json \
+        -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+        2>/dev/null; then
+        log "Coordinator: claimed issue #$issue"
+        # Write to worked-issue file (issue #1252 fix)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        return 0
+      fi
+    fi
+
+    log "CAS failed for issue #$issue (attempt $attempt/$max_attempts) — retrying"
+    sleep 1
+  done
+
+  log "WARNING: Failed to claim issue #$issue after $max_attempts attempts"
+  return 1
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

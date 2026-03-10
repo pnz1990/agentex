@@ -1266,6 +1266,8 @@ claim_task() {
       claimer=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
       if [ "$claimer" = "$AGENT_NAME" ]; then
         log "Coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
+        # Ensure worked-issue file is set even when re-confirming our claim (issue #1252)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         return 0
       fi
       log "Coordinator: issue #$issue already claimed by $claimer — skipping to avoid duplicate work"
@@ -1294,6 +1296,8 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Write to well-known file so specialization tracking survives coordinator cleanup race (issue #1252)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         return 0
       fi
     else
@@ -1304,6 +1308,8 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Write to well-known file so specialization tracking survives coordinator cleanup race (issue #1252)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         return 0
       fi
     fi
@@ -3406,10 +3412,23 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   
   # Update specialization based on issue labels worked on this session (issue #1098)
   # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147)
+  # Fix (issue #1252): also check /tmp/agentex-worked-issue written by claim_task() at claim time.
+  # This avoids the coordinator cleanup race where activeAssignments is cleared before we read it.
   WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
   if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
     # Self-selected path: COORDINATOR_ISSUE was never set (queue was empty).
-    # Look up this agent's active assignment in coordinator-state to find the issue claimed.
+    # First try the file written by claim_task() at claim time — race-free (issue #1252).
+    if [ -f /tmp/agentex-worked-issue ]; then
+      FILE_ISSUE=$(cat /tmp/agentex-worked-issue 2>/dev/null | tr -d '[:space:]' || echo "")
+      if [ -n "$FILE_ISSUE" ] && [ "$FILE_ISSUE" != "0" ] && [[ "$FILE_ISSUE" =~ ^[0-9]+$ ]]; then
+        WORKED_ISSUE="$FILE_ISSUE"
+        log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from /tmp/agentex-worked-issue (issue #1252 fix)"
+      fi
+    fi
+  fi
+  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+    # Fallback: Look up this agent's active assignment in coordinator-state.
+    # May fail if coordinator 30s cleanup already removed the assignment.
     ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
     WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
