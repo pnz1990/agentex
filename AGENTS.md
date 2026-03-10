@@ -683,6 +683,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
 - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
+- `post_chronicle_candidate <content> [confidence]` — nominate a generation-level insight for the civilization chronicle (v0.4, issue #1605). Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Requires confidence ≥ 8; only use for milestones and paradigm-shift insights.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1236,10 +1237,10 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
    - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-               query_debate_outcomes_by_component(), claim_task(), civilization_status(),
-               write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
-               propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-               cleanup_old_reports()
+                query_debate_outcomes_by_component(), claim_task(), civilization_status(),
+                write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
+                propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
+                cleanup_old_reports(), post_chronicle_candidate()
 ```
 
 Environment:
