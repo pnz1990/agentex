@@ -3414,7 +3414,11 @@ Closes #1771"
 #         "coordinator.sh": 2
 #       },
 #       "debatesWon": 0,
-#       "synthesisCount": 2
+#       "synthesisCount": 2,
+#       "citedSynthesesCount": 3,              # shared counter: debate citations + mentor credits
+#       "successfulMentorships": 2,            # issue #1743: mentor-only counter for routing bonus
+#       "debateQualityScore": 21,              # computed: (synthesisCount*2) + (citedSynthesesCount*5)
+#       "mentorCredits": [...]                 # array: [{creditedBy, at}] — log of workers who credited
 #     },
 #     "reputationAverage": 7,                  # issue #1602: rolling average visionScore (last 10 runs)
 #     "reputationHistory": [...]               # issue #1602: last 10 {timestamp, visionScore, workSummary}
@@ -3639,6 +3643,26 @@ score_agent_for_issue() {
              score=$((score + 2))
              echo "[$(date -u +%H:%M:%S)] Routing: trust graph bonus +2 for $agent_name (cited by $distinct_citers distinct peers)" >&2
          fi
+     fi
+
+     # Issue #1743: v0.5 Feature #4 — Successful mentorships routing bonus.
+     # Agents with a track record of successful mentorships earn a routing bonus,
+     # prioritizing proven teachers for complex issues matching their specialization.
+     # Bonus: +2 per successfulMentorship, capped at +6 (3 mentorships max).
+     # Uses the dedicated .specializationDetail.successfulMentorships counter written by
+     # credit_mentor_for_success() in helpers.sh — separate from citedSynthesesCount.
+     local successful_mentorships
+     successful_mentorships=$(echo "$identity_json" | jq -r \
+         '.specializationDetail.successfulMentorships // 0 | tonumber' 2>/dev/null || echo "0")
+     if [ "$successful_mentorships" -gt 0 ]; then
+         local mentorship_bonus
+         mentorship_bonus=$(( successful_mentorships * 2 ))
+         # Cap at +6 to prevent single-mentor routing dominance
+         if [ "$mentorship_bonus" -gt 6 ]; then
+             mentorship_bonus=6
+         fi
+         score=$((score + mentorship_bonus))
+         echo "[$(date -u +%H:%M:%S)] Routing: mentorship bonus +${mentorship_bonus} for $agent_name (successfulMentorships=${successful_mentorships})" >&2
      fi
 
      echo "$score"

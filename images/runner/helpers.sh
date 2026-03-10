@@ -1459,25 +1459,31 @@ Proposed by: ${AGENT_NAME}"
   return 0
 }
 
-# ── credit_mentor_for_success ─────────────────────────────────────────────────
-# Issue #1732 v0.5: Mentor Credit Loop — close the feedback cycle for predecessor mentorship.
-#
-# When a worker successfully completes a task that a mentor helped with (PR opened + CI passes),
-# the mentor's identity is updated:
-#   - .specializationDetail.citedSynthesesCount += 1
-#   - .specializationDetail.debateQualityScore recalculated
-#
-# This creates a virtuous feedback cycle: mentors who give useful advice get credited,
-# making their future advice more likely to be surfaced by the mentorship injection system.
-#
-# Usage: credit_mentor_for_success <mentor_agent_name>
-#
-# This is called by entrypoint.sh after CI passes on a session PR when MENTOR_AGENT_NAME is set.
-#
-# Example:
-#   if [ -n "${MENTOR_AGENT_NAME:-}" ] && [ "$PRS_OPENED" -gt 0 ]; then
-#     credit_mentor_for_success "$MENTOR_AGENT_NAME"
-#   fi
+ # ── credit_mentor_for_success ─────────────────────────────────────────────────
+ # Issue #1732/#1743 v0.5: Mentor Credit Loop — close the feedback cycle for predecessor mentorship.
+ #
+ # When a worker successfully completes a task that a mentor helped with (PR opened + CI passes),
+ # the mentor's identity is updated:
+ #   - .specializationDetail.citedSynthesesCount += 1  (shared: debate citations + mentor credits)
+ #   - .specializationDetail.successfulMentorships += 1  (mentor-only counter, issue #1743)
+ #   - .specializationDetail.debateQualityScore recalculated
+ #   - .specializationDetail.mentorCredits[] appended with {creditedBy, at}
+ #
+ # The successfulMentorships counter is kept separate from citedSynthesesCount so the
+ # coordinator can apply a distinct routing bonus (+2 per mentorship, capped at +6) for
+ # proven teachers without conflating it with debate synthesis quality.
+ #
+ # This creates a virtuous feedback cycle: mentors who give useful advice get credited,
+ # making their future advice more likely to be surfaced by the mentorship injection system.
+ #
+ # Usage: credit_mentor_for_success <mentor_agent_name>
+ #
+ # This is called by entrypoint.sh after CI passes on a session PR when MENTOR_AGENT_NAME is set.
+ #
+ # Example:
+ #   if [ -n "${MENTOR_AGENT_NAME:-}" ] && [ "$PRS_OPENED" -gt 0 ]; then
+ #     credit_mentor_for_success "$MENTOR_AGENT_NAME"
+ #   fi
 credit_mentor_for_success() {
   local mentor_agent="${1:-}"
 
@@ -1503,69 +1509,77 @@ credit_mentor_for_success() {
     return 0
   fi
 
-  # Increment citedSynthesesCount (represents successful mentorship outcomes)
-  # Recalculate debateQualityScore = (synthesisCount * 2) + (citedSynthesesCount * 5)
-  local updated_identity
-  updated_identity=$(echo "$mentor_identity" | jq \
-    --arg creditor "${AGENT_NAME:-unknown}" \
-    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
-    .specializationDetail.debateQualityScore = (
-      (.specializationDetail.synthesisCount // 0) * 2 +
-      (.specializationDetail.citedSynthesesCount // 0) * 5
-    ) |
-    .specializationDetail.mentorCredits = (.specializationDetail.mentorCredits // []) +
-      [{"creditedBy": $creditor, "at": $timestamp}]
-  ' 2>/dev/null || echo "")
+   # Increment citedSynthesesCount (shared: debate citations + mentor credits) AND
+   # successfulMentorships (mentor-only counter, issue #1743) for clean separation.
+   # Recalculate debateQualityScore = (synthesisCount * 2) + (citedSynthesesCount * 5)
+   local updated_identity
+   updated_identity=$(echo "$mentor_identity" | jq \
+     --arg creditor "${AGENT_NAME:-unknown}" \
+     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+     .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+     .specializationDetail.successfulMentorships = (.specializationDetail.successfulMentorships // 0) + 1 |
+     .specializationDetail.debateQualityScore = (
+       (.specializationDetail.synthesisCount // 0) * 2 +
+       (.specializationDetail.citedSynthesesCount // 0) * 5
+     ) |
+     .specializationDetail.mentorCredits = (.specializationDetail.mentorCredits // []) +
+       [{"creditedBy": $creditor, "at": $timestamp}]
+   ' 2>/dev/null || echo "")
 
-  if [ -z "$updated_identity" ]; then
-    log "credit_mentor_for_success: jq transform failed for ${mentor_agent} — skipping"
-    return 0
-  fi
+   if [ -z "$updated_identity" ]; then
+     log "credit_mentor_for_success: jq transform failed for ${mentor_agent} — skipping"
+     return 0
+   fi
 
-  # Write updated identity back to S3 (per-session path)
-  if echo "$updated_identity" | aws s3 cp - "$mentor_identity_path" --content-type application/json >/dev/null 2>&1; then
-    local new_score
-    new_score=$(echo "$updated_identity" | jq -r '.specializationDetail.debateQualityScore // 0')
-    local cited_count
-    cited_count=$(echo "$updated_identity" | jq -r '.specializationDetail.citedSynthesesCount // 0')
-    log "credit_mentor_for_success: credited mentor ${mentor_agent} — citedSynthesesCount=${cited_count} debateQualityScore=${new_score}"
-  else
-    log "WARNING: credit_mentor_for_success: failed to write updated identity for ${mentor_agent} (non-fatal)"
-    return 0
-  fi
+   # Write updated identity back to S3 (per-session path)
+   if echo "$updated_identity" | aws s3 cp - "$mentor_identity_path" --content-type application/json >/dev/null 2>&1; then
+     local new_score
+     new_score=$(echo "$updated_identity" | jq -r '.specializationDetail.debateQualityScore // 0')
+     local cited_count
+     cited_count=$(echo "$updated_identity" | jq -r '.specializationDetail.citedSynthesesCount // 0')
+     local successful_mentorships
+     successful_mentorships=$(echo "$updated_identity" | jq -r '.specializationDetail.successfulMentorships // 0')
+     log "credit_mentor_for_success: credited mentor ${mentor_agent} — citedSynthesesCount=${cited_count} successfulMentorships=${successful_mentorships} debateQualityScore=${new_score}"
+   else
+     log "WARNING: credit_mentor_for_success: failed to write updated identity for ${mentor_agent} (non-fatal)"
+     return 0
+   fi
 
-  # Also update canonical identity if it exists (displayName-based path)
-  local display_name
-  display_name=$(echo "$mentor_identity" | jq -r '.displayName // ""' 2>/dev/null || echo "")
-  if [ -n "$display_name" ] && [ "$display_name" != "null" ]; then
-    local canonical_path="s3://${S3_BUCKET}/identities/canonical/${display_name}.json"
-    if aws s3 ls "$canonical_path" >/dev/null 2>&1; then
-      local canonical_identity
-      canonical_identity=$(aws s3 cp "$canonical_path" - 2>/dev/null || echo "")
-      if [ -n "$canonical_identity" ]; then
-        local updated_canonical
-        updated_canonical=$(echo "$canonical_identity" | jq \
-          --arg creditor "${AGENT_NAME:-unknown}" \
-          --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-          .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
-          .specializationDetail.debateQualityScore = (
-            (.specializationDetail.synthesisCount // 0) * 2 +
-            (.specializationDetail.citedSynthesesCount // 0) * 5
-          ) |
-          .specializationDetail.mentorCredits = (.specializationDetail.mentorCredits // []) +
-            [{"creditedBy": $creditor, "at": $timestamp}]
-        ' 2>/dev/null || echo "")
-        if [ -n "$updated_canonical" ]; then
-          echo "$updated_canonical" | aws s3 cp - "$canonical_path" --content-type application/json >/dev/null 2>&1 && \
-            log "credit_mentor_for_success: updated canonical identity for ${display_name}" || \
-            log "WARNING: credit_mentor_for_success: failed to update canonical identity for ${display_name} (non-fatal)"
-        fi
-      fi
-    fi
-  fi
+   # Post a visibility Thought CR so peers can see the mentor-student cycle completed
+   post_thought "Mentor credit: ${mentor_agent} credited by ${AGENT_NAME:-unknown} for successful mentorship (successfulMentorships=$(echo "$updated_identity" | jq -r '.specializationDetail.successfulMentorships // 0'))" "insight" 7 2>/dev/null || true
 
-  return 0
+   # Also update canonical identity if it exists (displayName-based path)
+   local display_name
+   display_name=$(echo "$mentor_identity" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+   if [ -n "$display_name" ] && [ "$display_name" != "null" ]; then
+     local canonical_path="s3://${S3_BUCKET}/identities/canonical/${display_name}.json"
+     if aws s3 ls "$canonical_path" >/dev/null 2>&1; then
+       local canonical_identity
+       canonical_identity=$(aws s3 cp "$canonical_path" - 2>/dev/null || echo "")
+       if [ -n "$canonical_identity" ]; then
+         local updated_canonical
+         updated_canonical=$(echo "$canonical_identity" | jq \
+           --arg creditor "${AGENT_NAME:-unknown}" \
+           --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+           .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+           .specializationDetail.successfulMentorships = (.specializationDetail.successfulMentorships // 0) + 1 |
+           .specializationDetail.debateQualityScore = (
+             (.specializationDetail.synthesisCount // 0) * 2 +
+             (.specializationDetail.citedSynthesesCount // 0) * 5
+           ) |
+           .specializationDetail.mentorCredits = (.specializationDetail.mentorCredits // []) +
+             [{"creditedBy": $creditor, "at": $timestamp}]
+         ' 2>/dev/null || echo "")
+         if [ -n "$updated_canonical" ]; then
+           echo "$updated_canonical" | aws s3 cp - "$canonical_path" --content-type application/json >/dev/null 2>&1 && \
+             log "credit_mentor_for_success: updated canonical identity for ${display_name} (successfulMentorships incremented)" || \
+             log "WARNING: credit_mentor_for_success: failed to update canonical identity for ${display_name} (non-fatal)"
+         fi
+       fi
+     fi
+   fi
+
+   return 0
 }
 
 log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
