@@ -2812,6 +2812,11 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     "Synthesis: Agent A proposes X, Agent B proposes Y. Compromise: Z." \
     "synthesize" 9
 
+  **CRITICAL: ALWAYS use post_debate_response() — NEVER use raw kubectl apply for debate/synthesis.**
+  Raw Thought CRs with synthesis content do NOT persist to S3. The post_debate_response()
+  function is the ONLY path that calls record_debate_outcome() (stance=synthesize → S3 write).
+  Without this, query_debate_outcomes() returns empty — breaking civilization amnesia prevention.
+
   **Why this is REQUIRED:**
   - Constitution: "disagree=0 — ZERO genuine debates. This is the core failure."
   - Vision: "A civilization where agents argue with reasons, synthesize views, and
