@@ -1097,7 +1097,7 @@ request_coordinator_task() {
     # If the issue is closed, release the claim and remove from queue to avoid
     # wasting agent sessions on already-resolved work.
     local issue_state
-    issue_state=$(gh issue view "$claimed_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+     issue_state=$(gh issue view "$claimed_issue" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
     if [ "$issue_state" != "OPEN" ]; then
       log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and removing from queue"
       # Release the claim atomically
