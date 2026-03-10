@@ -203,7 +203,22 @@ handle_fatal_error() {
       fi
       
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Spawn slot granted. Attempting emergency spawn..." >&2
-      local next_agent="${AGENT_ROLE}-$(date +%s)"
+      
+      # Issue #1013: Apply single-planner constraint in emergency spawn path.
+      # PR #949 fixed this in step 12, but the ERR trap was missed.
+      # If we are a planner and another planner is already active, spawn a worker instead.
+      local emergency_role="${AGENT_ROLE}"
+      if [ "${AGENT_ROLE}" = "planner" ]; then
+        local active_planners
+        active_planners=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+          jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0) | select(.metadata.name | test("planner"))] | length' 2>/dev/null || echo "0")
+        if [ "${active_planners:-0}" -gt 0 ]; then
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Single-planner constraint: ${active_planners} planner(s) active. Emergency spawn will use worker role instead." >&2
+          emergency_role="worker"
+        fi
+      fi
+      
+      local next_agent="${emergency_role}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
       # Calculate next generation (issue #431: was hardcoded to "1")
@@ -214,7 +229,7 @@ handle_fatal_error() {
       # Use || true to prevent trap recursion if kubectl fails
       # Issue #449: Capture stderr+stdout to log file for debugging
       # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
-      kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+       kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Task
 metadata:
@@ -223,12 +238,12 @@ metadata:
 spec:
   title: "Emergency continuation after ${AGENT_NAME} fatal error"
   description: "Previous agent died at line $line_num with exit code $exit_code. Continue platform improvement."
-  role: ${AGENT_ROLE}
+  role: ${emergency_role}
   effort: M
   priority: 10
 EOF
-      # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
-      kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
+       # Issue #659: Wrap with timeout to prevent 120s hangs during cluster connectivity issues
+       kubectl_with_timeout 10 apply -f - <<EOF 2>&1 | tee -a /tmp/emergency-spawn.log || true
 apiVersion: kro.run/v1alpha1
 kind: Agent
 metadata:
@@ -239,7 +254,7 @@ metadata:
     agentex/emergency-spawn: "true"
     agentex/generation: "${next_generation}"
 spec:
-  role: ${AGENT_ROLE}
+  role: ${emergency_role}
   taskRef: $next_task
   model: ${BEDROCK_MODEL}
 EOF
@@ -617,19 +632,42 @@ query_thoughts() {
     2>/dev/null || true
 }
 
-# cleanup_old_thoughts() - Delete thoughts older than 24 hours to prevent clutter
+# cleanup_old_thoughts() - Delete thoughts older than 24 hours (or 2h for low-signal types)
+# to prevent cluster clutter and kubectl performance degradation.
+# Issue #1020: increased list timeout from 10s to 60s (6000+ CRs take 10+ seconds to list)
+# Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
 # Should be called periodically by planners
 cleanup_old_thoughts() {
-  local cutoff_time=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
   
-  if [ -z "$cutoff_time" ]; then
+  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ]; then
     log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
     return 0
   fi
   
-  local old_thoughts=$(kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null | \
-    jq -r --arg cutoff "$cutoff_time" \
-    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
+  # Issue #1020: use 60s timeout to handle 6000+ CRs (list takes 10+ seconds with large clusters)
+  local all_thoughts_json
+  all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+  
+  if [ -z "$all_thoughts_json" ]; then
+    log "No thoughts found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  # Issue #1016: tiered TTL — low-signal types (blocker, observation) expire after 2h
+  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  local old_thoughts
+  old_thoughts=$(echo "$all_thoughts_json" | jq -r \
+    --arg cutoff_24h "$cutoff_24h" \
+    --arg cutoff_2h "$cutoff_2h" \
+    '.items[] |
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+      then $cutoff_2h
+      else $cutoff_24h
+      end) as $cutoff |
+     select(.metadata.creationTimestamp < $cutoff) |
+     .metadata.name' 2>/dev/null || true)
   
   if [ -z "$old_thoughts" ]; then
     log "No old thoughts to clean up"
@@ -644,8 +682,8 @@ cleanup_old_thoughts() {
   done
   
   if [ $count -gt 0 ]; then
-    log "Cleaned up $count thoughts older than 24h"
-    post_thought "Cleaned up $count thoughts older than 24 hours to prevent cluster clutter" "observation" 7 "maintenance"
+    log "Cleaned up $count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
+    post_thought "Cleaned up $count thoughts (tiered TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
   fi
 }
 
