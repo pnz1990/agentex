@@ -686,6 +686,7 @@ sync_constitution_to_git() {
     # those keys in the existing file. This preserves all comments, annotations, and
     # documentation. Previously used head -16 + full data rebuild which DESTROYED all docs.
     local constitution_file="manifests/system/constitution.yaml"
+    local chart_values_file="chart/values.yaml"
     
     # Parse kv_pairs (format: "key1=value1 key2=value2") and update each changed key.
     # Skip meta-keys that are not real constitution fields (reason=, proposalRef=).
@@ -715,14 +716,26 @@ sync_constitution_to_git() {
         else
             echo "[$(date -u +%H:%M:%S)] WARNING: key '${key}' not found in constitution.yaml — skipping"
         fi
+        # Also update chart/values.yaml to keep Helm install defaults in sync (issue #1408)
+        # chart/values.yaml uses the same 2-space-indent pattern for governance keys
+        if grep -q "^  ${key}: " "$chart_values_file" 2>/dev/null; then
+            local chart_escaped_value
+            chart_escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
+            sed -i "s/^  ${key}: .*$/  ${key}: \"${chart_escaped_value}\"/" "$chart_values_file"
+            echo "[$(date -u +%H:%M:%S)] ✓ Updated chart/values.yaml: ${key}=${value}"
+        fi
     done <<< "$(echo "$kv_pairs" | tr ' ' '\n')"
     
-    # Check if there are changes
-    if ! git diff --quiet "$constitution_file"; then
+    # Check if there are changes (either constitution.yaml or chart/values.yaml)
+    if ! git diff --quiet "$constitution_file" || ! git diff --quiet "$chart_values_file" 2>/dev/null; then
         git add "$constitution_file"
+        # Stage chart/values.yaml if it was modified
+        if ! git diff --quiet "$chart_values_file" 2>/dev/null; then
+            git add "$chart_values_file"
+        fi
         
         # Build commit message
-        local commit_msg="chore: sync constitution.yaml with enacted governance decision
+        local commit_msg="chore: sync constitution.yaml and chart/values.yaml with enacted governance decision
 
 Governance topic: ${topic}
 Enacted changes: ${kv_pairs}
@@ -743,7 +756,7 @@ Fixes #893"
             # Create PR using gh CLI
             if command -v gh &>/dev/null && [ -n "${GITHUB_TOKEN:-}" ]; then
                 # Check if PR already exists for this topic to avoid duplicate PRs (#1333)
-                local pr_title="chore: sync constitution.yaml with enacted governance ($topic)"
+                local pr_title="chore: sync constitution.yaml and chart/values.yaml with enacted governance ($topic)"
                 local existing_pr
                 existing_pr=$(gh pr list --repo "${GITHUB_REPO}" --state open \
                     --search "sync constitution.yaml with enacted governance ($topic)" \
@@ -758,7 +771,7 @@ Fixes #893"
                     --title "${pr_title}" \
                     --body "## Governance Enactment Sync
 
-This PR syncs \`manifests/system/constitution.yaml\` with the live \`agentex-constitution\` ConfigMap after governance enactment.
+This PR syncs \`manifests/system/constitution.yaml\` AND \`chart/values.yaml\` with the live \`agentex-constitution\` ConfigMap after governance enactment.
 
 **Enacted changes:**
 \`\`\`
@@ -771,9 +784,9 @@ ${kv_pairs}
 - Enactment timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 **Why this matters:**
-Without this sync, the git repo drifts from cluster state. Fresh installs using \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization.
+Without this sync, the git repo drifts from cluster state. Fresh installs using \`helm install\` (chart/values.yaml) or \`kubectl apply -f manifests/system/constitution.yaml\` would revert collective decisions made by the civilization. Fixes issue #1408.
 
-**Related:** Issue #893, Issue #891 (constitution drift detection)
+**Related:** Issue #893, Issue #891 (constitution drift detection), Issue #1408 (chart/values.yaml drift)
 
 **Auto-merge eligible:** This is a data sync PR (not protected file) reflecting already-enacted governance. Safe to merge immediately." \
                     --head "$branch_name" \
@@ -793,7 +806,7 @@ Without this sync, the git repo drifts from cluster state. Fresh installs using 
             return 1
         fi
     else
-        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml (already synced)"
+        echo "[$(date -u +%H:%M:%S)] No changes detected in constitution.yaml or chart/values.yaml (already synced)"
     fi
     
     cd / && rm -rf "$workspace"
