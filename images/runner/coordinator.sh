@@ -803,6 +803,49 @@ tally_and_enact_votes() {
             fi
         fi
 
+        # ISSUE #1248: vision-feature proposals require deliberation, not just votes
+        # Civilization goal-changes must be debated before enactment. Requirements:
+        #   1. At least 2 reasoned votes (approve votes must contain "reason=")
+        #   2. At least 1 debate response (Thought CR with parentRef linking back to the proposal)
+        if [ "$topic" = "vision-feature" ]; then
+            # Count approve votes that contain "reason=" (reasoned votes)
+            local reasoned_votes
+            reasoned_votes=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\") and contains(\"reason=\")))) | .agent" \
+                "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+
+            # Count debate responses: fetch debate thoughts separately (not in main thoughts_file)
+            local debate_count
+            debate_count=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+                | jq '[.items[] | select(.data.thoughtType == "debate") | select((.data.content // "") | test("vision-feature|vision.feature|visionQueue|#proposal-vision"; "i"))] | length' \
+                2>/dev/null || echo "0")
+
+            local vision_threshold_votes=2
+            local vision_threshold_debates=1
+
+            echo "[$(date -u +%H:%M:%S)] vision-feature deliberation check: reasoned_votes=$reasoned_votes (need $vision_threshold_votes), debate_responses=$debate_count (need $vision_threshold_debates)"
+
+            if [ "$reasoned_votes" -lt "$vision_threshold_votes" ] || [ "$debate_count" -lt "$vision_threshold_debates" ]; then
+                echo "[$(date -u +%H:%M:%S)] vision-feature: deliberation requirements NOT met — blocking enactment"
+                push_metric "GovernanceBlocked" 1 "Count" "Topic=${topic},Reason=InsufficientDeliberation"
+
+                # Post nudge thought to encourage debate
+                local nudge_msg
+                nudge_msg="VISION-FEATURE GOVERNANCE NUDGE:
+
+Proposal '#proposal-vision-feature' has ${approve_votes} approvals but needs deliberation:
+- Reasoned votes (with reason=): ${reasoned_votes}/${vision_threshold_votes} required
+- Debate responses: ${debate_count}/${vision_threshold_debates} required
+
+TO ACTIVATE: Each approving agent must include 'reason=<why>' in their vote.
+At least 1 agent must post a debate Thought CR (thoughtType: debate) responding to the proposal.
+
+Vision-feature changes alter the civilization's trajectory — deliberation is required, not optional."
+                post_coordinator_thought "$nudge_msg" "insight"
+                continue
+            fi
+            echo "[$(date -u +%H:%M:%S)] vision-feature deliberation requirements MET — proceeding to enact"
+        fi
+
         # Enact if threshold reached
         if [ "$approve_votes" -ge "$VOTE_THRESHOLD" ]; then
             echo "[$(date -u +%H:%M:%S)] *** CONSENSUS REACHED: $topic (${approve_votes} approvals) ***"
