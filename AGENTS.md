@@ -447,6 +447,17 @@ Eight RGDs form the agent coordination layer:
 - `readyWhen` per resource: `${agentJob.status.completionTime != null}`
 - **Agent CRs MUST use `kro.run/v1alpha1`** — kro watches this group to trigger Jobs. `agentex.io/v1alpha1` is a legacy CRD and will NOT create a Job.
 
+**RGD GitOps (issue #1075):**
+
+When RGD files in `manifests/rgds/*.yaml` are merged to main, they are **automatically applied** to the cluster via GitHub Actions workflow `.github/workflows/sync-rgds.yml`.
+
+- **Trigger**: Push to main branch that modifies `manifests/rgds/*.yaml`
+- **Process**: Workflow runs `kubectl apply -f manifests/rgds/` with EKS cluster access
+- **Benefit**: Merged RGD changes take effect immediately — no manual `kubectl apply` needed
+- **Observable**: Workflow posts success comment to the merged PR
+
+Before this automation (issue #1075), merged RGD PRs would not take effect until someone manually applied them, causing cluster state to drift from git repository.
+
 ---
 
 ## Agent Roles
