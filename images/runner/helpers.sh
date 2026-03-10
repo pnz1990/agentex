@@ -1400,5 +1400,102 @@ Proposed by: ${AGENT_NAME}"
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
+# ── credit_mentor ─────────────────────────────────────────────────────────────
+# Issue #1743: Close the mentorship feedback loop by crediting a mentor when their
+# student (this worker) successfully completes a task (PR merged, CI passes).
+#
+# This creates a virtuous cycle: mentors who give useful advice get elevated in
+# coordinator routing priority for future issues. Without the credit loop,
+# mentorship is a one-way broadcast with no signal about teaching effectiveness.
+#
+# Usage: credit_mentor <mentor_agent_name> <pr_number> <issue_number>
+#
+# Called from worker exit handler after CI passes on a session PR, when a mentor
+# was injected into this session's prompt (MENTOR_AGENT_NAME env var or
+# /tmp/agentex-mentor file written at mentor injection time).
+#
+# Schema additions to mentor S3 identity:
+#   successfulMentorships: integer count of successful student completions
+#   mentorshipHistory: array of {student, pr, issue, timestamp} (last 10)
+#
+# CloudWatch metric pushed: MentorCreditsAwarded
+#
+# Edge cases:
+#   - Mentor identity not found in S3: log warning and skip (non-fatal)
+#   - PR not merged yet: caller should only call after CI passes / PR is open at minimum
+#   - No MENTOR_AGENT_NAME and no /tmp/agentex-mentor: silently skip
+credit_mentor() {
+  local mentor_agent="${1:-}"
+  local pr_number="${2:-}"
+  local issue_number="${3:-}"
+
+  if [ -z "$mentor_agent" ]; then
+    log "credit_mentor: no mentor agent specified — skipping"
+    return 0
+  fi
+
+  local mentor_s3_path="s3://${S3_BUCKET}/identities/${mentor_agent}.json"
+
+  # Load mentor's S3 identity
+  local mentor_identity
+  mentor_identity=$(aws s3 cp "$mentor_s3_path" - 2>/dev/null || echo "")
+  if [ -z "$mentor_identity" ]; then
+    log "credit_mentor: mentor identity not found in S3 for ${mentor_agent} — skipping credit (non-fatal)"
+    return 0
+  fi
+
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local student_agent="${AGENT_NAME:-unknown}"
+
+  # Build new mentorship history entry
+  local new_entry
+  new_entry=$(printf '{"student":"%s","pr":"%s","issue":"%s","timestamp":"%s"}' \
+    "$student_agent" "${pr_number:-}" "${issue_number:-}" "$timestamp")
+
+  # Update identity: increment successfulMentorships, append to mentorshipHistory (last 10)
+  local updated_identity
+  updated_identity=$(echo "$mentor_identity" | jq \
+    --argjson entry "$new_entry" '
+      .successfulMentorships = ((.successfulMentorships // 0) + 1) |
+      .mentorshipHistory = (
+        ((.mentorshipHistory // []) + [$entry]) | .[-10:]
+      )
+    ' 2>/dev/null)
+
+  if [ -z "$updated_identity" ]; then
+    log "WARNING: credit_mentor: jq update failed for ${mentor_agent} (non-fatal)"
+    return 0
+  fi
+
+  # Write updated identity back to S3
+  if echo "$updated_identity" | aws s3 cp - "$mentor_s3_path" \
+      --content-type application/json >/dev/null 2>&1; then
+    local new_count
+    new_count=$(echo "$updated_identity" | jq -r '.successfulMentorships // 0')
+    log "credit_mentor: credited ${mentor_agent} — successfulMentorships=${new_count} (student=${student_agent} pr=${pr_number} issue=${issue_number})"
+
+    # Push CloudWatch metric for observability
+    if command -v aws >/dev/null 2>&1; then
+      aws cloudwatch put-metric-data \
+        --namespace "Agentex" \
+        --metric-name "MentorCreditsAwarded" \
+        --value 1 \
+        --unit "Count" \
+        --dimensions "MentorAgent=${mentor_agent}" \
+        --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1 || true
+    fi
+
+    # Post a Thought CR so the civilization can observe mentor-student cycles
+    post_thought "Mentor credit awarded: ${mentor_agent} mentored ${student_agent} on issue #${issue_number:-?} (PR #${pr_number:-?}). successfulMentorships=${new_count}. Multi-generation teacher-student relationship confirmed." "insight" 8
+
+  else
+    log "WARNING: credit_mentor: failed to write updated identity for ${mentor_agent} to S3 (non-fatal)"
+  fi
+
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

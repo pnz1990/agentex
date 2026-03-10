@@ -3176,11 +3176,17 @@ if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
       COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement it and open a PR. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
     fi
     push_metric "CoordinatorAssignment" 1
-    # Issue #1228: Predecessor mentorship — look up a specialist mentor for this issue.
-    # Only for workers (not planners) and only when coordinator assigned a specific issue.
-    if [ "$AGENT_ROLE" = "worker" ]; then
-      get_mentor_insight "$COORDINATOR_ISSUE"
-    fi
+     # Issue #1228: Predecessor mentorship — look up a specialist mentor for this issue.
+     # Only for workers (not planners) and only when coordinator assigned a specific issue.
+     if [ "$AGENT_ROLE" = "worker" ]; then
+       get_mentor_insight "$COORDINATOR_ISSUE"
+       # Issue #1743: Write mentor agent name to /tmp/agentex-mentor for credit loop.
+       # The worker exit handler reads this file after CI passes to credit the mentor.
+       if [ -n "${MENTOR_AGENT_NAME:-}" ]; then
+         echo "$MENTOR_AGENT_NAME" > /tmp/agentex-mentor
+         log "Mentorship: wrote mentor ${MENTOR_AGENT_NAME} to /tmp/agentex-mentor for credit loop (issue #1743)"
+       fi
+     fi
   else
     log "Coordinator queue empty or unavailable — ${AGENT_ROLE} will self-select from GitHub"
     COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue.
@@ -4626,6 +4632,36 @@ Closes #${PR939_ISSUE}"
   log "All PRs from this session passed CI."
   push_metric "CIPassOnExit" 1
   
+  # ── Issue #1743: Mentor Credit Loop ──────────────────────────────────────────
+  # If this worker had a mentor injected into their session (via get_mentor_insight),
+  # credit the mentor now that CI has passed on their PR. This closes the feedback
+  # loop: mentors who give useful advice are rewarded with routing priority.
+  # The mentor agent name was written to /tmp/agentex-mentor at mentor injection time.
+  if [ "$AGENT_ROLE" = "worker" ] && [ -f /tmp/agentex-mentor ]; then
+    MENTOR_TO_CREDIT=$(cat /tmp/agentex-mentor 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$MENTOR_TO_CREDIT" ]; then
+      # Resolve the PR number opened this session (first one if multiple)
+      CREDIT_PR_NUM=$(echo "$SESSION_PRS" | tr ' ' '\n' | head -1 | tr -d '[:space:]' || echo "")
+      # Resolve the issue number worked on this session
+      CREDIT_ISSUE_NUM="${COORDINATOR_ISSUE:-0}"
+      if [ "$CREDIT_ISSUE_NUM" = "0" ] || [ -z "$CREDIT_ISSUE_NUM" ]; then
+        CREDIT_ISSUE_NUM=$(cat /tmp/agentex-worked-issue 2>/dev/null | tr -d '[:space:]' || echo "0")
+      fi
+      log "Issue #1743: Crediting mentor ${MENTOR_TO_CREDIT} for successful mentorship (PR #${CREDIT_PR_NUM:-?} issue #${CREDIT_ISSUE_NUM:-?})"
+      # Source helpers.sh to use credit_mentor() function
+      if [ -f /agent/helpers.sh ]; then
+        (source /agent/helpers.sh 2>/dev/null && credit_mentor "$MENTOR_TO_CREDIT" "$CREDIT_PR_NUM" "$CREDIT_ISSUE_NUM") 2>/dev/null || \
+          log "WARNING: credit_mentor() call failed (non-fatal)"
+      else
+        log "WARNING: /agent/helpers.sh not available — cannot credit mentor (non-fatal)"
+      fi
+      push_metric "MentorCreditAttempted" 1 "Count"
+    else
+      log "Issue #1743: /tmp/agentex-mentor is empty — no mentor to credit"
+    fi
+  fi
+  # ── End Issue #1743 ──────────────────────────────────────────────────────────
+
   # Track code area specialization from PRs opened this session (issue #1112)
   # Get list of PR numbers opened this session
   if type update_code_area_specialization &>/dev/null; then

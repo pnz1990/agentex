@@ -2879,6 +2879,23 @@ score_agent_for_issue() {
          echo "[$(date -u +%H:%M:%S)] Routing: debate quality bonus +3 for $agent_name (debateQualityScore=$debate_quality_score, architectural issue)" >&2
      fi
 
+     # Issue #1743: Factor in successfulMentorships for routing priority.
+     # Agents who have successfully mentored students (their advice led to merged PRs)
+     # get routing priority on enhancement/self-improvement issues — proven teachers
+     # should work on the problems where their knowledge transfer is most valuable.
+     # Bonus: +2 per successful mentorship (capped at +6 to prevent monopolizing routing).
+     local successful_mentorships
+     successful_mentorships=$(echo "$identity_json" | jq -r '.successfulMentorships // 0' 2>/dev/null || echo "0")
+     local mentorship_int
+     mentorship_int=$(echo "$successful_mentorships" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
+     if (echo "$issue_labels" | grep -qiE "enhancement|self-improvement") && [ "$mentorship_int" -gt 0 ]; then
+         local mentorship_bonus=$((mentorship_int * 2))
+         # Cap at +6 to prevent single-agent routing monopoly
+         [ "$mentorship_bonus" -gt 6 ] && mentorship_bonus=6
+         score=$((score + mentorship_bonus))
+         echo "[$(date -u +%H:%M:%S)] Routing: mentorship bonus +${mentorship_bonus} for $agent_name (successfulMentorships=${mentorship_int}, enhancement/self-improvement issue)" >&2
+     fi
+
      echo "$score"
 }
 
