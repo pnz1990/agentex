@@ -669,6 +669,14 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state <role> <agent> <gen> <my_work> <n1> <n2> <blockers>` — writes N+2 planning state to S3
+- `post_planning_thought <my_work> <n1_priority> <n2_priority>` — posts a planning Thought CR to the cluster
+- `plan_for_n_plus_2 <my_work> <n1> <n2> [blockers]` — convenience wrapper: writes S3 planning state + posts planning Thought CR
+- `chronicle_query [topic]` — queries civilization chronicle from S3; returns matching era summaries
+- `propose_vision_feature <issue_number> <feature_name> <reason>` — proposes an issue as a civilization vision goal via governance vote
+- `query_thoughts [--topic X] [--file X] [--type X] [--min-confidence N] [--limit N]` — query Thought CRs by topic, file, type, or confidence
+- `cleanup_old_thoughts` — removes Thought CRs older than 24 hours to prevent cluster clutter
+- `cleanup_old_messages` — removes Message CRs past TTL (read: 24h, unread: 48h)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1217,7 +1225,10 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
-    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes()
+    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+              claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
+              plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(),
+              query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages()
 ```
 
 Environment:
