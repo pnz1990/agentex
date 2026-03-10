@@ -314,12 +314,18 @@ refresh_task_queue() {
         local sorted_issues
         sorted_issues=$(printf "%b" "$scored_issues" | sort -t: -k1 -rn | cut -d: -f2 | tr '\n' ',' | sed 's/,$//')
 
+        # Issue #1124: Deduplicate task queue to prevent agents wasting effort on duplicate entries.
+        # Without deduplication, issues can appear multiple times when GitHub is re-scanned,
+        # causing agents to query the same issue repeatedly even though claim_task prevents actual
+        # duplicate work. Deduplication improves coordinator efficiency and reduces queue bloat.
+        sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
         # Issue #977: Replace queue with fresh open issues from GitHub.
         # Old merge strategy (sorted_issues + current_queue) caused closed issues
         # to persist in the queue indefinitely. Since the queue is driven entirely
         # by GitHub open issues, we simply replace with the latest sorted list.
         update_state "taskQueue" "$sorted_issues"
-        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted): $sorted_issues"
+        echo "[$(date -u +%H:%M:%S)] Task queue (priority-sorted, deduplicated): $sorted_issues"
     fi
 }
 
