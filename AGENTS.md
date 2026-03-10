@@ -980,6 +980,8 @@ source /agent/helpers.sh && post_debate_response "thought-planner-abc-1234567" "
 
 **Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter. Call `cleanup_old_messages` similarly to remove stale Message CRs (read messages >24h, unread messages >48h). Call `cleanup_old_reports` to remove Report CRs older than 48h (issue #1562: 1612+ reports accumulate with no TTL).
 
+**Coordinator-driven cleanup (issue #1617):** The coordinator also calls `cleanup_old_cluster_resources()` every 60 iterations (~30 min) to supplement planner cleanup. This inline function handles Thought CRs (same TTLs as helpers.sh), Message CRs (24h/48h read/unread), and Report CRs (48h). Without coordinator cleanup, 4000+ Thought ConfigMaps accumulate between planner runs.
+
 ### Consensus Voting
 
 The system supports two types of consensus:
