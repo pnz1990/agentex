@@ -1781,6 +1781,53 @@ register_with_coordinator() {
   
   log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE})"
   [ "${AGENT_ROLE}" = "planner" ] && log "Coordinator: updated lastPlannerSeen=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Issue #1475: Push specialization data to coordinator-state cache at registration time.
+  # The coordinator's route_tasks_by_specialization() reads agent identity from S3, but new
+  # agent pods have a fresh empty S3 identity file at session start (specialization is built
+  # during the session and written at exit). By pushing any existing specialization data from
+  # S3 now (including inherited data from prior same-displayName agents), the coordinator can
+  # route tasks based on specialization history from the first coordinator cycle.
+  # Cache format: "agent_name:label1=count,label2=count|agent_name2:..." in coordinator-state.agentSpecializations
+  if [ "${AGENT_ROLE}" = "worker" ] || [ "${AGENT_ROLE}" = "architect" ]; then
+    local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+    local identity_json
+    identity_json=$(aws s3 cp "s3://${s3_bucket}/identities/${AGENT_NAME}.json" - \
+      --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || echo "")
+    if [ -n "$identity_json" ]; then
+      local spec_labels
+      spec_labels=$(echo "$identity_json" | jq -r \
+        '.specializationLabelCounts // {} | to_entries | map("\(.key)=\(.value)") | join(",")' \
+        2>/dev/null || echo "")
+      if [ -n "$spec_labels" ]; then
+        # Read current cache, remove prior entry for this agent, add new entry
+        local current_spec_cache
+        current_spec_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+          -o jsonpath='{.data.agentSpecializations}' 2>/dev/null || echo "")
+        local new_spec_entry="${AGENT_NAME}:${spec_labels}"
+        local updated_cache
+        if [ -z "$current_spec_cache" ]; then
+          updated_cache="$new_spec_entry"
+        else
+          # Remove prior entry for this agent, then append fresh entry
+          updated_cache=$(echo "$current_spec_cache" | tr '|' '\n' | grep -v "^${AGENT_NAME}:" || true)
+          updated_cache=$(echo "$updated_cache" | tr '\n' '|' | sed 's/|$//')
+          [ -n "$updated_cache" ] && updated_cache="${updated_cache}|${new_spec_entry}" || updated_cache="$new_spec_entry"
+        fi
+        # Truncate to prevent ConfigMap data field from growing unbounded (keep last 50 entries)
+        local entry_count
+        entry_count=$(echo "$updated_cache" | tr '|' '\n' | wc -l)
+        if [ "$entry_count" -gt 50 ]; then
+          updated_cache=$(echo "$updated_cache" | tr '|' '\n' | tail -50 | tr '\n' '|' | sed 's/|$//')
+        fi
+        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+          --type=merge \
+          -p "{\"data\":{\"agentSpecializations\":\"${updated_cache}\"}}" 2>/dev/null || true
+        log "Coordinator: pushed specialization cache for ${AGENT_NAME}: $spec_labels"
+      fi
+    fi
+  fi
+
   return 0
 }
 

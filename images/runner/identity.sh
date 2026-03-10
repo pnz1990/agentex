@@ -160,6 +160,66 @@ save_identity() {
   if aws s3 ls "$s3_path" >/dev/null 2>&1; then
     existing_json=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "")
   fi
+
+  # Issue #1475: Inherit specialization from previous owner of this display name.
+  # When a new pod claims a pool name (e.g., "ada") or a generated name, the S3
+  # file for this AGENT_NAME doesn't exist yet, so existing_json is empty and
+  # specialization starts blank. But a prior agent may have held the same displayName
+  # (for pool names: the previous "ada" agent stored in the name registry).
+  # Look up the prior agent for pool names and inherit their specialization data
+  # so the coordinator can route tasks to experienced agents from their first session.
+  if [[ -z "$existing_json" && -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    # Check if displayName is a pool name by looking up current registry entry
+    local registry_entry
+    registry_entry=$(timeout 10s kubectl get configmap agentex-name-registry -n agentex \
+      -o jsonpath="{.data.${AGENT_DISPLAY_NAME}}" 2>/dev/null || echo "")
+    # Registry format for claimed names: "worker:claimed:worker-1773XXXXXX"
+    # Extract the previous agent name if format matches role:claimed:prev_agent
+    local prev_agent=""
+    if [[ "$registry_entry" =~ ^${AGENT_ROLE}:claimed:(.+)$ ]]; then
+      local registry_owner="${BASH_REMATCH[1]}"
+      # Only inherit if the previous owner is DIFFERENT from us (avoid self-reference)
+      if [[ "$registry_owner" != "$AGENT_NAME" ]]; then
+        prev_agent="$registry_owner"
+      fi
+    fi
+    if [[ -n "$prev_agent" ]]; then
+      local prev_s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${prev_agent}.json"
+      local prev_json=""
+      prev_json=$(aws s3 cp "$prev_s3_path" - 2>/dev/null || echo "")
+      if [[ -n "$prev_json" ]]; then
+        local prev_spec_labels
+        prev_spec_labels=$(echo "$prev_json" | jq -c '.specializationLabelCounts // {}' 2>/dev/null || echo "{}")
+        local prev_spec_areas
+        prev_spec_areas=$(echo "$prev_json" | jq -c '.specializationDetail.codeAreas // {}' 2>/dev/null || echo "{}")
+        local prev_specialization
+        prev_specialization=$(echo "$prev_json" | jq -r '.specialization // ""' 2>/dev/null || echo "")
+        # Only inherit if the previous agent had actual specialization data
+        if [[ "$prev_spec_labels" != "{}" ]]; then
+          echo "[identity] Inheriting specialization from previous ${AGENT_DISPLAY_NAME} owner ($prev_agent)"
+          echo "[identity] Inherited specializationLabelCounts: $prev_spec_labels"
+          # Use inherited data as starting point — mark in a synthetic existing_json
+          existing_json=$(cat <<INHERITEOF
+{
+  "agentName": "$prev_agent",
+  "displayName": "$AGENT_DISPLAY_NAME",
+  "role": "$AGENT_ROLE",
+  "generation": 0,
+  "specialization": "$prev_specialization",
+  "specializationLabelCounts": $prev_spec_labels,
+  "specializationDetail": { "codeAreas": $prev_spec_areas, "debatesWon": 0, "synthesisCount": 0 },
+  "stats": { "tasksCompleted": 0, "issuesFiled": 0, "prsMerged": 0, "thoughtsPosted": 0 }
+}
+INHERITEOF
+          )
+          # Also inherit specialization string for AGENT_SPECIALIZATION global
+          if [[ -n "$prev_specialization" && -z "${AGENT_SPECIALIZATION:-}" ]]; then
+            AGENT_SPECIALIZATION="$prev_specialization"
+          fi
+        fi
+      fi
+    fi
+  fi
   
   local tasks_completed=0
   local issues_filed=0

@@ -2004,12 +2004,39 @@ score_agent_for_issue() {
     local issue_labels="$3"
     local issue_keywords="$4"
 
-    # Read agent identity from S3
-    local identity_json
-    identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
-        --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    # Issue #1475: Check coordinator-state agentSpecializations cache FIRST.
+    # New agent pods have empty S3 identity files (specialization is built during session,
+    # written at exit). But register_with_coordinator() pushes the agent's S3 identity data
+    # (including inherited specialization from prior same-displayName agents) into the cache
+    # at startup. Reading the cache avoids stale-S3 issues and is faster (no S3 API call).
+    local spec_cache
+    spec_cache=$(get_state "agentSpecializations" 2>/dev/null || echo "")
+    local cached_labels=""
+    if [ -n "$spec_cache" ]; then
+        # Cache format: "agent_name:label1=count,label2=count|agent_name2:..."
+        cached_labels=$(echo "$spec_cache" | tr '|' '\n' | grep "^${agent_name}:" | cut -d: -f2- | head -1 || echo "")
+    fi
 
-    if [ -z "$identity_json" ]; then
+    # Read agent identity from S3 (used as fallback if cache miss)
+    local identity_json=""
+    if [ -z "$cached_labels" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    fi
+
+    # Determine if we have any specialization data (from cache or S3)
+    local has_spec_data=false
+    if [ -n "$cached_labels" ]; then
+        has_spec_data=true
+    elif [ -n "$identity_json" ]; then
+        local has_label_data
+        has_label_data=$(echo "$identity_json" | jq -r \
+            'if (.specializationLabelCounts | length) > 0 or (.specializationDetail.codeAreas | length) > 0 then "yes" else "" end' \
+            2>/dev/null || echo "")
+        [ -n "$has_label_data" ] && has_spec_data=true
+    fi
+
+    if [ "$has_spec_data" = false ]; then
         echo "0"
         return 0
     fi
@@ -2020,14 +2047,6 @@ score_agent_for_issue() {
     # an agent has any label count history (even 1 issue). Without this, routing always
     # returns 0 until an agent crosses the threshold, making v0.2 routing non-functional.
     # Issue #1152: removed premature early-exit on empty .specialization string.
-    local has_label_data
-    has_label_data=$(echo "$identity_json" | jq -r \
-        'if (.specializationLabelCounts | length) > 0 or (.specializationDetail.codeAreas | length) > 0 then "yes" else "" end' \
-        2>/dev/null || echo "")
-    if [ -z "$has_label_data" ]; then
-        echo "0"
-        return 0
-    fi
 
     local score=0
 
@@ -2039,10 +2058,20 @@ score_agent_for_issue() {
         for label in "${label_arr[@]}"; do
             label=$(echo "$label" | tr -d ' ')
             [ -z "$label" ] && continue
-            local label_count
-            label_count=$(echo "$identity_json" | jq -r \
-                --arg lbl "$label" \
-                '(.specializationLabelCounts[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
+            local label_count=0
+
+            if [ -n "$cached_labels" ]; then
+                # Parse from cache format: "label1=count,label2=count"
+                label_count=$(echo "$cached_labels" | tr ',' '\n' | grep "^${label}=" | cut -d= -f2 | head -1 || echo "0")
+                label_count="${label_count:-0}"
+                # Ensure it's numeric
+                [[ "$label_count" =~ ^[0-9]+$ ]] || label_count=0
+            elif [ -n "$identity_json" ]; then
+                label_count=$(echo "$identity_json" | jq -r \
+                    --arg lbl "$label" \
+                    '(.specializationLabelCounts[$lbl] // 0) | tonumber' 2>/dev/null || echo "0")
+            fi
+
             if [ "$label_count" -gt 0 ]; then
                 score=$((score + 3))
             fi
@@ -2268,10 +2297,14 @@ route_tasks_by_specialization() {
 
     if [ "$total_specialized" -eq 0 ]; then
         # Diagnose root cause: check active agents for specialization data
+        # Issue #1475: Check agentSpecializations cache first (faster than S3 per-agent reads)
         local active_agents_list
         active_agents_list=$(get_state "activeAgents")
         local agents_with_spec=0
         local agents_checked=0
+
+        local spec_cache
+        spec_cache=$(get_state "agentSpecializations" 2>/dev/null || echo "")
 
         IFS=',' read -ra agent_pairs <<< "$active_agents_list"
         for pair in "${agent_pairs[@]}"; do
@@ -2281,11 +2314,17 @@ route_tasks_by_specialization() {
             [ -z "$aname" ] && continue
             agents_checked=$((agents_checked + 1))
 
-            local spec_data
-            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
-                --region "$BEDROCK_REGION" 2>/dev/null | \
-                jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
-                2>/dev/null || echo "")
+            # Check cache first (issue #1475), fall back to S3 if cache miss
+            local spec_data=""
+            if [ -n "$spec_cache" ]; then
+                spec_data=$(echo "$spec_cache" | tr '|' '\n' | grep "^${aname}:" | grep -v ":$" | head -1 || echo "")
+            fi
+            if [ -z "$spec_data" ]; then
+                spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+                    --region "$BEDROCK_REGION" 2>/dev/null | \
+                    jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                    2>/dev/null || echo "")
+            fi
             if [ -n "$spec_data" ]; then
                 agents_with_spec=$((agents_with_spec + 1))
             fi
