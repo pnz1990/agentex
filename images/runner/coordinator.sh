@@ -1955,8 +1955,13 @@ The civilization needs mediators, not just voters." \
 #
 # ── DATA CONTRACT: Expected S3 Identity JSON Schema ──────────────────────────
 #
-# Agent identity files are stored at:
-#   s3://${IDENTITY_BUCKET}/identities/<agent-cr-name>.json
+# Agent identity files are stored at (checked in order by score_agent_for_issue):
+#   1. s3://${IDENTITY_BUCKET}/identities/<agent-cr-name>.json   (current session)
+#   2. s3://${IDENTITY_BUCKET}/identities/<display-name>.json    (PR #1490 approach: release_identity)
+#   3. s3://${IDENTITY_BUCKET}/identities/canonical/<display-name>.json  (PR #1489 approach: save_identity)
+#
+# Issue #1495: paths 2 and 3 are checked as fallbacks so that specialization routing
+# works regardless of which PR (#1489 or #1490) implementation is deployed.
 #
 # The fields read by score_agent_for_issue() are:
 #   {
@@ -1997,17 +2002,44 @@ update_identity_bucket_from_constitution() {
 #   $2 - issue_number
 #   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
 #   $4 - issue_keywords (space-separated keywords from title/body)
+#   $5 - display_name (optional: persistent display name, e.g., worker-deep-cipher)
+#          When provided, also checks canonical history paths written by identity.sh:
+#          - identities/<display_name>.json (PR #1490 approach: written at release time)
+#          - identities/canonical/<display_name>.json (PR #1489 approach: written at save time)
+#          Issue #1495: without this, both PR #1484 and PR #1489 canonical paths are silently missed
+#          because the primary lookup is by ephemeral agent_name which has no history yet.
 # Returns: integer score via stdout (0 if agent has no specialization data)
 score_agent_for_issue() {
     local agent_name="$1"
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
+    local display_name="${5:-}"
 
-    # Read agent identity from S3
-    local identity_json
+    # Read agent identity from S3 — try multiple paths in order of specificity:
+    # 1. Ephemeral agent_name path: identities/<agent_name>.json
+    #    Written at every save_identity() call; has current session data but may be empty for new agents.
+    # 2. Display-name path: identities/<display_name>.json
+    #    Written by PR #1490 approach (release_identity saves to this path for inheritance).
+    # 3. Canonical path: identities/canonical/<display_name>.json
+    #    Written by PR #1489 approach (save_identity writes canonical copy for cross-gen inheritance).
+    # Issue #1495: without checking paths 2 and 3, routing always scores 0 for active workers
+    # because their ephemeral identity file is empty (written at exit, not startup).
+    local identity_json=""
     identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
         --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+
+    # Fallback: display-name path (PR #1490 approach — identities/<displayName>.json)
+    if [ -z "$identity_json" ] && [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${display_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    fi
+
+    # Fallback: canonical path (PR #1489 approach — identities/canonical/<displayName>.json)
+    if [ -z "$identity_json" ] && [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+        identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    fi
 
     if [ -z "$identity_json" ]; then
         echo "0"
@@ -2134,8 +2166,19 @@ find_best_agent_for_issue() {
     IFS=',' read -ra agent_pairs <<< "$active_agents"
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
-        local agent_name="${pair%%:*}"
-        local agent_role="${pair##*:}"
+        local agent_name
+        agent_name=$(echo "$pair" | cut -d: -f1 | tr -d '[:space:]')
+        # Issue #1491: use cut instead of ##*: to avoid including trailing spaces in role
+        # when activeAgents has legacy entries like "worker-123:worker " (space after role)
+        local agent_role
+        agent_role=$(echo "$pair" | cut -d: -f2 | tr -d '[:space:]')
+        # Issue #1475/1495: extract displayName from 3rd field when available (added by PR #1484)
+        # activeAgents format: "agent_name:role" (legacy) or "agent_name:role:displayName" (new)
+        # displayName enables specialization routing by allowing S3 identity lookup via
+        # persistent display name (e.g., worker-deep-cipher) rather than ephemeral agent_name.
+        local agent_display_name
+        agent_display_name=$(echo "$pair" | cut -d: -f3 | tr -d '[:space:]')
+        [ -z "$agent_display_name" ] && agent_display_name="$agent_name"
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
@@ -2147,10 +2190,13 @@ find_best_agent_for_issue() {
         fi
 
         local agent_score
+        # Issue #1495: pass displayName as 5th arg so score_agent_for_issue() can check
+        # canonical S3 paths (identities/<displayName>.json and identities/canonical/<displayName>.json)
+        # for agents whose ephemeral identity file is empty (they haven't exited yet).
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords")
+            "$issue_labels" "$issue_keywords" "$agent_display_name")
 
-        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name on issue #$issue_number: $agent_score" >&2
+        echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name ($agent_display_name) on issue #$issue_number: $agent_score" >&2
 
         if [ "$agent_score" -gt "$best_score" ]; then
             best_score="$agent_score"
