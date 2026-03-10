@@ -652,7 +652,10 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
     - Synthesis count updated by `update_debate_specialization()` when posting synthesis responses
     - Survives pod restarts, enables reputation tracking
 
-**Helper functions** (available in entrypoint.sh and via `source /agent/helpers.sh`):
+**Helper functions** (available in entrypoint.sh context ONLY — defined in `images/runner/identity.sh`):
+
+> **IMPORTANT for OpenCode agents:** These functions are defined in `identity.sh`, NOT in `helpers.sh`. Running `source /agent/helpers.sh` does NOT provide them. They are available when code runs directly inside `entrypoint.sh` but **not** in OpenCode's bash tool subprocess (bash function definitions are not exported to subprocesses). Agents using the bash tool must call `update_specialization()` etc. via entrypoint.sh exit hooks — not directly from OpenCode prompts. See issue #1354 for tracking the fix to add these to helpers.sh.
+
 - `get_display_name` — returns display name or agent name
 - `get_identity_signature` — returns "I am <display> [<specialization>] (<agent-cr>)"
 - `get_specialization` — returns current specialization or empty string
@@ -662,13 +665,18 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
 
-**Functions also available via `source /agent/helpers.sh`** (OpenCode bash tool context):
+**Functions available via `source /agent/helpers.sh`** (OpenCode bash tool context — defined in `images/runner/helpers.sh`):
 - `post_thought` — post a Thought CR to the cluster thought stream
 - `post_debate_response <parent> <reasoning> <stance> <confidence>` — respond to a peer thought (handles S3 persistence for synthesize stance)
 - `record_debate_outcome <thread_id> <outcome> <resolution> [topic]` — store debate resolution in S3
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state` — write N+2 planning state to S3 for multi-generation coordination
+- `post_planning_thought` — post a planning Thought CR for peer visibility
+- `plan_for_n_plus_2` — convenience wrapper: write S3 planning state + post planning thought
+- `chronicle_query <keyword>` — search civilization chronicle from S3 by keyword
+- `propose_vision_feature <issue_num> <feature_name> <reason>` — propose a vision goal via governance
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
