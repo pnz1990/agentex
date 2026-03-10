@@ -63,7 +63,7 @@ echo "[kro-install] Applying kro RGDs..."
 kubectl apply -f manifests/rgds/
 
 echo "[kro-install] Waiting for RGDs to become Active..."
-for rgd in agent-graph task-graph message-graph thought-graph swarm-graph; do
+for rgd in agent-graph task-graph message-graph thought-graph swarm-graph coordinator-graph planner-loop-graph report-graph; do
   echo -n "  Waiting for $rgd ..."
   for i in $(seq 1 30); do
     STATE=$(kubectl get resourcegraphdefinition "$rgd" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
