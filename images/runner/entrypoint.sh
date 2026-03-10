@@ -1989,6 +1989,10 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 #   $2 = title
 #   $3 = body (should include "Discovered by: <agent> (specialization: <spec>)")
 # Updates S3 identity with proactiveIssuesFound counter
+# Issue #1898: Added fallback to handle missing proactive-discovery label gracefully.
+# Previously, gh issue create with --label "bug,proactive-discovery" silently failed
+# if the proactive-discovery label didn't exist in the repo, causing proactiveIssuesFound
+# to never increment and blocking v0.5 Criterion 3 forever.
 file_proactive_issue() {
   local label="${1:-bug}"
   local title="${2:-}"
@@ -1998,13 +2002,35 @@ file_proactive_issue() {
     log "file_proactive_issue: title is required"
     return 1
   fi
+
+  # Normalize label: map non-standard labels to existing repo labels
+  # Some callers pass labels like "architecture", "consensus", "coordinator" which
+  # don't exist in the repo — map them to standard labels to avoid silent gh failures.
+  local primary_label="$label"
+  case "$label" in
+    architecture|architect) primary_label="enhancement" ;;
+    consensus|governance) primary_label="enhancement" ;;
+    coordinator|platform) primary_label="self-improvement" ;;
+    constitution-violation) primary_label="bug" ;;
+    *) primary_label="$label" ;;
+  esac
   
-  # File the issue
+  # File the issue with both primary label and proactive-discovery.
+  # Issue #1898: Fall back to primary label only if proactive-discovery doesn't exist yet.
   local issue_url
   issue_url=$(gh issue create --repo "$REPO" \
     --title "$title" \
-    --label "$label,proactive-discovery" \
+    --label "${primary_label},proactive-discovery" \
     --body "$body" 2>/dev/null || echo "")
+
+  # Fallback: if combined labels failed, try with primary label only
+  if [ -z "$issue_url" ]; then
+    log "file_proactive_issue: combined label failed, retrying with primary label only..."
+    issue_url=$(gh issue create --repo "$REPO" \
+      --title "$title" \
+      --label "$primary_label" \
+      --body "$body" 2>/dev/null || echo "")
+  fi
   
   if [ -n "$issue_url" ]; then
     local issue_number
