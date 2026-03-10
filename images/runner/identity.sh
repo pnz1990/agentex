@@ -194,40 +194,47 @@ save_identity() {
   local spec_code_areas="{}"
   local spec_debates_won=0
   local spec_synthesis_count=0
-  local reputation_history="[]"
-  local reputation_average=0
-  
-  if [[ -n "$existing_json" ]]; then
-    tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
-    issues_filed=$(echo "$existing_json" | jq -r '.stats.issuesFiled // 0')
-    prs_merged=$(echo "$existing_json" | jq -r '.stats.prsMerged // 0')
-    thoughts_posted=$(echo "$existing_json" | jq -r '.stats.thoughtsPosted // 0')
-    spec_label_counts=$(echo "$existing_json" | jq -c '.specializationLabelCounts // {}')
-    spec_code_areas=$(echo "$existing_json" | jq -c '.specializationDetail.codeAreas // {}')
-    spec_debates_won=$(echo "$existing_json" | jq -r '.specializationDetail.debatesWon // 0')
-    spec_synthesis_count=$(echo "$existing_json" | jq -r '.specializationDetail.synthesisCount // 0')
-    # Issue #1602: Preserve reputationHistory across save cycles
-    reputation_history=$(echo "$existing_json" | jq -c '.reputationHistory // []')
-    reputation_average=$(echo "$existing_json" | jq -r '.reputationAverage // 0')
-  fi
-  
-  local specialization_value="${AGENT_SPECIALIZATION:-}"
-  
-  local identity_json
-  identity_json=$(cat <<EOF
-{
-  "agentName": "$AGENT_NAME",
-  "displayName": "$AGENT_DISPLAY_NAME",
-  "role": "$AGENT_ROLE",
-  "generation": $generation,
-  "claimedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "specialization": "$specialization_value",
-  "specializationLabelCounts": $spec_label_counts,
-  "specializationDetail": {
-    "codeAreas": $spec_code_areas,
-    "debatesWon": $spec_debates_won,
-    "synthesisCount": $spec_synthesis_count
-  },
+  local spec_cited_syntheses_count=0
+  local spec_debate_quality_score=0
+   local reputation_history="[]"
+   local reputation_average=0
+   
+   if [[ -n "$existing_json" ]]; then
+     tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
+     issues_filed=$(echo "$existing_json" | jq -r '.stats.issuesFiled // 0')
+     prs_merged=$(echo "$existing_json" | jq -r '.stats.prsMerged // 0')
+     thoughts_posted=$(echo "$existing_json" | jq -r '.stats.thoughtsPosted // 0')
+     spec_label_counts=$(echo "$existing_json" | jq -c '.specializationLabelCounts // {}')
+     spec_code_areas=$(echo "$existing_json" | jq -c '.specializationDetail.codeAreas // {}')
+     spec_debates_won=$(echo "$existing_json" | jq -r '.specializationDetail.debatesWon // 0')
+     spec_synthesis_count=$(echo "$existing_json" | jq -r '.specializationDetail.synthesisCount // 0')
+     # Issue #1604: Preserve debate quality fields across save cycles
+     spec_cited_syntheses_count=$(echo "$existing_json" | jq -r '.specializationDetail.citedSynthesesCount // 0')
+     spec_debate_quality_score=$(echo "$existing_json" | jq -r '.specializationDetail.debateQualityScore // 0')
+     # Issue #1602: Preserve reputationHistory across save cycles
+     reputation_history=$(echo "$existing_json" | jq -c '.reputationHistory // []')
+     reputation_average=$(echo "$existing_json" | jq -r '.reputationAverage // 0')
+   fi
+   
+   local specialization_value="${AGENT_SPECIALIZATION:-}"
+   
+   local identity_json
+   identity_json=$(cat <<EOF
+ {
+   "agentName": "$AGENT_NAME",
+   "displayName": "$AGENT_DISPLAY_NAME",
+   "role": "$AGENT_ROLE",
+   "generation": $generation,
+   "claimedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+   "specialization": "$specialization_value",
+   "specializationLabelCounts": $spec_label_counts,
+   "specializationDetail": {
+     "codeAreas": $spec_code_areas,
+     "debatesWon": $spec_debates_won,
+     "synthesisCount": $spec_synthesis_count,
+     "citedSynthesesCount": $spec_cited_syntheses_count,
+     "debateQualityScore": $spec_debate_quality_score
+   },
   "stats": {
     "tasksCompleted": $tasks_completed,
     "issuesFiled": $issues_filed,
@@ -280,6 +287,7 @@ save_identity_with_inheritance() {
 
   # Inherit accumulated specialization from prior agent
   local spec_label_counts spec_code_areas spec_debates_won spec_synthesis_count
+  local spec_cited_syntheses_count spec_debate_quality_score
   local tasks_completed issues_filed prs_merged thoughts_posted
   local reputation_history reputation_average
 
@@ -288,6 +296,9 @@ save_identity_with_inheritance() {
     spec_code_areas=$(echo "$prior_json" | jq -c '.specializationDetail.codeAreas // {}')
     spec_debates_won=$(echo "$prior_json" | jq -r '.specializationDetail.debatesWon // 0')
     spec_synthesis_count=$(echo "$prior_json" | jq -r '.specializationDetail.synthesisCount // 0')
+    # Issue #1604: Inherit debate quality fields
+    spec_cited_syntheses_count=$(echo "$prior_json" | jq -r '.specializationDetail.citedSynthesesCount // 0')
+    spec_debate_quality_score=$(echo "$prior_json" | jq -r '.specializationDetail.debateQualityScore // 0')
     tasks_completed=$(echo "$prior_json" | jq -r '.stats.tasksCompleted // 0')
     issues_filed=$(echo "$prior_json" | jq -r '.stats.issuesFiled // 0')
     prs_merged=$(echo "$prior_json" | jq -r '.stats.prsMerged // 0')
@@ -300,6 +311,8 @@ save_identity_with_inheritance() {
     spec_code_areas="{}"
     spec_debates_won=0
     spec_synthesis_count=0
+    spec_cited_syntheses_count=0
+    spec_debate_quality_score=0
     tasks_completed=0
     issues_filed=0
     prs_merged=0
@@ -324,7 +337,9 @@ save_identity_with_inheritance() {
   "specializationDetail": {
     "codeAreas": $spec_code_areas,
     "debatesWon": $spec_debates_won,
-    "synthesisCount": $spec_synthesis_count
+    "synthesisCount": $spec_synthesis_count,
+    "citedSynthesesCount": $spec_cited_syntheses_count,
+    "debateQualityScore": $spec_debate_quality_score
   },
   "stats": {
     "tasksCompleted": $tasks_completed,
@@ -698,7 +713,60 @@ update_debate_specialization() {
 }
 
 #######################################
-# Get top specializations for display in Report CR
+# Update debate quality score (issue #1604)
+# Call this when an agent's synthesis is cited by a future agent reading debate outcomes.
+# Computes: debateQualityScore = (synthesisCount * 2) + (citedSynthesesCount * 5)
+# Arguments:
+#   $1 - agent_identity_path (S3 path to the agent's identity file to update)
+# Globals:
+#   IDENTITY_BUCKET, BEDROCK_REGION
+#######################################
+update_debate_quality_score() {
+  local identity_path="${1:-}"
+
+  if [[ -z "$identity_path" ]]; then
+    return 0
+  fi
+
+  # Download identity to update
+  local identity_json
+  identity_json=$(aws s3 cp "$identity_path" - 2>/dev/null || echo "")
+
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity for debate quality update: $identity_path"
+    return 0
+  fi
+
+  # Increment citedSynthesesCount and recompute debateQualityScore
+  local updated_json
+  updated_json=$(echo "$identity_json" | jq '
+    .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+    .specializationDetail.debateQualityScore = (
+      (.specializationDetail.synthesisCount // 0) * 2 +
+      (.specializationDetail.citedSynthesesCount // 0) * 5
+    )
+  ')
+
+  if echo "$updated_json" | aws s3 cp - "$identity_path" 2>/dev/null; then
+    local new_score
+    new_score=$(echo "$updated_json" | jq -r '.specializationDetail.debateQualityScore // 0')
+    echo "[identity] Updated debate quality score: citedSynthesesCount+1, debateQualityScore=$new_score"
+  else
+    echo "[identity] WARNING: Could not save debate quality update to S3 (non-fatal)"
+  fi
+
+  # Also update canonical file for cross-generation persistence
+  local display_name
+  display_name=$(echo "$updated_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+  if [[ -n "$display_name" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${display_name}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical debate quality: $canonical_path"
+    fi
+  fi
+}
+
+
 # Returns a JSON array of top specializations across labels and code areas.
 # Top 3 by count, including synthesis activity.
 # Globals:

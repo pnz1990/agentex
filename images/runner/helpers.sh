@@ -159,6 +159,106 @@ EOF
   fi
 
   return 0
+ }
+
+# ── cite_debate_outcome ───────────────────────────────────────────────────────
+# Issue #1604: Record that this agent cited a synthesis debate outcome in a decision.
+# This increments the citedBy array in the debate JSON and updates the synthesis
+# author's debateQualityScore in their identity file.
+#
+# Usage: cite_debate_outcome <thread_id>
+#
+# Call this after query_debate_outcomes() returns a synthesis you are using to
+# make a decision. This rewards high-quality debates with higher routing priority.
+#
+# Example:
+#   past=$(query_debate_outcomes "circuit-breaker")
+#   thread_id=$(echo "$past" | jq -r '.[0].threadId // ""')
+#   [ -n "$thread_id" ] && cite_debate_outcome "$thread_id"
+cite_debate_outcome() {
+  local thread_id="${1:-}"
+
+  if [ -z "$thread_id" ]; then
+    log "WARNING: cite_debate_outcome called without thread_id — skipping"
+    return 0
+  fi
+
+  local s3_path="s3://${S3_BUCKET}/debates/${thread_id}.json"
+
+  # Read existing debate record
+  local debate_json
+  debate_json=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "")
+  if [ -z "$debate_json" ]; then
+    log "WARNING: cite_debate_outcome: debate ${thread_id} not found in S3 — skipping"
+    return 0
+  fi
+
+  # Only track citations on synthesized debates (high-signal debates only)
+  local outcome
+  outcome=$(echo "$debate_json" | jq -r '.outcome // ""' 2>/dev/null)
+  if [ "$outcome" != "synthesized" ]; then
+    log "cite_debate_outcome: skipping non-synthesis debate (outcome=${outcome})"
+    return 0
+  fi
+
+  # Add this agent to citedBy array (deduplicated)
+  local updated_debate
+  updated_debate=$(echo "$debate_json" | jq \
+    --arg agent "$AGENT_NAME" \
+    '.citedBy = ((.citedBy // []) | if . | index($agent) then . else . + [$agent] end)')
+
+  # Write updated debate JSON back to S3
+  if ! echo "$updated_debate" | aws s3 cp - "$s3_path" --content-type application/json 2>/dev/null; then
+    log "WARNING: cite_debate_outcome: failed to update debate ${thread_id} in S3 (non-fatal)"
+    return 0
+  fi
+
+  log "cite_debate_outcome: recorded citation of ${thread_id} by ${AGENT_NAME}"
+
+  # Update the synthesis author's debate quality score
+  local recorded_by
+  recorded_by=$(echo "$debate_json" | jq -r '.recordedBy // ""' 2>/dev/null)
+  if [ -n "$recorded_by" ]; then
+    local author_identity_path="s3://${S3_BUCKET}/identities/${recorded_by}.json"
+    # Check the identity file exists before attempting quality update
+    if aws s3 ls "$author_identity_path" >/dev/null 2>&1; then
+      # Source identity.sh update_debate_quality_score if available (entrypoint.sh context)
+      # In OpenCode bash context (where identity.sh is not sourced), call the inline update
+      if declare -f update_debate_quality_score >/dev/null 2>&1; then
+        update_debate_quality_score "$author_identity_path"
+      else
+        # Inline update: increment citedSynthesesCount and recompute debateQualityScore
+        local identity_json
+        identity_json=$(aws s3 cp "$author_identity_path" - 2>/dev/null || echo "")
+        if [ -n "$identity_json" ]; then
+          local updated_identity
+          updated_identity=$(echo "$identity_json" | jq '
+            .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+            .specializationDetail.debateQualityScore = (
+              (.specializationDetail.synthesisCount // 0) * 2 +
+              (.specializationDetail.citedSynthesesCount // 0) * 5
+            )
+          ')
+          if echo "$updated_identity" | aws s3 cp - "$author_identity_path" 2>/dev/null; then
+            local new_score
+            new_score=$(echo "$updated_identity" | jq -r '.specializationDetail.debateQualityScore // 0')
+            log "cite_debate_outcome: updated ${recorded_by} debateQualityScore=${new_score}"
+            # Also update canonical file if displayName is available
+            local display_name
+            display_name=$(echo "$updated_identity" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+            if [ -n "$display_name" ] && [ "$display_name" != "$recorded_by" ]; then
+              local canonical_path="s3://${S3_BUCKET}/identities/canonical/${display_name}.json"
+              echo "$updated_identity" | aws s3 cp - "$canonical_path" 2>/dev/null || true
+            fi
+          fi
+        fi
+      fi
+    else
+      log "cite_debate_outcome: identity not found for ${recorded_by} — quality update skipped"
+    fi
+  fi
+
+  return 0
 }
 
 # ── _update_component_knowledge_graph ────────────────────────────────────────
@@ -1156,5 +1256,5 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
