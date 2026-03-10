@@ -568,9 +568,42 @@ refresh_task_queue() {
         # Issue #1149: Prepend visionQueue items BEFORE taskQueue so agent-voted issues get priority
         # visionQueue contains issues that 3+ agents voted to prioritize via governance
         # Issue #1444: visionQueue uses semicolon separator; extract only numeric issue numbers
+        # Issue #1525: Prune visionQueue of closed issues before prepending to taskQueue.
+        #   refresh_task_queue() already removes closed issues from taskQueue — visionQueue
+        #   needs the same treatment. Without pruning, closed issues accumulate permanently
+        #   and planners waste time trying to work on resolved work.
         local vision_queue
         vision_queue=$(get_state "visionQueue")
         if [ -n "$vision_queue" ]; then
+            # Issue #1525: Prune closed issues from visionQueue.
+            # Only check numeric entries (non-numeric feature entries are kept unconditionally).
+            local pruned_vq=""
+            local vq_pruned_count=0
+            while IFS=';' read -ra VQ_ENTRIES; do
+                for vq_entry in "${VQ_ENTRIES[@]}"; do
+                    [ -z "$vq_entry" ] && continue
+                    # Only numeric entries map to GitHub issues; non-numeric feature entries are kept
+                    if [[ "$vq_entry" =~ ^[0-9]+$ ]]; then
+                        local vq_issue_state
+                        vq_issue_state=$(gh issue view "$vq_entry" --repo "${GITHUB_REPO}" \
+                            --json state --jq '.state' 2>/dev/null || echo "OPEN")
+                        if [ "$vq_issue_state" = "CLOSED" ]; then
+                            echo "[$(date -u +%H:%M:%S)] visionQueue: pruning closed issue #$vq_entry"
+                            vq_pruned_count=$((vq_pruned_count + 1))
+                            continue  # Skip closed issue — do not add to pruned_vq
+                        fi
+                    fi
+                    [ -n "$pruned_vq" ] \
+                        && pruned_vq="${pruned_vq};${vq_entry}" \
+                        || pruned_vq="${vq_entry}"
+                done
+            done <<< "$vision_queue"
+            if [ "$vq_pruned_count" -gt 0 ]; then
+                update_state "visionQueue" "$pruned_vq"
+                echo "[$(date -u +%H:%M:%S)] visionQueue: pruned $vq_pruned_count closed issue(s) (was: $vision_queue, now: $pruned_vq)"
+                vision_queue="$pruned_vq"
+            fi
+
             # Extract numeric issue numbers from semicolon-separated entries
             local vision_issues
             vision_issues=$(echo "$vision_queue" | tr ';' '\n' | grep -E '^[0-9]+$' | tr '\n' ',' | sed 's/,$//')
