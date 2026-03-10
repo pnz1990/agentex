@@ -1184,7 +1184,7 @@ patch_task_status() {
     --type=merge \
     -p "{\"data\":{\"phase\":\"${phase}\",\"agentRef\":\"${AGENT_NAME}\",\"outcome\":\"${outcome}\",\"completedAt\":\"${completed_at}\"}}" 2>&1); then
     log "WARNING: Failed to update task status to ${phase}: $err_output"
-    return 1
+    return 0  # Task status is advisory — never crash the agent over a failed patch (#988)
   fi
   
   log "Task status updated: ${phase}"
