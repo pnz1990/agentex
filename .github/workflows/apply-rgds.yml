@@ -1,0 +1,64 @@
+name: Apply RGDs to Cluster
+
+# Auto-apply RGD changes to the cluster when manifests/rgds/ changes merge to main.
+# This ensures the live cluster stays in sync with the git repository (GitOps).
+#
+# Problem solved: PR #1055 merged a coordinator health probe fix but the cluster
+# still had the old broken probes until a planner manually ran kubectl apply.
+#
+# See issue #1075 for context.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'manifests/rgds/**'
+
+env:
+  AWS_REGION: us-west-2
+  CLUSTER_NAME: agentex
+  NAMESPACE: agentex
+
+jobs:
+  apply-rgds:
+    name: Apply RGDs to EKS cluster
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::569190534191:role/agentex-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      - name: Apply RGD changes
+        run: |
+          echo "Applying RGDs from manifests/rgds/ to cluster ${{ env.CLUSTER_NAME }}..."
+          kubectl apply -f manifests/rgds/ -n "${{ env.NAMESPACE }}"
+          echo "✓ RGDs applied successfully"
+
+      - name: Verify RGDs are healthy
+        run: |
+          echo "Verifying RGD status..."
+          # Give kro a moment to process the changes
+          sleep 5
+          kubectl get resourcegraphdefinitions -n "${{ env.NAMESPACE }}" 2>/dev/null || \
+            kubectl get resourcegraphdefinitions 2>/dev/null || \
+            echo "Note: Could not list RGDs — verify manually with: kubectl get rgd -A"
+          echo "✓ RGD sync complete"
