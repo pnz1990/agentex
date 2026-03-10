@@ -2715,6 +2715,12 @@ The civilization needs mediators, not just voters." \
 # IMPORTANT: If identity.sh changes these field names, update the jq paths in
 # score_agent_for_issue() below. Schema drift between identity.sh and this
 # function silently breaks routing (score always 0). See issues #1133, #1134.
+#
+# Trust graph (coordinator-state.agentTrustGraph, issue #1750 v0.5 Feature #2):
+# Format: "citingAgent:citedAgent:count|citingAgent2:citedAgent:count2|..."
+# An agent cited by 2+ distinct peers earns +2 routing bonus.
+# Pre-fetched once per routing cycle in find_best_agent_for_issue() and passed
+# as $6 to score_agent_for_issue() to avoid N kubectl calls per cycle.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Read S3 bucket for identities from constitution at runtime
@@ -2734,6 +2740,10 @@ update_identity_bucket_from_constitution() {
 #   $2 - issue_number
 #   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
 #   $4 - issue_keywords (space-separated keywords from title/body)
+#   $5 - passed_display_name (optional, from activeAgents triplet — issue #1515)
+#   $6 - trust_graph_cache (optional, pre-fetched agentTrustGraph from coordinator-state)
+#         Format: "agentA:agentB:count|agentC:agentB:count|..."
+#         Pass from the caller to avoid N kubectl calls in a routing loop (issue #1750)
 # Returns: integer score via stdout (0 if agent has no specialization data)
 #
 # Issue #1475: canonical history lookup.
@@ -2749,6 +2759,7 @@ score_agent_for_issue() {
     local issue_labels="$3"
     local issue_keywords="$4"
     local passed_display_name="${5:-}"  # Issue #1515: optional displayName from activeAgents triplet
+    local trust_graph_cache="${6:-}"   # Issue #1750: pre-fetched trust graph (avoids N kubectl calls)
 
     # Read agent identity from S3 — first try per-session file (may be empty for new agents)
     local identity_json=""
@@ -2879,6 +2890,32 @@ score_agent_for_issue() {
          echo "[$(date -u +%H:%M:%S)] Routing: debate quality bonus +3 for $agent_name (debateQualityScore=$debate_quality_score, architectural issue)" >&2
      fi
 
+     # Issue #1750: v0.5 Feature #2 — Trust graph routing bonus.
+     # Agents who have been cited by 2+ distinct peers in debate syntheses earn a +2 routing bonus.
+     # This rewards agents who produce synthesis content that other agents find valuable enough to cite.
+     # The trust graph is built by cite_debate_outcome() in helpers.sh (issue #1734).
+     # Format: "citingAgent:citedAgent:count|..." (pipe-separated trust edges)
+     # We use the pre-fetched cache passed from the caller to avoid N kubectl calls per routing cycle.
+     local trust_graph="$trust_graph_cache"
+     if [ -z "$trust_graph" ]; then
+         # Fallback: fetch from cluster if caller didn't pass cache (e.g., direct call in tests)
+         trust_graph=$(kubectl_with_timeout 10 get configmap coordinator-state \
+             -n "$NAMESPACE" -o jsonpath='{.data.agentTrustGraph}' 2>/dev/null || echo "")
+     fi
+     if [ -n "$trust_graph" ] && [ -n "$agent_name" ]; then
+         # Count distinct agents who have cited this agent (edges where cited=agent_name)
+         # Edge format: "citingAgent:citedAgent:count" — we want edges ending in :agent_name:
+         local distinct_citers
+         distinct_citers=$(echo "$trust_graph" | tr '|' '\n' | \
+             grep -E "^[^:]+:${agent_name}:[0-9]+$" | \
+             cut -d: -f1 | sort -u | wc -l | tr -d '[:space:]')
+         distinct_citers=${distinct_citers:-0}
+         if [ "$distinct_citers" -ge 2 ]; then
+             score=$((score + 2))
+             echo "[$(date -u +%H:%M:%S)] Routing: trust graph bonus +2 for $agent_name (cited by $distinct_citers distinct peers)" >&2
+         fi
+     fi
+
      echo "$score"
 }
 
@@ -2934,6 +2971,12 @@ find_best_agent_for_issue() {
     local issue_keywords
     issue_keywords=$(extract_issue_keywords "$issue_number")
 
+    # Issue #1750: v0.5 Feature #2 — Pre-fetch trust graph once per routing cycle.
+    # Pass to score_agent_for_issue() to avoid N kubectl calls (one per agent being scored).
+    local trust_graph_cache
+    trust_graph_cache=$(kubectl_with_timeout 10 get configmap coordinator-state \
+        -n "$NAMESPACE" -o jsonpath='{.data.agentTrustGraph}' 2>/dev/null || echo "")
+
     local best_agent=""
     local best_score=0
 
@@ -2961,8 +3004,9 @@ find_best_agent_for_issue() {
         local agent_score
         # Issue #1515: pass displayName so score_agent_for_issue() can try canonical
         # lookup even when the per-session S3 file is empty (new agent pods)
+        # Issue #1750: pass pre-fetched trust_graph_cache to avoid N kubectl calls
         agent_score=$(score_agent_for_issue "$agent_name" "$issue_number" \
-            "$issue_labels" "$issue_keywords" "$agent_display_name")
+            "$issue_labels" "$issue_keywords" "$agent_display_name" "$trust_graph_cache")
 
         echo "[$(date -u +%H:%M:%S)] Specialization score for $agent_name (displayName=${agent_display_name:-?}) on issue #$issue_number: $agent_score" >&2
 
