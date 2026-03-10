@@ -216,8 +216,11 @@ spec:
               value: ${cluster_name}
             - name: NAMESPACE
               value: ${NAMESPACE}
-            - name: GITHUB_TOKEN_FILE
-              value: "/var/secrets/github/token"
+            - name: GITHUB_TOKEN  # env var via secretKeyRef (matches cluster live config, issue #1643)
+              valueFrom:
+                secretKeyRef:
+                  name: agentex-github-token
+                  key: token
           resources:
             requests:
               memory: "512Mi"
@@ -228,17 +231,10 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /workspace
-            - name: github-token
-              mountPath: /var/secrets/github
-              readOnly: true
       volumes:
         - name: workspace
           emptyDir:
             sizeLimit: 2Gi
-        - name: github-token
-          secret:
-            secretName: agentex-github-token
-            defaultMode: 0400
 EOF
         if [ $? -eq 0 ]; then
             echo "[$(date -u +%H:%M:%S)] Fallback Job created for $name ✓"
