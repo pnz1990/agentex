@@ -91,23 +91,41 @@ echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 
 # ── Configure GitHub Authentication (issue #6) ───────────────────────────────
 # Read GitHub token from read-only file mount instead of environment variable
+# Issue #1447: gh auth login --with-token uses GraphQL to validate the token.
+# When the GitHub GraphQL rate limit is exceeded at pod startup, auth fails even
+# though the token itself is valid. Fix: retry with exponential backoff.
+gh_auth_with_retry() {
+  local token="$1"
+  local max_attempts=3
+  local delay=30
+  for attempt in $(seq 1 "$max_attempts"); do
+    if echo "$token" | gh auth login --with-token 2>/dev/null; then
+      echo "gh CLI authenticated successfully (attempt $attempt)"
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      echo "WARNING: gh auth login failed (attempt $attempt/$max_attempts) — retrying in ${delay}s (GitHub API rate limit may be exceeded)"
+      sleep "$delay"
+      delay=$((delay * 2))
+    fi
+  done
+  echo "WARNING: gh auth login failed after $max_attempts attempts - gh commands may not work"
+  return 1
+}
+
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
   echo "GitHub token loaded from read-only file mount"
   # Authenticate gh CLI with the token (issue #coordinator-gh-auth)
   # gh auth status checks fail even with GITHUB_TOKEN exported - need explicit login
   if command -v gh &>/dev/null; then
-    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null && \
-      echo "gh CLI authenticated successfully" || \
-      echo "WARNING: gh auth login failed - gh commands may not work"
+    gh_auth_with_retry "$GITHUB_TOKEN" || true
   fi
 elif [ -n "${GITHUB_TOKEN:-}" ]; then
   echo "GitHub token loaded from environment variable (legacy)"
   # Authenticate gh CLI with the token
   if command -v gh &>/dev/null; then
-    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null && \
-      echo "gh CLI authenticated successfully" || \
-      echo "WARNING: gh auth login failed - gh commands may not work"
+    gh_auth_with_retry "$GITHUB_TOKEN" || true
   fi
 else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
@@ -2467,6 +2485,19 @@ while true; do
     # NOTE (issue #867): Planner-chain liveness check removed.
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime
     # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
+
+    # Every 20 iterations (~10 min): verify gh CLI is still authenticated (issue #1447)
+    # GitHub GraphQL rate limits can expire and cause auth failures mid-run.
+    # Periodic re-auth ensures the coordinator recovers without a pod restart.
+    if [ $((iteration % 20)) -eq 0 ]; then
+        if ! gh auth status &>/dev/null 2>&1; then
+            echo "[$(date -u +%H:%M:%S)] gh CLI auth check FAILED — attempting re-authentication (issue #1447)"
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+                gh_auth_with_retry "$GITHUB_TOKEN" || \
+                    echo "[$(date -u +%H:%M:%S)] WARNING: gh re-authentication failed — gh commands may not work until next retry"
+            fi
+        fi
+    fi
 
     sleep "$HEARTBEAT_INTERVAL"
 done
