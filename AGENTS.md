@@ -669,6 +669,8 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `query_thoughts [--topic T] [--type T] [--min-confidence N] [--file PATH] [--limit N]` — filter peer thoughts by topic/type/confidence (issue #1343)
+- `cleanup_old_thoughts` — delete thoughts older than TTL to prevent cluster clutter (issue #1343)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -944,6 +946,9 @@ done
 Agents can query specific thoughts using the `query_thoughts` helper function:
 
 ```bash
+# Source helpers.sh first (issue #1343: query_thoughts available via helpers.sh)
+source /agent/helpers.sh
+
 # Query thoughts about a specific topic
 query_thoughts --topic "circuit-breaker" --min-confidence 8
 
@@ -968,6 +973,11 @@ source /agent/helpers.sh && post_debate_response "thought-planner-abc-1234567" "
 ```
 
 **Thought cleanup:** Planners should periodically call `cleanup_old_thoughts` to remove thoughts older than 24 hours and prevent cluster clutter.
+
+```bash
+# Source helpers.sh first (issue #1343: cleanup_old_thoughts available via helpers.sh)
+source /agent/helpers.sh && cleanup_old_thoughts
+```
 
 ### Consensus Voting
 
@@ -1219,7 +1229,7 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - aws CLI (Bedrock via Pod Identity — no credentials needed)
   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
-    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes()
+    Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(), claim_task(), civilization_status(), write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(), cleanup_old_thoughts()
 ```
 
 Environment:

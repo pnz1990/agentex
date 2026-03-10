@@ -737,5 +737,127 @@ EOF
   log "Vision feature proposed: issue #$issue_number ('$safe_name') — awaiting 3+ votes"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature available"
+# ── query_thoughts ────────────────────────────────────────────────────────────
+# Query thoughts by topic, type, confidence, or file path using kubectl.
+# Ported from entrypoint.sh so OpenCode agents can call it via helpers.sh.
+# AGENTS.md documents this function as available to agents for thought discovery.
+#
+# Usage: query_thoughts [--topic TOPIC] [--type TYPE] [--min-confidence N] [--file PATH] [--limit N]
+# Returns: Formatted thoughts matching the criteria (one per line)
+#
+# Example:
+#   source /agent/helpers.sh
+#   query_thoughts --topic "circuit-breaker" --min-confidence 8
+#   query_thoughts --type "decision" --limit 10
+#   query_thoughts --file "entrypoint.sh" --type "blocker"
+query_thoughts() {
+  local topic="" type="" min_conf=7 file_path="" limit=20
+
+  # Parse arguments
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --topic) topic="$2"; shift 2 ;;
+      --type) type="$2"; shift 2 ;;
+      --min-confidence) min_conf="$2"; shift 2 ;;
+      --file) file_path="$2"; shift 2 ;;
+      --limit) limit="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  # Build label selector
+  local labels=""
+  [ -n "$topic" ] && labels="${labels}agentex/topic=${topic},"
+  [ -n "$type" ] && labels="${labels}agentex/type=${type},"
+  [ -n "$file_path" ] && labels="${labels}agentex/file=${file_path},"
+  labels="${labels%,}"  # Remove trailing comma
+
+  # Query thoughts
+  local selector_arg=""
+  [ -n "$labels" ] && selector_arg="-l ${labels}"
+
+  kubectl_with_timeout 10 get thoughts.kro.run -n "$NAMESPACE" \
+    $selector_arg \
+    --sort-by=.metadata.creationTimestamp \
+    -o json 2>/dev/null | jq -r \
+    --argjson min_conf "$min_conf" \
+    --argjson limit "$limit" \
+    --arg name "$AGENT_NAME" \
+    '.items |
+     map(select(.spec.confidence >= $min_conf)) |
+     map(select(.spec.agentRef != $name)) |
+     .[-$limit:] |
+     .[] |
+     "[\(.spec.agentRef)/\(.spec.thoughtType)/c=\(.spec.confidence)] \(.spec.content)"' \
+    2>/dev/null || true
+}
+
+# ── cleanup_old_thoughts ──────────────────────────────────────────────────────
+# Delete thoughts older than 24 hours (or 2h for low-signal types) to prevent
+# cluster clutter and kubectl performance degradation.
+# Ported from entrypoint.sh so planners can call this from OpenCode bash context.
+# AGENTS.md: "Planners should periodically call cleanup_old_thoughts to remove
+#             thoughts older than 24 hours and prevent cluster clutter."
+#
+# Issue #1020: uses 60s timeout to handle 6000+ CRs (list takes 10+ seconds)
+# Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
+# Issue #1044: batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
+#
+# Usage: cleanup_old_thoughts
+# Returns: 0 always (best-effort, non-fatal)
+#
+# Example:
+#   source /agent/helpers.sh
+#   cleanup_old_thoughts
+cleanup_old_thoughts() {
+  local cutoff_24h
+  cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_2h
+  cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ]; then
+    log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
+    return 0
+  fi
+
+  # Issue #1020: use 60s timeout to handle 6000+ CRs (list takes 10+ seconds with large clusters)
+  local all_thoughts_json
+  all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+  if [ -z "$all_thoughts_json" ]; then
+    log "No thoughts found or kubectl timed out during cleanup"
+    return 0
+  fi
+
+  # Issue #1016: tiered TTL — low-signal types (blocker, observation) expire after 2h
+  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  local old_thoughts
+  old_thoughts=$(echo "$all_thoughts_json" | jq -r \
+    --arg cutoff_24h "$cutoff_24h" \
+    --arg cutoff_2h "$cutoff_2h" \
+    '.items[] |
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+      then $cutoff_2h
+      else $cutoff_24h
+      end) as $cutoff |
+     select(.metadata.creationTimestamp < $cutoff) |
+     .metadata.name' 2>/dev/null || true)
+
+  if [ -z "$old_thoughts" ]; then
+    log "No old thoughts to clean up"
+    return 0
+  fi
+
+  # Issue #1044: batch deletion via xargs -n50
+  # One kubectl call per 50 thoughts = ~78 calls for 3876 thoughts (~78s vs ~10+ hours one-by-one)
+  local count
+  count=$(echo "$old_thoughts" | wc -w)
+  log "Deleting $count old thoughts in batches of 50..."
+  echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
+
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
