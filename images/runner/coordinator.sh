@@ -751,16 +751,6 @@ cleanup_stale_assignments() {
     local cleaned_assignments=""
     local stale_count=0
 
-    # Issue #1546: Load pre-claim timestamps to protect coordinator-created pre-claims
-    # from being pruned before the worker's Job starts. Format: "agent:issue:ts;..."
-    # route_tasks_by_specialization() writes here when pre-claiming on an agent's behalf.
-    local pre_claim_timestamps
-    pre_claim_timestamps=$(get_state "preClaimTimestamps" 2>/dev/null || echo "")
-    local now_epoch
-    now_epoch=$(date +%s)
-    # Grace window: 120 seconds. Worker spawn latency can exceed 60s (kro + EKS node scaling).
-    local PRE_CLAIM_GRACE_WINDOW=120
-
     # Issue #1561: Per-run issue-state cache to deduplicate gh issue view API calls.
     # cleanup_stale_assignments() runs every coordinator iteration (~30s) and calls
     # `gh issue view` for EACH assignment — both active (closed-issue check, #1094) and
