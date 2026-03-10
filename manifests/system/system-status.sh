@@ -98,6 +98,78 @@ kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimesta
   tail -6 | tail -5 | awk '{printf "   %s [%s] %s\n", $1, $3, $4}' 2>/dev/null || echo "   (none)"
 echo ""
 
+# 5a. COORDINATOR & GOVERNANCE HEALTH
+echo -e "${BLUE}🧠 Coordinator & Governance Health${NC}"
+
+COORD_STATE=$(kubectl get configmap coordinator-state -n "$NAMESPACE" -o json 2>/dev/null || echo "{}")
+
+# Coordinator heartbeat age
+LAST_HEARTBEAT=$(echo "$COORD_STATE" | jq -r '.data.lastHeartbeat // ""' 2>/dev/null || echo "")
+COORD_PHASE=$(echo "$COORD_STATE" | jq -r '.data.phase // "Unknown"' 2>/dev/null || echo "Unknown")
+if [ -n "$LAST_HEARTBEAT" ] && [ "$LAST_HEARTBEAT" != "null" ]; then
+  NOW_EPOCH=$(date -u +%s)
+  HB_EPOCH=$(date -u -d "$LAST_HEARTBEAT" +%s 2>/dev/null || echo "0")
+  HB_AGE_SEC=$(( NOW_EPOCH - HB_EPOCH ))
+  HB_AGE_MIN=$(( HB_AGE_SEC / 60 ))
+  if [ "$HB_AGE_MIN" -gt 5 ]; then
+    echo -e "   Heartbeat: ${RED}STALE${NC} (${HB_AGE_MIN}m ago — coordinator may be down)"
+  else
+    echo -e "   Heartbeat: ${GREEN}${HB_AGE_MIN}m ago${NC} (phase: ${COORD_PHASE})"
+  fi
+  COORD_ALIVE=true
+else
+  echo -e "   Heartbeat: ${YELLOW}unknown${NC} (phase: ${COORD_PHASE})"
+  COORD_ALIVE=false
+fi
+
+# debateStats breakdown
+DEBATE_STATS=$(echo "$COORD_STATE" | jq -r '.data.debateStats // ""' 2>/dev/null || echo "")
+if [ -n "$DEBATE_STATS" ] && [ "$DEBATE_STATS" != "null" ]; then
+  echo "   Debate stats: $DEBATE_STATS"
+else
+  echo "   Debate stats: (none)"
+fi
+
+# Unresolved debates count
+UNRESOLVED_DEBATES=$(echo "$COORD_STATE" | jq -r '.data.unresolvedDebates // ""' 2>/dev/null || echo "")
+if [ -n "$UNRESOLVED_DEBATES" ] && [ "$UNRESOLVED_DEBATES" != "null" ]; then
+  UNRESOLVED_COUNT=$(echo "$UNRESOLVED_DEBATES" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+else
+  UNRESOLVED_COUNT=0
+fi
+if [ "$UNRESOLVED_COUNT" -gt 5 ]; then
+  echo -e "   Unresolved debates: ${RED}${UNRESOLVED_COUNT}${NC} (backlog growing)"
+elif [ "$UNRESOLVED_COUNT" -gt 2 ]; then
+  echo -e "   Unresolved debates: ${YELLOW}${UNRESOLVED_COUNT}${NC}"
+else
+  echo -e "   Unresolved debates: ${GREEN}${UNRESOLVED_COUNT}${NC}"
+fi
+
+# Specialization routing ratio
+SPEC_ASSIGNED=$(echo "$COORD_STATE" | jq -r '.data.specializedAssignments // "0"' 2>/dev/null || echo "0")
+GENERIC_ASSIGNED=$(echo "$COORD_STATE" | jq -r '.data.genericAssignments // "0"' 2>/dev/null || echo "0")
+TOTAL_ASSIGNED=$(( SPEC_ASSIGNED + GENERIC_ASSIGNED ))
+if [ "$TOTAL_ASSIGNED" -gt 0 ]; then
+  SPEC_PCT=$(( SPEC_ASSIGNED * 100 / TOTAL_ASSIGNED ))
+  if [ "$SPEC_PCT" -lt 20 ]; then
+    echo -e "   Routing: ${YELLOW}${SPEC_PCT}% specialized${NC} / ${GENERIC_ASSIGNED} generic (low specialization)"
+  else
+    echo -e "   Routing: ${GREEN}${SPEC_PCT}% specialized${NC} / ${GENERIC_ASSIGNED} generic"
+  fi
+else
+  echo "   Routing: no assignments yet"
+fi
+
+# visionQueue length
+VISION_QUEUE=$(echo "$COORD_STATE" | jq -r '.data.visionQueue // ""' 2>/dev/null || echo "")
+if [ -n "$VISION_QUEUE" ] && [ "$VISION_QUEUE" != "null" ]; then
+  VQ_LENGTH=$(echo "$VISION_QUEUE" | tr ';' '\n' | grep -c . 2>/dev/null || echo "0")
+  echo -e "   Vision queue: ${GREEN}${VQ_LENGTH} items${NC} (civilization self-directed goals)"
+else
+  echo "   Vision queue: empty"
+fi
+echo ""
+
 # 6. OPEN GITHUB ISSUES/PRS
 echo -e "${BLUE}🔧 GitHub Status${NC}"
 if command -v gh &> /dev/null; then
@@ -157,6 +229,27 @@ elif [ "$RECENT_AGENTS" -gt 20 ]; then
 else
   HEALTH_OK=$((HEALTH_OK + 1))
   echo -e "   ${GREEN}✓${NC} Spawn rate normal"
+fi
+
+# Check coordinator heartbeat
+if [ "${COORD_ALIVE:-false}" = "true" ] && [ "${HB_AGE_MIN:-0}" -gt 5 ]; then
+  HEALTH_CRIT=$((HEALTH_CRIT + 1))
+  echo -e "   ${RED}✗${NC} Coordinator heartbeat stale (${HB_AGE_MIN}m)"
+elif [ "${COORD_ALIVE:-false}" = "false" ]; then
+  HEALTH_WARN=$((HEALTH_WARN + 1))
+  echo -e "   ${YELLOW}⚠${NC} Coordinator heartbeat unknown"
+else
+  HEALTH_OK=$((HEALTH_OK + 1))
+  echo -e "   ${GREEN}✓${NC} Coordinator alive"
+fi
+
+# Check debate backlog
+if [ "${UNRESOLVED_COUNT:-0}" -gt 5 ]; then
+  HEALTH_WARN=$((HEALTH_WARN + 1))
+  echo -e "   ${YELLOW}⚠${NC} Debate backlog high (${UNRESOLVED_COUNT} unresolved)"
+else
+  HEALTH_OK=$((HEALTH_OK + 1))
+  echo -e "   ${GREEN}✓${NC} Debate backlog normal"
 fi
 
 echo ""
