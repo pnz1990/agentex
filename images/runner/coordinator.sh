@@ -762,27 +762,78 @@ tally_and_enact_votes() {
         
         echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
         
-        # Get most recent proposal declaration line for this topic (issue #1222)
-        # BUG FIX: Previously used `| tail -1` on multi-line jq output — when 2+ proposals exist,
-        # jq concatenates all their content with newlines, and tail -1 returns the last line of the
-        # COMBINED output (often an empty line after the trailing newline), causing `[ -z "$proposal_content" ]`
-        # to skip ALL proposals silently. The governance engine was completely broken.
+        # Verify at least one proposal exists for this topic — needed for proposer_agent extraction
+        # and as a guard against spurious topics from vote-only thoughts (issue #1222)
+        local proposal_exists
+        proposal_exists=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
+            "$thoughts_file" 2>/dev/null \
+            | grep "^#proposal-${topic}" | head -1 || true)
+        [ -z "$proposal_exists" ] && continue
+
+        # ISSUE #1286 FIX: Use majority-voted values instead of most-recent proposal values.
         #
-        # FIX: Extract only the #proposal-<topic> declaration lines (one per proposal), then take the
-        # last one (most recently written in jq output order). This is all kv_pairs extraction needs.
+        # PREVIOUS BUG: kv_pairs were extracted from the most recently written proposal:
+        #   proposal_content=$(... | grep "^#proposal-${topic}" | tail -1)
+        #   kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+')
+        # This caused the wrong value to be enacted when multiple proposals existed — e.g.
+        # limit=5 enacted even though 27+ votes supported limit=10 or limit=12.
+        #
+        # FIX: For each governance key, tally the values across all approve votes and use
+        # the value that appears in the most approve votes (majority value).
+        # Example: if 27 votes say circuitBreakerLimit=12 and 1 vote says circuitBreakerLimit=5,
+        # we enact limit=12 (the majority-voted value), not limit=5 (the most-recent proposal).
+        #
+        # For keys not found in any vote, fall back to the most-recent proposal value.
+        # For the "reason" key, always use the proposal value (not governance-enacted).
+
+        # Step 1: Gather all kv pairs from approve vote declaration lines
+        local all_vote_kvs
+        all_vote_kvs=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\")))) | .content" \
+            "$thoughts_file" 2>/dev/null \
+            | grep "^#vote-${topic}" \
+            | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+
+        # Step 2: For each unique key found in votes, pick the majority value
+        # Build kv_pairs from majority-voted values, falling back to proposal for missing keys
+        local kv_pairs=""
+        if [ -n "$all_vote_kvs" ]; then
+            # Get unique keys from votes (excluding "approve" which is not a kv pair)
+            local vote_keys
+            vote_keys=$(echo "$all_vote_kvs" | grep -oE '^[a-zA-Z0-9_]+' | grep -v "^approve$" | sort -u || true)
+
+            while IFS= read -r key; do
+                [ -z "$key" ] && continue
+                [ "$key" = "reason" ] && continue  # reason key is informational, not governance value
+                # Count votes for each value of this key
+                local majority_value
+                majority_value=$(echo "$all_vote_kvs" | grep "^${key}=" | sort | uniq -c | sort -rn | head -1 | awk '{print $2}' | cut -d= -f2- || true)
+                if [ -n "$majority_value" ]; then
+                    kv_pairs="${kv_pairs:+$kv_pairs }${key}=${majority_value}"
+                    echo "[$(date -u +%H:%M:%S)] MAJORITY VALUE: $key=$majority_value (from approve votes)"
+                fi
+            done <<< "$vote_keys"
+        fi
+
+        # Step 3: Fall back to proposal values for any keys not in votes
+        # Also use proposal for keys like addIssue, feature, description which may only appear in proposals
         local proposal_content
         proposal_content=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
             "$thoughts_file" 2>/dev/null \
             | grep "^#proposal-${topic}" | tail -1 || true)
-        
-        [ -z "$proposal_content" ] && continue
+        local proposal_kv_pairs
+        proposal_kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
 
-        # Extract key=value pairs from proposal declaration line only (issue #754)
-        # IMPORTANT: Only extract from first line to avoid picking up values from evidence/reasoning text
-        # Example: "#proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-at-limit-6"
-        # Should extract "circuitBreakerLimit=12" and "reason=...", NOT "limit-6" from later lines
-        local kv_pairs
-        kv_pairs=$(echo "$proposal_content" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' || true)
+        # Merge: vote-derived values take precedence, proposal fills in missing keys
+        while IFS= read -r kv; do
+            [ -z "$kv" ] && continue
+            local pk="${kv%%=*}"
+            # Only add proposal kv if not already in kv_pairs from votes
+            if ! echo "$kv_pairs" | grep -qE "(^| )${pk}="; then
+                kv_pairs="${kv_pairs:+$kv_pairs }${kv}"
+            fi
+        done <<< "$proposal_kv_pairs"
+
+        echo "[$(date -u +%H:%M:%S)] GOVERNANCE kv_pairs (majority-voted): $kv_pairs"
         
         # Count unique approve/reject/abstain votes for this topic
         local approve_votes
