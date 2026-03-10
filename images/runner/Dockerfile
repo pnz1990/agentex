@@ -3,7 +3,7 @@
 # ============================================================================
 FROM ubuntu:24.04 AS builder
 
-# Image version: 2026-03-10-r11 (fix: multi-stage build to eliminate gnupg CVEs; issue #1009)
+# Image version: 2026-03-10-r12 (fix: validate issue open before claiming from coordinator queue; issue #1015)
 ARG OPENCODE_VERSION=latest
 
 # Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
