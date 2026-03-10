@@ -119,7 +119,7 @@ gh_auth_with_retry() {
       return 0
     fi
     if [ "$attempt" -lt "$max_attempts" ]; then
-      echo "WARNING: gh auth login failed (attempt $attempt/$max_attempts) — retrying in ${delay}s (GitHub API rate limit may be exceeded)"
+      echo "WARNING: gh auth login failed (attempt $attempt/$max_attempts) — REST API also unavailable, retrying in ${delay}s (GitHub API rate limit may be exceeded)"
       sleep "$delay"
       delay=$((delay * 2))
     fi
