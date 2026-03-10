@@ -2332,11 +2332,31 @@ route_tasks_by_specialization() {
             [ -z "$aname" ] && continue
             agents_checked=$((agents_checked + 1))
 
-            local spec_data
-            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
-                --region "$BEDROCK_REGION" 2>/dev/null | \
-                jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
-                2>/dev/null || echo "")
+            local spec_data=""
+            # Issue #1517: try canonical path first (persistent cross-generation history),
+            # then fall back to per-session path. Per-session files are empty for new agents,
+            # causing the diagnostic to always report 0 agents with spec data.
+            # Step 1: try to get displayName from per-session file
+            local per_session_json=""
+            per_session_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+            if [ -n "$per_session_json" ]; then
+                # Check per-session file for spec data first
+                spec_data=$(echo "$per_session_json" | \
+                    jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                    2>/dev/null || echo "")
+                # If no spec in per-session, try canonical path using displayName
+                if [ -z "$spec_data" ]; then
+                    local adisp
+                    adisp=$(echo "$per_session_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+                    if [ -n "$adisp" ] && [ "$adisp" != "$aname" ]; then
+                        spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${adisp}.json" - \
+                            --region "$BEDROCK_REGION" 2>/dev/null | \
+                            jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                            2>/dev/null || echo "")
+                    fi
+                fi
+            fi
             if [ -n "$spec_data" ]; then
                 agents_with_spec=$((agents_with_spec + 1))
             fi
