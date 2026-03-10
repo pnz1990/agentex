@@ -840,12 +840,17 @@ cleanup_stale_assignments() {
         # Issue #1260: Root cause fix — capture kubectl output first, use empty-object fallback.
         # When kubectl cannot find a job, some cluster configurations output "Error from server
         # (NotFound)..." to STDOUT. Capturing output first and using {} fallback prevents
-        # jq "Invalid numeric literal at line 1, column 6" parse errors in coordinator logs.
-        local raw_job_json
-        raw_job_json=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null || echo "")
-        job_active=$(echo "${raw_job_json:-{\}}" | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null || echo "false")
-
-        if [ "$job_active" = "true" ]; then
+         # jq "Invalid numeric literal at line 1, column 6" parse errors in coordinator logs.
+         local raw_job_json
+         raw_job_json=$(kubectl_with_timeout 10 get job "$agent_name" -n "$NAMESPACE" -o json 2>/dev/null || echo "")
+         job_active=$(echo "${raw_job_json:-{\}}" | jq -r 'if (.status.completionTime == null and (.status.active // 0) > 0) then "true" else "false" end' 2>/dev/null || echo "false")
+         # Issue #1610: Track whether the job exists at all. When job doesn't exist (garbage-
+         # collected or never created), raw_job_json is empty. We must not keep assignments for
+         # non-existent jobs indefinitely ("PR likely pending" assumption is wrong for ghost jobs).
+         local job_exists="false"
+         [ -n "$raw_job_json" ] && job_exists="true"
+ 
+         if [ "$job_active" = "true" ]; then
             # Issue #1094: Even if agent job is running, check if the GitHub issue is still open.
             # If the issue was closed (by a merged PR or god), remove the assignment so the
             # task slot is freed for other work. Skip numeric check to handle non-issue refs.
@@ -899,29 +904,36 @@ cleanup_stale_assignments() {
                 fi
             fi
 
-            # Issue #1556: Job completed, but check if issue is closed before releasing claim.
-            # Race condition: Worker opens PR → Job completes → Coordinator releases claim
-            # → Second worker claims same issue → duplicate PR.
-            # Fix: Keep assignment if issue still OPEN (PR pending merge). Only release when CLOSED.
-            if [[ "$issue" =~ ^[0-9]+$ ]]; then
-                local issue_state
-                # Issue #1561: use cache to avoid duplicate gh issue view calls
-                issue_state=$(_get_issue_state "$issue")
-                if [ "$issue_state" = "CLOSED" ]; then
-                    echo "[$(date -u +%H:%M:%S)] Complete: $agent_name → issue #$issue CLOSED, releasing assignment"
-                    stale_count=$((stale_count + 1))
-                elif [ "$issue_state" = "OPEN" ]; then
-                    # Job done but issue still open - likely PR pending merge. Keep assignment.
-                    echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (PR likely pending), keeping assignment"
-                    local clean_pair="${agent_name}:${issue}"
-                    [ -n "$cleaned_assignments" ] \
-                        && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
-                        || cleaned_assignments="${clean_pair}"
-                else
-                    # UNKNOWN state (API error or non-issue task) - release to be safe
-                    echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue state UNKNOWN, releasing assignment"
-                    stale_count=$((stale_count + 1))
-                fi
+             # Issue #1556: Job completed, but check if issue is closed before releasing claim.
+             # Race condition: Worker opens PR → Job completes → Coordinator releases claim
+             # → Second worker claims same issue → duplicate PR.
+             # Fix: Keep assignment if issue still OPEN (PR pending merge). Only release when CLOSED.
+             # Issue #1610: Exception: if the job does NOT EXIST (garbage-collected or never created),
+             # do NOT keep the assignment forever. A non-existent job cannot have a PR pending.
+             if [[ "$issue" =~ ^[0-9]+$ ]]; then
+                 local issue_state
+                 # Issue #1561: use cache to avoid duplicate gh issue view calls
+                 issue_state=$(_get_issue_state "$issue")
+                 if [ "$issue_state" = "CLOSED" ]; then
+                     echo "[$(date -u +%H:%M:%S)] Complete: $agent_name → issue #$issue CLOSED, releasing assignment"
+                     stale_count=$((stale_count + 1))
+                 elif [ "$issue_state" = "OPEN" ] && [ "$job_exists" = "false" ]; then
+                     # Issue #1610: Job doesn't exist (garbage-collected). Issue is still open but
+                     # no active job can have a PR pending — this is a ghost assignment. Release.
+                     echo "[$(date -u +%H:%M:%S)] Ghost: $agent_name → issue #$issue OPEN but job doesn't exist (ghost assignment), releasing"
+                     stale_count=$((stale_count + 1))
+                 elif [ "$issue_state" = "OPEN" ]; then
+                     # Job done but issue still open - likely PR pending merge. Keep assignment.
+                     echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (PR likely pending), keeping assignment"
+                     local clean_pair="${agent_name}:${issue}"
+                     [ -n "$cleaned_assignments" ] \
+                         && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                         || cleaned_assignments="${clean_pair}"
+                 else
+                     # UNKNOWN state (API error or non-issue task) - release to be safe
+                     echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue state UNKNOWN, releasing assignment"
+                     stale_count=$((stale_count + 1))
+                 fi
             else
                 # Non-numeric issue ref (e.g., vision queue feature) - release when job done
                 echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → task $issue (non-issue), releasing assignment"
@@ -1984,13 +1996,13 @@ record_synthesis_debates_to_s3() {
 
     local synth_count
     synth_count=$(echo "$synthesis_thoughts" | jq 'length' 2>/dev/null || echo "0")
-    echo "[$(date -u +%H:%M:%S)] Recording $synth_count synthesis debates to S3 (max $max_writes_per_cycle per cycle)"
+    echo "[$(date -u +%H:%M:%S)] Checking $synth_count synthesis debates for S3 persistence (max $max_writes_per_cycle new writes per cycle)"
 
-    # Process each synthesis thought — limited to max_writes_per_cycle new writes per call.
-    # The aws s3 ls idempotency check is skipped in favor of try-write-then-skip-on-conflict,
-    # which is faster since we expect most writes to be new on the first pass.
+    # Process each synthesis thought — check idempotency before writing (issue #1606).
+    # Only debates NOT yet in S3 are written. Debates already in S3 are skipped efficiently.
     local idx=0
     local writes_this_cycle=0
+    local skipped_existing=0
     while [ "$idx" -lt "$synth_count" ]; do
         local thought_name parent_ref agent_name content timestamp
         thought_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].name" 2>/dev/null || echo "")
@@ -2007,11 +2019,19 @@ record_synthesis_debates_to_s3() {
 
         local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
 
-        # Issue #1585: Replaced individual aws s3 ls check (1 API call per debate = 200+ calls)
-        # with try-write approach: attempt S3 write; skip silently if file already exists.
-        # S3 PUT is idempotent and overwrites with same data are harmless.
-        # This eliminates the per-debate ls check, cutting API calls roughly in half.
-        # Still enforce per-cycle limit to bound coordinator blocking time.
+        # Issue #1606: Add idempotency check — skip debates already persisted to S3.
+        # Previously the function used a "try-write" approach (writing all debates every cycle)
+        # which caused 250+ S3 PUTs every 2.5 minutes (145,000 PUTs/day, ~$0.72/day wasted).
+        # Now we check if the file exists first; only new debates are written.
+        # Note: aws s3 ls is a LIST operation ($0.0004/1000), much cheaper than PUTs ($0.005/1000).
+        if aws s3 ls "$s3_path" >/dev/null 2>&1; then
+            # File already exists — skip, this debate is already persisted
+            skipped_existing=$((skipped_existing + 1))
+            idx=$((idx + 1))
+            continue
+        fi
+
+        # Only count toward per-cycle limit for actual writes (not skipped files)
         if [ "$writes_this_cycle" -ge "$max_writes_per_cycle" ]; then
             echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining debates will be written next cycle"
             break
@@ -2066,7 +2086,7 @@ EOF
 
         idx=$((idx + 1))
     done
-    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes this cycle (${synth_count} total)"
+    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes, $skipped_existing already-persisted skipped (${synth_count} total synthesis debates)"
 }
 
 # Track debate activity — count debate threads, surface unresolved disagreements
