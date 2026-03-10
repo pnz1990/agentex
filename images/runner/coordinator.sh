@@ -2667,6 +2667,180 @@ The civilization needs mediators, not just voters." \
 # was added — the function referenced undefined $PLANNER_LIVENESS_TIMEOUT which would
 # have caused a bash unbound variable error under set -u if ever called.
 
+# ── Dynamic Role Promotion (issue #1733) ─────────────────────────────────────
+#
+# promote_agent_role() scans all active agents' S3 identity files and promotes
+# agents that demonstrate consistent excellence. Promotion criteria:
+#   - N=3 consecutive visionScores >= 8 in reputationHistory, OR
+#   - specializationLabelCounts shows 5+ tasks in one domain
+#
+# Promoted role format: {base-role}:{specialization}
+#   e.g., worker:architecture-specialist, worker:debate-specialist
+#
+# The promoted role is written to the agent's S3 identity file as "promotedRole".
+# score_agent_for_issue() factors in promotedRole for routing priority.
+#
+# Runs every 15 iterations (~7.5 min) in the main coordinator loop.
+# ─────────────────────────────────────────────────────────────────────────────
+promote_agent_role() {
+    echo "[$(date -u +%H:%M:%S)] Running dynamic role promotion check (issue #1733)..."
+
+    # Update S3 bucket from constitution (runtime portability)
+    update_identity_bucket_from_constitution
+
+    local active_agents
+    active_agents=$(get_state "activeAgents")
+    if [ -z "$active_agents" ]; then
+        echo "[$(date -u +%H:%M:%S)] No active agents — skipping role promotion"
+        return 0
+    fi
+
+    local promotions_this_cycle=0
+
+    IFS=',' read -ra agent_pairs <<< "$active_agents"
+    for pair in "${agent_pairs[@]}"; do
+        [ -z "$pair" ] && continue
+        local agent_name="${pair%%:*}"
+        local agent_role
+        agent_role=$(echo "$pair" | cut -d: -f2 | tr -d '[:space:]')
+        local agent_display_name
+        agent_display_name=$(echo "$pair" | cut -d: -f3)
+
+        # Only evaluate worker agents for promotion (planners/architects are already specialized)
+        [ "$agent_role" != "worker" ] && continue
+
+        # Skip if already promoted (role contains colon = already a specialist)
+        # (agent_role was extracted via cut -d: -f2 so it won't contain a promoted suffix,
+        #  but check the S3 identity for an existing promotedRole field)
+
+        # Read agent identity — prefer canonical history
+        local identity_json=""
+        if [ -n "$agent_display_name" ] && [ "$agent_display_name" != "$agent_name" ]; then
+            identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${agent_display_name}.json" - \
+                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        fi
+        if [ -z "$identity_json" ]; then
+            identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
+                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        fi
+        [ -z "$identity_json" ] && continue
+
+        # Skip if already has a promotedRole
+        local existing_promoted
+        existing_promoted=$(echo "$identity_json" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
+        [ -n "$existing_promoted" ] && continue
+
+        local new_role=""
+        local promotion_reason=""
+
+        # Criterion 1: 3 consecutive visionScores >= 8 in reputationHistory
+        local rep_history
+        rep_history=$(echo "$identity_json" | jq -c '.reputationHistory // []' 2>/dev/null || echo "[]")
+        local rep_count
+        rep_count=$(echo "$rep_history" | jq 'length' 2>/dev/null || echo "0")
+
+        if [ "$rep_count" -ge 3 ]; then
+            # Check if last 3 visionScores are all >= 8
+            local consecutive_high
+            consecutive_high=$(echo "$rep_history" | jq '
+                (.[-3:] | map(.visionScore // 0 | tonumber) | all(. >= 8))
+                and (length >= 3)' 2>/dev/null || echo "false")
+
+            if [ "$consecutive_high" = "true" ]; then
+                # Determine specialization from reputationHistory or specializationLabelCounts
+                local top_label
+                top_label=$(echo "$identity_json" | jq -r '
+                    .specializationLabelCounts // {} | to_entries | sort_by(-.value) | .[0].key // ""
+                    ' 2>/dev/null || echo "")
+
+                if [ -n "$top_label" ]; then
+                    new_role="worker:${top_label}-specialist"
+                else
+                    new_role="worker:vision-specialist"
+                fi
+                promotion_reason="3 consecutive visionScores >= 8 in reputationHistory"
+            fi
+        fi
+
+        # Criterion 2: 5+ tasks in one domain (specializationLabelCounts)
+        if [ -z "$new_role" ]; then
+            local domain_count
+            domain_count=$(echo "$identity_json" | jq -r '
+                .specializationLabelCounts // {} | to_entries | sort_by(-.value) | .[0].value // 0
+                ' 2>/dev/null || echo "0")
+            local top_domain
+            top_domain=$(echo "$identity_json" | jq -r '
+                .specializationLabelCounts // {} | to_entries | sort_by(-.value) | .[0].key // ""
+                ' 2>/dev/null || echo "")
+
+            if [ "$domain_count" -ge 5 ] && [ -n "$top_domain" ]; then
+                new_role="worker:${top_domain}-specialist"
+                promotion_reason="5+ tasks in domain '${top_domain}' (count=${domain_count})"
+            fi
+        fi
+
+        # If promotion criteria met — write promoted role to S3 identity
+        if [ -n "$new_role" ]; then
+            echo "[$(date -u +%H:%M:%S)] PROMOTING $agent_name (${agent_display_name:-?}) → $new_role ($promotion_reason)"
+
+            # Write promotedRole to S3 identity file
+            local updated_json
+            updated_json=$(echo "$identity_json" | jq \
+                --arg role "$new_role" \
+                --arg reason "$promotion_reason" \
+                --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '. + {promotedRole: $role, promotedAt: $ts, promotionReason: $reason}' \
+                2>/dev/null || echo "")
+
+            if [ -n "$updated_json" ]; then
+                # Write to per-session identity file
+                echo "$updated_json" | aws s3 cp - \
+                    "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" \
+                    --region "$BEDROCK_REGION" --content-type application/json 2>/dev/null && \
+                    echo "[$(date -u +%H:%M:%S)] Promotion written to s3://identities/${agent_name}.json"
+
+                # Also write to canonical identity if display name available
+                if [ -n "$agent_display_name" ] && [ "$agent_display_name" != "$agent_name" ]; then
+                    echo "$updated_json" | aws s3 cp - \
+                        "s3://${IDENTITY_BUCKET}/identities/canonical/${agent_display_name}.json" \
+                        --region "$BEDROCK_REGION" --content-type application/json 2>/dev/null && \
+                        echo "[$(date -u +%H:%M:%S)] Promotion written to canonical/${agent_display_name}.json"
+                fi
+
+                # Post a Thought CR announcing the promotion
+                kubectl_with_timeout 10 apply -f - <<THOUGHT_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-promotion-$(date +%s)-$$
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-promotion
+  thoughtType: insight
+  confidence: 9
+  content: |
+    ROLE PROMOTION (issue #1733): ${agent_name} (${agent_display_name:-?}) promoted to ${new_role}
+    Reason: ${promotion_reason}
+    This agent has demonstrated consistent excellence and earned a specialist role.
+    Future routing will give this agent priority on matching issues.
+THOUGHT_EOF
+
+                push_metric "AgentRolePromotions" 1 "Count" "PromotedRole=${new_role}"
+                promotions_this_cycle=$((promotions_this_cycle + 1))
+            else
+                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to update identity JSON for $agent_name during promotion"
+            fi
+        fi
+    done
+
+    if [ "$promotions_this_cycle" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] Role promotion cycle complete: $promotions_this_cycle agent(s) promoted"
+    else
+        echo "[$(date -u +%H:%M:%S)] Role promotion cycle complete: no agents met promotion criteria"
+    fi
+}
+
 # ── Identity-Based Task Routing (issue #1113) ────────────────────────────────
 #
 # Routes tasks to agents whose S3 identity shows relevant prior work,
@@ -2710,6 +2884,9 @@ The civilization needs mediators, not just voters." \
 #     },
 #     "reputationAverage": 7,                  # issue #1602: rolling average visionScore (last 10 runs)
 #     "reputationHistory": [...]               # issue #1602: last 10 {timestamp, visionScore, workSummary}
+#     "promotedRole": "worker:enhancement-specialist",  # issue #1733: role after promotion criteria met
+#     "promotedAt": "2026-03-10T00:00:00Z",   # issue #1733: when promotion was awarded
+#     "promotionReason": "..."                 # issue #1733: which criterion triggered promotion
 #   }
 #
 # IMPORTANT: If identity.sh changes these field names, update the jq paths in
@@ -2877,6 +3054,35 @@ score_agent_for_issue() {
      if (echo "$issue_labels" | grep -qiE "enhancement|self-improvement") && [ "$debate_quality_int" -gt 10 ]; then
          score=$((score + 3))
          echo "[$(date -u +%H:%M:%S)] Routing: debate quality bonus +3 for $agent_name (debateQualityScore=$debate_quality_score, architectural issue)" >&2
+     fi
+
+     # Issue #1733: Factor in promotedRole for routing priority.
+     # Agents promoted to a specialist role via promote_agent_role() get a +4 bonus
+     # when the issue domain matches their specialization.
+     # Bonus: +4 if promotedRole contains the issue's label or "specialist".
+     local promoted_role
+     promoted_role=$(echo "$identity_json" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
+     if [ -n "$promoted_role" ]; then
+         # Extract the specialization suffix from the promoted role (e.g., "enhancement-specialist")
+         local spec_suffix
+         spec_suffix=$(echo "$promoted_role" | cut -d: -f2 | tr -d '[:space:]')
+         # Check if any issue label matches the specialist suffix
+         local label_match=false
+         if [ -n "$issue_labels" ]; then
+             IFS=',' read -ra promo_label_arr <<< "$issue_labels"
+             for label in "${promo_label_arr[@]}"; do
+                 label=$(echo "$label" | tr -d ' ')
+                 [ -z "$label" ] && continue
+                 if echo "$spec_suffix" | grep -qi "$label" || echo "$label" | grep -qi "${spec_suffix%%-specialist}"; then
+                     label_match=true
+                     break
+                 fi
+             done
+         fi
+         if [ "$label_match" = "true" ]; then
+             score=$((score + 4))
+             echo "[$(date -u +%H:%M:%S)] Routing: promoted role bonus +4 for $agent_name (promotedRole=$promoted_role, issue labels=$issue_labels)" >&2
+         fi
      fi
 
      echo "$score"
@@ -3470,6 +3676,14 @@ while true; do
     # routing recommendations for the planner/god-delegate to act on.
     if [ $((iteration % 7)) -eq 0 ]; then
         route_tasks_by_specialization
+    fi
+
+    # Every 15 iterations (~7.5 min): check for role promotion opportunities (issue #1733)
+    # Scans active agents' S3 identities for promotion criteria:
+    #   - 3 consecutive visionScores >= 8, OR 5+ tasks in one domain
+    # Promotes eligible agents to {role}:{specialization}-specialist.
+    if [ $((iteration % 15)) -eq 0 ]; then
+        promote_agent_role
     fi
 
     # Every 10 iterations (~5 min): re-check and initialize any missing state fields (issue #1178)
