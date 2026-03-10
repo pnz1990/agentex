@@ -994,8 +994,8 @@ The civilization needs mediators, not just voters." \
 #
 # Scoring formula:
 #   score = (label_matches * 3) + (keyword_matches * 2)
-#   - label_matches: count of issue labels that match agent's issueLabels specialization
-#   - keyword_matches: count of title/body keywords matching agent's codeAreas specialization
+#   - label_matches: count of issue labels that match agent's specializationLabelCounts
+#   - keyword_matches: count of title/body keywords matching agent's specializationDetail.codeAreas
 #
 # Routing decision:
 #   - score > SPECIALIZATION_ROUTING_THRESHOLD (5): route to specialized agent
@@ -1005,6 +1005,32 @@ The civilization needs mediators, not just voters." \
 #   - specializedAssignments: count of specialized task assignments
 #   - genericAssignments: count of generic (fallback) task assignments
 #   - lastSpecializedRouting: timestamp of most recent specialized routing
+#
+# ── DATA CONTRACT: Expected S3 Identity JSON Schema ──────────────────────────
+#
+# Agent identity files are stored at:
+#   s3://${IDENTITY_BUCKET}/identities/<agent-cr-name>.json
+#
+# The fields read by score_agent_for_issue() are:
+#   {
+#     "specialization": "enhancement",         # string: primary specialization label
+#     "specializationLabelCounts": {           # object: label -> count of issues worked
+#       "enhancement": 5,
+#       "bug": 3
+#     },
+#     "specializationDetail": {
+#       "codeAreas": {                         # object: filename -> count of PRs touching it
+#         "entrypoint.sh": 3,
+#         "coordinator.sh": 2
+#       },
+#       "debatesWon": 0,
+#       "synthesisCount": 2
+#     }
+#   }
+#
+# IMPORTANT: If identity.sh changes these field names, update the jq paths in
+# score_agent_for_issue() below. Schema drift between identity.sh and this
+# function silently breaks routing (score always 0). See issues #1133, #1134.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Read S3 bucket for identities from constitution at runtime
