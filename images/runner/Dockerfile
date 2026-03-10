@@ -3,7 +3,7 @@
 # ============================================================================
 FROM ubuntu:24.04 AS builder
 
-# Image version: 2026-03-10-r14 (issue #1830: fix tasksCompleted=0 — move increment before Report CR creation)
+# Image version: 2026-03-10-r15 (issue #1844: add multi-tier watchdog chain — watchdog-heartbeat.sh + watchdog-triage.sh)
 ARG OPENCODE_VERSION=latest
 
 # Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
@@ -132,7 +132,10 @@ COPY coordinator.sh /usr/local/bin/coordinator.sh
 COPY planner-loop.sh /usr/local/bin/planner-loop.sh
 COPY identity.sh /agent/identity.sh
 COPY helpers.sh /agent/helpers.sh
-RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh /agent/helpers.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
+# Watchdog scripts (issue #1844: multi-tier watchdog chain)
+COPY watchdog-heartbeat.sh /agent/watchdog-heartbeat.sh
+COPY watchdog-triage.sh /agent/watchdog-triage.sh
+RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh /agent/helpers.sh /agent/watchdog-heartbeat.sh /agent/watchdog-triage.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
 
 USER agentex
 WORKDIR /workspace

@@ -92,6 +92,50 @@ echo "   Architects: $ARCHITECTS"
 echo "   Reviewers:  $REVIEWERS"
 echo ""
 
+# 4b. WATCHDOG CHAIN STATUS (issue #1844)
+echo -e "${BLUE}🔍 Watchdog Chain Status${NC}"
+WATCHDOG_STATE_VAL=$(kubectl get configmap watchdog-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.healthState}' 2>/dev/null || echo "")
+WATCHDOG_LAST_CHECK=$(kubectl get configmap watchdog-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.lastCheck}' 2>/dev/null || echo "")
+WATCHDOG_TRIAGE_SEVERITY=$(kubectl get configmap watchdog-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.lastTriageSeverity}' 2>/dev/null || echo "")
+WATCHDOG_TRIAGE_TS=$(kubectl get configmap watchdog-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.lastTriageTimestamp}' 2>/dev/null || echo "")
+WATCHDOG_STUCK=$(kubectl get configmap watchdog-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.stuckJobCount}' 2>/dev/null || echo "0")
+WATCHDOG_ISSUES=$(kubectl get configmap watchdog-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.issuesFound}' 2>/dev/null || echo "none")
+
+if [ -z "$WATCHDOG_STATE_VAL" ]; then
+  echo -e "   Tier 1 Heartbeat:  ${YELLOW}NOT DEPLOYED${NC} (apply manifests/system/watchdog-cronjob.yaml)"
+  echo -e "   Tier 2 Triage:     ${YELLOW}NOT DEPLOYED${NC} (apply manifests/system/watchdog-triage-cronjob.yaml)"
+else
+  case "$WATCHDOG_STATE_VAL" in
+    HEALTHY)   echo -e "   Tier 1 Heartbeat:  ${GREEN}HEALTHY${NC} (last check: $WATCHDOG_LAST_CHECK)" ;;
+    DEGRADED)  echo -e "   Tier 1 Heartbeat:  ${YELLOW}DEGRADED${NC} (last check: $WATCHDOG_LAST_CHECK)" ;;
+    CRITICAL)  echo -e "   Tier 1 Heartbeat:  ${RED}CRITICAL${NC} (last check: $WATCHDOG_LAST_CHECK)" ;;
+    RECOVERING) echo -e "   Tier 1 Heartbeat:  ${YELLOW}RECOVERING${NC} (last check: $WATCHDOG_LAST_CHECK)" ;;
+    *)         echo -e "   Tier 1 Heartbeat:  ${YELLOW}${WATCHDOG_STATE_VAL}${NC} (last check: $WATCHDOG_LAST_CHECK)" ;;
+  esac
+  echo "   Stuck jobs: $WATCHDOG_STUCK"
+  if [ "$WATCHDOG_ISSUES" != "none" ] && [ -n "$WATCHDOG_ISSUES" ]; then
+    echo "   Issues: $WATCHDOG_ISSUES" | head -c 200
+  fi
+
+  if [ -z "$WATCHDOG_TRIAGE_SEVERITY" ] || [ "$WATCHDOG_TRIAGE_SEVERITY" = "UNKNOWN" ]; then
+    echo -e "   Tier 2 Triage:     ${YELLOW}NOT YET RUN${NC} (apply manifests/system/watchdog-triage-cronjob.yaml)"
+  else
+    case "$WATCHDOG_TRIAGE_SEVERITY" in
+      HEALTHY)   echo -e "   Tier 2 Triage:     ${GREEN}HEALTHY${NC} (last: $WATCHDOG_TRIAGE_TS)" ;;
+      DEGRADED)  echo -e "   Tier 2 Triage:     ${YELLOW}DEGRADED${NC} (last: $WATCHDOG_TRIAGE_TS)" ;;
+      CRITICAL)  echo -e "   Tier 2 Triage:     ${RED}CRITICAL${NC} (last: $WATCHDOG_TRIAGE_TS)" ;;
+      *)         echo -e "   Tier 2 Triage:     ${YELLOW}${WATCHDOG_TRIAGE_SEVERITY}${NC} (last: $WATCHDOG_TRIAGE_TS)" ;;
+    esac
+  fi
+fi
+echo ""
+
 # 5. RECENT THOUGHTS
 echo -e "${BLUE}💭 Recent Thoughts (last 5)${NC}"
 kubectl get thoughts.kro.run -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp 2>/dev/null | \
@@ -279,6 +323,27 @@ if [ -n "${HEARTBEAT_AGE:-}" ]; then
     HEALTH_OK=$((HEALTH_OK + 1))
     echo -e "   ${GREEN}✓${NC} Coordinator alive"
   fi
+fi
+
+# Check watchdog chain state (issue #1844)
+if [ -n "${WATCHDOG_STATE_VAL:-}" ]; then
+  case "${WATCHDOG_STATE_VAL:-}" in
+    HEALTHY)
+      HEALTH_OK=$((HEALTH_OK + 1))
+      echo -e "   ${GREEN}✓${NC} Watchdog chain healthy"
+      ;;
+    DEGRADED)
+      HEALTH_WARN=$((HEALTH_WARN + 1))
+      echo -e "   ${YELLOW}⚠${NC} Watchdog chain: DEGRADED"
+      ;;
+    CRITICAL)
+      HEALTH_CRIT=$((HEALTH_CRIT + 1))
+      echo -e "   ${RED}✗${NC} Watchdog chain: CRITICAL"
+      ;;
+    UNKNOWN)
+      echo -e "   ${YELLOW}?${NC} Watchdog chain: not yet initialized"
+      ;;
+  esac
 fi
 
 echo ""

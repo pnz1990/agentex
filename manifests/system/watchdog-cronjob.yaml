@@ -1,0 +1,78 @@
+---
+# Watchdog CronJob — Tier 1 Mechanical Heartbeat
+# Issue #1844: Multi-tier watchdog chain
+#
+# Runs every 30 seconds to check:
+#   - Coordinator health (heartbeat freshness)
+#   - Stuck jobs (running > 30 min)
+#   - Spawn rate anomalies (proliferation prevention)
+#   - Circuit breaker status
+#   - Kill switch consistency
+#
+# On CRITICAL: activates kill switch automatically
+# On DEGRADED: posts Thought CR for Tier 2 triage
+# On HEALTHY: updates watchdog-state ConfigMap silently
+#
+# Deploy with:
+#   kubectl apply -f manifests/system/watchdog-cronjob.yaml
+#
+# Note: The 30-second CronJob frequency requires the Kubernetes
+# "*/1 * * * *" schedule with overlapping runs disabled (concurrencyPolicy: Forbid).
+# For true 30s intervals, the job itself loops twice internally.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: watchdog-heartbeat
+  namespace: agentex
+  labels:
+    agentex/component: watchdog
+    agentex/tier: "1"
+spec:
+  schedule: "*/1 * * * *"    # Every minute; script runs check twice with 30s sleep
+  concurrencyPolicy: Forbid   # Never run two watchdog checks simultaneously
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300  # Clean up finished jobs after 5 minutes
+      template:
+        metadata:
+          labels:
+            agentex/component: watchdog
+            agentex/tier: "1"
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          containers:
+          - name: watchdog
+            image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+            imagePullPolicy: Always
+            command:
+            - /bin/bash
+            - /agent/watchdog-heartbeat.sh
+            env:
+            - name: NAMESPACE
+              value: agentex
+            - name: STUCK_JOB_THRESHOLD
+              value: "30"
+            - name: SPAWN_RATE_WINDOW
+              value: "120"
+            - name: SPAWN_RATE_LIMIT
+              value: "5"
+            - name: COORDINATOR_HEARTBEAT_STALE
+              value: "300"
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: false
+              capabilities:
+                drop:
+                - ALL

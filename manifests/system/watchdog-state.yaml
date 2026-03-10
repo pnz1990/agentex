@@ -1,0 +1,46 @@
+---
+# Watchdog State ConfigMap — Health State Tracking
+# Issue #1844: Multi-tier watchdog chain
+#
+# Initialized by this manifest; updated by watchdog-heartbeat.sh (Tier 1)
+# and watchdog-triage.sh (Tier 2) at runtime.
+#
+# Fields updated by Tier 1 (watchdog-heartbeat.sh every 30s):
+#   - lastCheck: ISO timestamp of last heartbeat check
+#   - healthState: HEALTHY | DEGRADED | CRITICAL | RECOVERING
+#   - activeJobs: current active job count
+#   - circuitBreakerLimit: circuit breaker threshold
+#   - coordinatorHeartbeatAge: seconds since last coordinator heartbeat
+#   - stuckJobCount: number of jobs running > 30 min
+#   - issuesFound: pipe-delimited list of issues detected
+#   - actionsTaken: pipe-delimited list of actions taken
+#
+# Fields updated by Tier 2 (watchdog-triage.sh every 5min):
+#   - lastTriageTimestamp: ISO timestamp of last triage
+#   - lastTriageSeverity: HEALTHY | DEGRADED | CRITICAL
+#
+# Fields read by Tier 3 (god-delegate):
+#   - All of the above (included in god-delegate context)
+#
+# Deploy with:
+#   kubectl apply -f manifests/system/watchdog-state.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watchdog-state
+  namespace: agentex
+  labels:
+    agentex/component: watchdog
+    agentex/managed-by: watchdog-heartbeat
+data:
+  # Initialized to UNKNOWN — Tier 1 heartbeat will update on first run
+  lastCheck: "never"
+  healthState: "UNKNOWN"
+  activeJobs: "0"
+  circuitBreakerLimit: "10"
+  coordinatorHeartbeatAge: "unknown"
+  stuckJobCount: "0"
+  issuesFound: "none"
+  actionsTaken: "none"
+  lastTriageTimestamp: "never"
+  lastTriageSeverity: "UNKNOWN"

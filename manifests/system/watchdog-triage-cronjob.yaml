@@ -1,0 +1,71 @@
+---
+# Watchdog Triage CronJob — Tier 2 AI Triage
+# Issue #1844: Multi-tier watchdog chain
+#
+# Runs every 5 minutes with AI reasoning to check:
+#   - Are agents making progress? (commits, PRs, thoughts)
+#   - Is coordinator state consistent? (counters match reality)
+#   - Are there unresolved escalations from Tier 1?
+#
+# This is a lightweight AI agent (not an OpenCode agent — just a bash
+# script that reads state and posts Thought CRs with diagnosis).
+# It has AI-like reasoning by reading system state and making
+# policy-based decisions.
+#
+# Deploy with:
+#   kubectl apply -f manifests/system/watchdog-triage-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: watchdog-triage
+  namespace: agentex
+  labels:
+    agentex/component: watchdog
+    agentex/tier: "2"
+spec:
+  schedule: "*/5 * * * *"    # Every 5 minutes
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600  # Clean up after 10 minutes
+      template:
+        metadata:
+          labels:
+            agentex/component: watchdog
+            agentex/tier: "2"
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          containers:
+          - name: watchdog-triage
+            image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+            imagePullPolicy: Always
+            command:
+            - /bin/bash
+            - /agent/watchdog-triage.sh
+            env:
+            - name: NAMESPACE
+              value: agentex
+            - name: TRIAGE_THOUGHT_WINDOW_MIN
+              value: "5"        # Check for thoughts in last 5 min
+            - name: TRIAGE_PR_WINDOW_HOURS
+              value: "2"        # Check for PRs in last 2 hours
+            - name: TRIAGE_STALE_ASSIGNMENT_MIN
+              value: "60"       # Flag assignments stale > 60 min
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: false
+              capabilities:
+                drop:
+                - ALL
