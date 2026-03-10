@@ -311,7 +311,12 @@ claim_task() {
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
-        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        # Issue #1268: cache labels at claim time to avoid GitHub API rate-limiting at exit
+        local labels
+        labels=$(gh issue view "$issue" --repo "${REPO:-pnz1990/agentex}" --json labels \
+          --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        [ -n "$labels" ] && echo "$labels" > /tmp/agentex-worked-labels 2>/dev/null || true
         return 0
       fi
     else
@@ -323,7 +328,12 @@ claim_task() {
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
-        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+        # Issue #1268: cache labels at claim time to avoid GitHub API rate-limiting at exit
+        local labels
+        labels=$(gh issue view "$issue" --repo "${REPO:-pnz1990/agentex}" --json labels \
+          --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        [ -n "$labels" ] && echo "$labels" > /tmp/agentex-worked-labels 2>/dev/null || true
         return 0
       fi
     fi

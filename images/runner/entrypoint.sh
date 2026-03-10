@@ -1239,6 +1239,26 @@ append_to_chronicle() {
 }
 
 # ── Coordinator integration ───────────────────────────────────────────────────
+# _cache_issue_labels() - Cache GitHub issue labels to temp file at claim time (issue #1268)
+# This prevents GitHub API rate-limiting failures at exit when update_specialization() runs.
+# Called internally by claim_task() after a successful CAS.
+# Usage: _cache_issue_labels <issue_number>
+_cache_issue_labels() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+  local labels
+  labels=$(gh issue view "$issue" --repo "$REPO" --json labels \
+    --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+  if [ -n "$labels" ]; then
+    echo "$labels" > /tmp/agentex-worked-labels
+    echo "$issue" > /tmp/agentex-worked-issue
+    log "Cached issue #$issue labels at claim time: $labels"
+  else
+    log "WARNING: Could not cache labels for issue #$issue (rate-limited or no labels) — will retry at exit"
+    echo "$issue" > /tmp/agentex-worked-issue
+  fi
+}
+
 # claim_task() - Atomically claim a GitHub issue to prevent duplicate work (issue #859)
 # Uses CAS (compare-and-swap) on coordinator-state.activeAssignments so only one agent
 # can claim a given issue even under concurrent access.
@@ -1294,6 +1314,8 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Cache issue labels at claim time to avoid GitHub API rate-limiting at exit (issue #1268)
+        _cache_issue_labels "$issue"
         return 0
       fi
     else
@@ -1304,6 +1326,8 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Cache issue labels at claim time to avoid GitHub API rate-limiting at exit (issue #1268)
+        _cache_issue_labels "$issue"
         return 0
       fi
     fi
@@ -3467,8 +3491,16 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   push_metric "CIPassOnExit" 1
   
   # Update specialization based on issue labels worked on this session (issue #1098)
-  # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147)
+  # Resolve the worked issue number: coordinator-assigned, self-selected, or from temp file (issue #1268)
   WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
+  # Check temp file written by claim_task() — most reliable source (issue #1252)
+  if [ -f /tmp/agentex-worked-issue ]; then
+    TEMP_ISSUE=$(cat /tmp/agentex-worked-issue 2>/dev/null || echo "0")
+    if [ -n "$TEMP_ISSUE" ] && [ "$TEMP_ISSUE" != "0" ]; then
+      WORKED_ISSUE="$TEMP_ISSUE"
+      log "Specialization tracking: resolved issue #$WORKED_ISSUE from claim_task temp file"
+    fi
+  fi
   if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
     # Self-selected path: COORDINATOR_ISSUE was never set (queue was empty).
     # Look up this agent's active assignment in coordinator-state to find the issue claimed.
@@ -3479,10 +3511,20 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
       log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments"
     fi
   fi
-  # Fetch labels from the GitHub issue worked on this session
+  # Fetch labels: use cached file first (issue #1268), fall back to GitHub API
   if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
-    WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
-      --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+    # Try cached labels from claim time first (avoids rate-limiting at exit)
+    if [ -f /tmp/agentex-worked-labels ]; then
+      WORKED_LABELS=$(cat /tmp/agentex-worked-labels 2>/dev/null || echo "")
+      if [ -n "$WORKED_LABELS" ]; then
+        log "Specialization tracking: using cached labels for issue #$WORKED_ISSUE: $WORKED_LABELS"
+      fi
+    fi
+    # Fall back to GitHub API if cache empty or missing
+    if [ -z "${WORKED_LABELS:-}" ]; then
+      WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
+        --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+    fi
     if [ -n "$WORKED_LABELS" ]; then
       update_specialization "$WORKED_LABELS" 2>/dev/null || true
       log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
