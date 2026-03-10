@@ -1319,7 +1319,17 @@ tally_and_enact_votes() {
         # AND no new votes have appeared (time-window filtered), skip expensive tallying.
         # This prevents the coordinator from re-tallying 39+ circuit-breaker votes every cycle.
         # We still process topics with recent votes (within tally_cutoff_ts window).
-        if echo "$loop_enacted" | grep -qF "enacted_topic_${topic}"; then
+        #
+        # Issue #1591: For vision-feature/vision-queue topics, the early skip must NOT block
+        # new addIssue proposals just because a prior issue was enacted. Each addIssue=<N>
+        # gets its own decision_key (enacted_topic_<topic>_add_<N>), so a new proposal for
+        # a different issue should always be tallied. Only skip when the topic check is not
+        # a vision-feature/vision-queue topic (which use per-issue keys).
+        local is_vision_topic=false
+        if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
+            is_vision_topic=true
+        fi
+        if [ "$is_vision_topic" = false ] && echo "$loop_enacted" | grep -qF "enacted_topic_${topic}"; then
             # Topic has prior enactments. Check if there are ANY new proposal/vote thoughts for it.
             # (If no new thoughts exist for this topic in the time window, the tally outcome
             # cannot change — skip the full tally to save time.)
@@ -1434,7 +1444,20 @@ tally_and_enact_votes() {
         # read-modify-write race condition; also normalize decision_key to topic-only
         # so different kv_pairs values for the same topic don't bypass dedup).
         # decision_key uses topic only — governance enacts once per topic per civilization cycle.
+        #
+        # Issue #1591: For vision-feature/vision-queue topics, use per-issue decision_key
+        # so each addIssue=<N> can be enacted independently. Without this, once any issue
+        # is added to visionQueue the entire vision-feature topic is blocked forever.
         local decision_key="enacted_topic_${topic}"
+        if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
+            # Extract addIssue value from kv_pairs to build a per-issue decision key
+            local add_issue_for_key
+            add_issue_for_key=$(echo "$kv_pairs" | tr ' ' '\n' | grep -E '^(addIssue|issueNumber)=[0-9]+' | head -1 | cut -d= -f2 || echo "")
+            if [ -n "$add_issue_for_key" ]; then
+                decision_key="enacted_topic_${topic}_add_${add_issue_for_key}"
+                echo "[$(date -u +%H:%M:%S)] vision topic: using per-issue decision_key=${decision_key}"
+            fi
+        fi
         
         if echo "$loop_enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
