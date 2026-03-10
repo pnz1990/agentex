@@ -1067,14 +1067,6 @@ score_agent_for_issue() {
         return 0
     fi
 
-    # Check if identity has specialization data
-    local has_spec
-    has_spec=$(echo "$identity_json" | jq -r '.specialization // empty' 2>/dev/null || echo "")
-    if [ -z "$has_spec" ]; then
-        echo "0"
-        return 0
-    fi
-
     local score=0
 
     # Score label matches (weight 3 each)
