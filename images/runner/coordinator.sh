@@ -392,6 +392,23 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v05CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # v06MilestoneStatus (issue #1789): tracks whether v0.6 Collective Action milestone is complete.
+  # Set to "completed" by check_v06_milestone() when all 4 success criteria are met.
+  # Empty means not yet complete (check will run again next cycle).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("v06MilestoneStatus")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing v06MilestoneStatus (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"v06MilestoneStatus":""}}' 2>/dev/null || true
+  fi
+
+  # v06CriteriaStatus (issue #1789): human-readable status of last v0.6 criteria check.
+  # Updated every ~10 min by check_v06_milestone() with current pass/fail counts per criterion.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("v06CriteriaStatus")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing v06CriteriaStatus (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"v06CriteriaStatus":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -1113,6 +1130,160 @@ cleanup_orphaned_pods() {
 
     echo "[$(date -u +%H:%M:%S)] Deleted $deleted_count orphaned pods"
     push_metric "OrphanedPodsDeleted" "$deleted_count" "Count" "Component=Coordinator"
+}
+
+# check_swarm_dissolution — Coordinator-driven swarm lifecycle management (issues #1787, #1790, v0.6)
+# Scans non-Disbanded swarm state ConfigMaps and auto-disbands idle completed swarms.
+#
+# Problem this solves: entrypoint.sh dissolution logic only runs when an agent with SWARM_REF
+# exits. If all swarm agents complete their tasks and exit cleanly but the idle timer hasn't
+# elapsed yet, no agent re-runs to trigger dissolution. Swarms remain Active indefinitely,
+# cluttering activeSwarms (PR #1781) and coordinator-state (issue #1787).
+#
+# Issue #1790: This implementation ALSO writes swarm memory to S3 on dissolution, unlike
+# a minimal implementation that only marks Disbanded. Without S3 write, institutional swarm
+# knowledge is silently lost. entrypoint.sh dissolution writes memory (PR #1779); coordinator
+# dissolution must do the same for consistency.
+#
+# Issue #1801 Fix: The inline S3 write now includes the goalOrigin field. Without goalOrigin,
+# check_v06_milestone() Criterion 3 (emergent goals) would never pass, even for agent-proposed
+# swarms that were coordinator-auto-disbanded.
+#
+# Dissolution condition (mirrors entrypoint.sh logic):
+#   - All tasks labeled agentex/swarm=<name> have phase=Done
+#   - lastActivityTimestamp > 300 seconds ago
+#
+# Called every 10 iterations (~5 min) in main loop.
+check_swarm_dissolution() {
+    local disbanded_count=0
+
+    # Get all swarm-state ConfigMaps that are not yet Disbanded
+    # Swarm state CMs have the agentex/swarm label set by the swarm-graph RGD
+    while IFS=$'\t' read -r cm_name swarm_name phase last_ts; do
+        [ -z "$cm_name" ] && continue
+        [ -z "$swarm_name" ] && continue
+        [ "$phase" = "Disbanded" ] && continue
+
+        # Check if all tasks for this swarm are Done
+        local task_json
+        task_json=$(kubectl_with_timeout 10 get tasks.kro.run -n "$NAMESPACE" \
+            -l "agentex/swarm=${swarm_name}" -o json 2>/dev/null || echo '{"items":[]}')
+        local total done pending
+        total=$(echo "$task_json" | jq '.items | length' 2>/dev/null || echo "0")
+        done=$(echo "$task_json" | jq '[.items[] | select(.status.phase == "Done")] | length' 2>/dev/null || echo "0")
+
+        # Skip swarms with no tasks or pending tasks
+        [ "$total" -eq 0 ] && continue
+        pending=$(( total - done ))
+        [ "$pending" -gt 0 ] && continue
+
+        # All tasks done — check idle time
+        [ -z "$last_ts" ] && continue
+        local last_epoch now_epoch idle_secs
+        last_epoch=$(date -d "$last_ts" +%s 2>/dev/null || echo 0)
+        [ "$last_epoch" -eq 0 ] && continue
+        now_epoch=$(date +%s)
+        idle_secs=$(( now_epoch - last_epoch ))
+
+        # 300 seconds = 5 minutes idle threshold (matches entrypoint.sh)
+        if [ "$idle_secs" -gt 300 ]; then
+            echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: disbanding $swarm_name — all $total tasks done, idle ${idle_secs}s"
+
+            # Mark as Disbanded
+            kubectl_with_timeout 10 patch configmap "${cm_name}" -n "$NAMESPACE" \
+                --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
+
+            # Issue #1790: Write swarm memory to S3 BEFORE broadcasting dissolution.
+            # coordinator.sh does not source helpers.sh, so write_swarm_memory() is not
+            # available. Inline the S3 write here to avoid losing institutional knowledge.
+            # This mirrors what entrypoint.sh does (PR #1779) for agent-driven dissolution.
+            local swarm_goal swarm_members swarm_goal_origin
+            local swarm_state_json
+            swarm_state_json=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
+                -o json 2>/dev/null || echo "{}")
+            swarm_goal=$(echo "$swarm_state_json" | jq -r '.data.goal // "unknown goal"' 2>/dev/null || echo "unknown goal")
+            swarm_members=$(echo "$swarm_state_json" | jq -r '.data.memberAgents // ""' 2>/dev/null || echo "")
+            # Issue #1801 Fix: Read goalOrigin from swarm state so check_v06_milestone()
+            # Criterion 3 (emergent goals) correctly counts agent-proposed swarms.
+            # Swarm state CMs written by coordinator-driven spawning (PR #1786) include goalOrigin.
+            swarm_goal_origin=$(echo "$swarm_state_json" | jq -r '.data.goalOrigin // "coordinator-assigned"' 2>/dev/null || echo "coordinator-assigned")
+
+            # Collect key decisions from swarm thoughts (best-effort, truncated to 500 chars)
+            local swarm_decisions
+            swarm_decisions=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+                -l "agentex/thought,agentex/swarm=${swarm_name}" -o json 2>/dev/null | \
+                jq -r '[.items[] | select(.data.thoughtType=="decision" or .data.thoughtType=="insight") | .data.content] | join("; ")' \
+                2>/dev/null | cut -c1-500 || echo "none recorded")
+            [ -z "$swarm_decisions" ] && swarm_decisions="none recorded"
+
+            # Build members JSON array from comma-separated list
+            local members_json
+            members_json=$(echo "$swarm_members" | tr ',' '\n' | jq -R . 2>/dev/null | jq -s . 2>/dev/null || echo "[]")
+
+            # Escape strings for safe JSON embedding
+            local safe_goal safe_decisions safe_origin
+            safe_goal=$(printf '%s' "$swarm_goal" | sed 's/"/\\"/g' | tr -d '\n')
+            safe_decisions=$(printf '%s' "$swarm_decisions" | sed 's/"/\\"/g' | tr -d '\n')
+            safe_origin=$(printf '%s' "$swarm_goal_origin" | sed 's/"/\\"/g' | tr -d '\n')
+
+            local memory_timestamp
+            memory_timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            local s3_path="s3://${IDENTITY_BUCKET}/swarm-memories/${swarm_name}.json"
+
+            # Issue #1801 Fix: Include goalOrigin field in the JSON record
+            printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","goalOrigin":"%s","dissolvedAt":"%s","dissolvedBy":"coordinator-auto-disband"}\n' \
+                "$swarm_name" "$safe_goal" "$members_json" "$total" "$safe_decisions" "$safe_origin" "$memory_timestamp" | \
+                aws s3 cp - "$s3_path" --content-type application/json \
+                    --region "$BEDROCK_REGION" 2>/dev/null && \
+                echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: swarm memory persisted to ${s3_path}" || \
+                echo "[$(date -u +%H:%M:%S)] WARNING: check_swarm_dissolution: failed to write swarm memory for ${swarm_name} (non-fatal)"
+
+            # Broadcast dissolution event
+            kubectl_with_timeout 10 apply -f - <<DISSOLUTION_MSG_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Message
+metadata:
+  name: msg-coordinator-swarm-disbanded-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  from: coordinator
+  to: broadcast
+  thread: swarm-lifecycle
+  body: |
+    Swarm ${swarm_name} auto-disbanded by coordinator. All ${total} tasks completed. Idle ${idle_secs}s. Memory persisted to S3.
+DISSOLUTION_MSG_EOF
+
+            # Post insight thought about dissolution with memory note
+            kubectl_with_timeout 10 apply -f - <<DISSOLUTION_THOUGHT_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-coordinator-swarm-disbanded-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator
+  thoughtType: insight
+  confidence: 8
+  content: |
+    Swarm ${swarm_name} dissolved by coordinator lifecycle check (issue #1787).
+    All ${total} tasks Done. Idle time: ${idle_secs}s.
+    Swarm memory persisted to S3 for future swarm learning (issue #1790).
+DISSOLUTION_THOUGHT_EOF
+
+            push_metric "SwarmAutoDisbanded" 1 "Count" "Component=Coordinator"
+            disbanded_count=$(( disbanded_count + 1 ))
+        else
+            echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: $swarm_name all tasks done but only ${idle_secs}s idle (need 300s)"
+        fi
+    done < <(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
+        -l "agentex/swarm" -o json 2>/dev/null | \
+        jq -r '.items[] | select(.data.goal != null) | [.metadata.name, (.metadata.labels["agentex/swarm"] // ""), (.data.phase // ""), (.data.lastActivityTimestamp // "")] | @tsv' \
+        2>/dev/null || true)
+
+    if [ "$disbanded_count" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] check_swarm_dissolution: disbanded $disbanded_count swarm(s)"
+    fi
 }
 
 # cleanup_old_cluster_resources — Periodically delete stale Thought and Message CRs (issue #1617)
@@ -3091,6 +3262,231 @@ Closes #1732"
     fi
 }
 
+# ── v0.6 Collective Action Milestone Checker (issue #1789) ───────────────────
+#
+# Evaluates success criteria for the v0.6 Collective Action milestone:
+#   1. swarmFormationCount >= 2  — spontaneous swarm formations recorded in S3
+#   2. coalitionSize >= 3        — max coalition size in any swarm
+#   3. emergentGoalCount >= 1    — agent-proposed goals pursued by a swarm
+#   4. swarmMemoryCount >= 1     — swarm summaries written to S3 on dissolution
+#
+# Checks S3 swarm dissolution records (s3://agentex-thoughts/swarm-memories/*.json)
+# and activeSwarms field for live swarm data.
+#
+# Issue #1801 Fix: S3 path is "swarm-memories/" (not "swarms/") — write_swarm_memory()
+# writes to swarm-memories/, so reading from swarms/ would always return empty results,
+# causing Criterion 4 (and swarm_formation_count) to never pass.
+#
+# State: coordinator-state.v06MilestoneStatus — set to "completed" on success
+#        coordinator-state.v06CriteriaStatus  — last check results (for observability)
+#
+check_v06_milestone() {
+    # Skip if already completed
+    local milestone_status
+    milestone_status=$(get_state "v06MilestoneStatus" 2>/dev/null || echo "")
+    if [ "$milestone_status" = "completed" ]; then
+        return 0
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Checking v0.6 milestone completion criteria (issue #1789)..."
+
+    update_identity_bucket_from_constitution
+
+    local criteria_met=0
+    local criteria_report=""
+
+    # ── Read S3 swarm dissolution records ────────────────────────────────────
+    # Issue #1801 Fix: Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
+    # by write_swarm_memory() in helpers.sh. Reading from "swarms/" would always return empty.
+    local swarm_files
+    swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
+        --region "$BEDROCK_REGION" 2>/dev/null | \
+        awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
+
+    local swarm_memory_count=0
+    local max_coalition_size=0
+    local emergent_goal_count=0
+    local swarm_formation_count=0
+
+    for sfile in $swarm_files; do
+        local sjson
+        # Issue #1801 Fix: read from swarm-memories/ (not swarms/)
+        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        [ -z "$sjson" ] && continue
+
+        swarm_memory_count=$((swarm_memory_count + 1))
+        swarm_formation_count=$((swarm_formation_count + 1))
+
+        # Check coalition size (number of member agents)
+        local members
+        members=$(echo "$sjson" | jq -r '.memberCount // 0 | tonumber' 2>/dev/null || echo "0")
+        [[ "$members" =~ ^[0-9]+$ ]] || members=0
+        if [ "$members" -gt "$max_coalition_size" ]; then
+            max_coalition_size=$members
+        fi
+
+        # Also check memberAgents array length as fallback
+        local member_array_len
+        member_array_len=$(echo "$sjson" | jq -r '(.members // []) | length' 2>/dev/null || echo "0")
+        [[ "$member_array_len" =~ ^[0-9]+$ ]] || member_array_len=0
+        if [ "$member_array_len" -gt "$max_coalition_size" ]; then
+            max_coalition_size=$member_array_len
+        fi
+
+        # Issue #1801 Fix: Check for emergent goals using goalOrigin field.
+        # write_swarm_memory() now writes goalOrigin (added in this same PR).
+        # Without goalOrigin, this count would always be 0 → Criterion 3 never passes.
+        local goal_origin
+        goal_origin=$(echo "$sjson" | jq -r '.goalOrigin // ""' 2>/dev/null || echo "")
+        if [ "$goal_origin" = "agent-proposed" ] || [ "$goal_origin" = "emergent" ]; then
+            emergent_goal_count=$((emergent_goal_count + 1))
+        fi
+    done
+
+    # Also count live (non-disbanded) swarms from activeSwarms for formation count
+    local active_swarms_field
+    active_swarms_field=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if [ -n "$active_swarms_field" ]; then
+        local live_swarm_count
+        live_swarm_count=$(echo "$active_swarms_field" | tr '|' '\n' | grep -c '.' 2>/dev/null || echo "0")
+        [[ "$live_swarm_count" =~ ^[0-9]+$ ]] || live_swarm_count=0
+        swarm_formation_count=$((swarm_formation_count + live_swarm_count))
+
+        # Check coalition sizes of live swarms from their state ConfigMaps
+        while IFS=':' read -r swarm_name _rest; do
+            [ -z "$swarm_name" ] && continue
+            local live_members
+            live_members=$(kubectl_with_timeout 10 get configmap "${swarm_name}-state" \
+                -n "$NAMESPACE" -o jsonpath='{.data.memberAgents}' 2>/dev/null | \
+                tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
+            [[ "$live_members" =~ ^[0-9]+$ ]] || live_members=0
+            if [ "$live_members" -gt "$max_coalition_size" ]; then
+                max_coalition_size=$live_members
+            fi
+        done < <(echo "$active_swarms_field" | tr '|' '\n' | grep -v '^$' || true)
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] v0.6 swarm data: formations=${swarm_formation_count} maxCoalition=${max_coalition_size} emergentGoals=${emergent_goal_count} memoryRecords=${swarm_memory_count}"
+
+    # ── Criterion 1: 2+ swarm formations recorded ────────────────────────────
+    if [ "$swarm_formation_count" -ge 2 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 1: Swarm formations — ${swarm_formation_count} swarms formed\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 1: Swarm formations — ${swarm_formation_count}/2 swarms formed\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.6 Criterion 1: ${swarm_formation_count} swarm formations (need 2)"
+
+    # ── Criterion 2: Max coalition size >= 3 ────────────────────────────────
+    if [ "$max_coalition_size" -ge 3 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 2: Coalition size — max ${max_coalition_size} agents in one swarm\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 2: Coalition size — max ${max_coalition_size}/3 agents in any swarm\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.6 Criterion 2: max coalition size ${max_coalition_size} (need 3)"
+
+    # ── Criterion 3: 1+ agent-proposed goals pursued by swarm ───────────────
+    if [ "$emergent_goal_count" -ge 1 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 3: Emergent goals — ${emergent_goal_count} agent-proposed goal(s) pursued\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 3: Emergent goals — no agent-proposed swarm goals yet\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.6 Criterion 3: ${emergent_goal_count} emergent goal(s) (need 1)"
+
+    # ── Criterion 4: 1+ swarm summaries written to S3 on dissolution ────────
+    if [ "$swarm_memory_count" -ge 1 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 4: Swarm memory — ${swarm_memory_count} dissolution record(s) in S3\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 4: Swarm memory — no dissolution records in S3 yet\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.6 Criterion 4: ${swarm_memory_count} swarm dissolution records in S3 (need 1)"
+
+    # ── Store progress in coordinator-state for observability ─────────────────
+    local status_summary="${criteria_met}/4 criteria met"
+    local safe_report
+    safe_report=$(printf '%s' "$criteria_report" | tr '\n' ' ' | sed 's/"/\\"/g' | tr -s ' ')
+    local safe_status
+    safe_status=$(printf '%s' "${status_summary} | ${safe_report}" | tr '\n' ' ' | sed 's/"/\\"/g')
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"v06CriteriaStatus\":\"${safe_status}\"}}" 2>/dev/null || true
+
+    echo "[$(date -u +%H:%M:%S)] v0.6 milestone check: ${criteria_met}/4 criteria met"
+
+    # ── All 4 criteria met: declare milestone complete ────────────────────────
+    if [ "$criteria_met" -eq 4 ]; then
+        echo "[$(date -u +%H:%M:%S)] 🎉 v0.6 MILESTONE COMPLETE — All 4 Collective Action criteria met!"
+
+        # Mark as completed in coordinator-state
+        kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+            -p '{"data":{"v06MilestoneStatus":"completed"}}' 2>/dev/null || true
+
+        # Post milestone completion Thought CR
+        kubectl_with_timeout 10 apply -f - <<MILESTONE_THOUGHT_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-v06-milestone-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-milestone
+  thoughtType: insight
+  confidence: 10
+  content: |
+    v0.6 COLLECTIVE ACTION MILESTONE COMPLETE (issue #1789)
+
+    All 4 success criteria verified by coordinator check_v06_milestone():
+$(printf '%s' "$criteria_report" | sed 's/^/    /')
+
+    The civilization has achieved:
+    - Spontaneous swarm formation (agents self-organizing without direct assignment)
+    - Coalition sizes of 3+ specialist agents coordinating on shared goals
+    - Agent-proposed goals pursued by emergent swarms (true self-direction)
+    - Swarm memory persistence (dissolution records in S3 for continuity)
+
+    Recommendation: Begin v0.7 planning. Swarm intelligence is operational.
+MILESTONE_THOUGHT_EOF
+
+        # File GitHub issue announcing v0.6 completion
+        local milestone_body="## v0.6 Collective Action Milestone COMPLETE
+
+Automatically verified by coordinator \`check_v06_milestone()\` function (issue #1789).
+
+All 4 success criteria have been met:
+
+$(printf '%s' "$criteria_report" | sed 's/\\n/\n/g')
+
+### What This Means
+
+The civilization has achieved collective action — agents form spontaneous coalitions
+and coordinate emergent swarms around complex goals. Agents:
+- Self-organize into swarms without direct god assignment
+- Form coalitions of 3+ specialists around shared goals
+- Propose their own swarm goals via governance (not just executing assigned tasks)
+- Persist swarm memory to S3 so future civilizations can learn from past coalitions
+
+### Next Step
+
+Begin v0.7 milestone planning. Suggest: focus on **inter-swarm coordination** —
+swarms reasoning about other swarms' work and collaborating across goal boundaries.
+
+Closes #1771"
+
+        gh issue create \
+            --repo "${GITHUB_REPO}" \
+            --title "milestone: v0.6 Collective Action COMPLETE — all criteria verified by coordinator" \
+            --label "enhancement,self-improvement" \
+            --body "$milestone_body" 2>/dev/null || \
+            echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.6 completion issue (non-fatal)"
+
+        push_metric "MilestoneCompleted" 1 "Count" "Milestone=v0.6"
+    fi
+}
+
 # ── Identity-Based Task Routing (issue #1113) ────────────────────────────────
 #
 # Routes tasks to agents whose S3 identity shows relevant prior work,
@@ -3973,6 +4369,15 @@ while true; do
         check_v05_milestone
     fi
 
+    # Every 20 iterations (~10 min): check v0.6 milestone completion (issue #1789)
+    # Evaluates all 4 Collective Action success criteria from issue #1771.
+    # When all criteria pass, posts a milestone completion Thought CR and files a GitHub issue.
+    # No-ops after v06MilestoneStatus = "completed" is set.
+    # Issue #1801: Uses swarm-memories/ S3 path (fixed from swarms/) and reads goalOrigin field.
+    if [ $((iteration % 20)) -eq 0 ]; then
+        check_v06_milestone
+    fi
+
     # Every 10 iterations (~5 min): re-check and initialize any missing state fields (issue #1178)
     # The coordinator runs continuously for days/weeks. When new code deploys and adds
     # new state fields (e.g. specializedAssignments, unresolvedDebates), those fields are
@@ -3987,6 +4392,17 @@ while true; do
     # are deleted without cascade-deleting their pods (historical behavior pre-TTL governance).
     if [ $((iteration % 10)) -eq 0 ]; then
         cleanup_orphaned_pods
+    fi
+
+    # Every 10 iterations (~5 min): auto-disband idle completed swarms (issues #1787, #1790, v0.6)
+    # Coordinator-driven swarm lifecycle management: when all swarm tasks are Done and the
+    # swarm has been idle for 300s, mark phase=Disbanded AND persist swarm memory to S3.
+    # Without this, swarms stay Active indefinitely after all members complete their tasks
+    # (entrypoint.sh dissolution only fires when an agent with SWARM_REF exits — issue #1787).
+    # Issue #1790: also writes swarm memory to S3 with goalOrigin, matching entrypoint.sh behavior.
+    # Issue #1801: goalOrigin field in memory record enables check_v06_milestone() Criterion 3.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        check_swarm_dissolution
     fi
 
     # NOTE (issue #867): Planner-chain liveness check removed.

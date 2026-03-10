@@ -1509,5 +1509,134 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── write_swarm_memory ────────────────────────────────────────────────────────
+# Issue #1773 v0.6: Swarm Memory Persistence — write swarm summary to S3 on dissolution.
+#
+# When a swarm disbands, this function writes a structured record to S3 so future
+# swarms with similar goals can learn from past experiences, key decisions, and
+# what was accomplished. This is the foundation of swarm institutional memory.
+#
+# Usage: write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions> [goal_origin]
+#
+# Parameters:
+#   swarm_name      - Name of the swarm (e.g., "swarm-routing-fix")
+#   goal            - The swarm's stated goal
+#   members_csv     - Comma-separated list of member agent names
+#   tasks_completed - Number of tasks completed by this swarm
+#   key_decisions   - Free text summary of key decisions or findings (no quotes inside)
+#   goal_origin     - Optional: origin of the swarm goal (default: "coordinator-assigned").
+#                     Use "agent-proposed" for visionQueue-originated swarms,
+#                     "emergent" for spontaneous agent self-organization.
+#                     check_v06_milestone() uses this to count emergent goals (Criterion 3).
+#
+# S3 location: s3://<bucket>/swarm-memories/<swarm-name>.json
+#
+# Example:
+#   write_swarm_memory "swarm-routing-fix" "Fix coordinator routing regression" \
+#     "ada,turing,aristotle" 5 "Routing bug was in specialization score calculation" "agent-proposed"
+write_swarm_memory() {
+  local swarm_name="${1:-}"
+  local goal="${2:-unknown goal}"
+  local members_csv="${3:-}"
+  local tasks_completed="${4:-0}"
+  local key_decisions="${5:-none recorded}"
+  local goal_origin="${6:-coordinator-assigned}"
+
+  if [ -z "$swarm_name" ]; then
+    log "write_swarm_memory: no swarm name provided — skipping"
+    return 0
+  fi
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Build members JSON array from CSV
+  local members_json
+  members_json=$(echo "$members_csv" | tr ',' '\n' | jq -R . 2>/dev/null | jq -s . 2>/dev/null || echo "[]")
+
+  # Escape strings for JSON (replace " with \", replace newlines with space)
+  local safe_goal
+  safe_goal=$(echo "$goal" | sed 's/"/\\"/g' | tr '\n' ' ')
+  local safe_decisions
+  safe_decisions=$(echo "$key_decisions" | sed 's/"/\\"/g' | tr '\n' ' ')
+  local safe_origin
+  safe_origin=$(echo "$goal_origin" | sed 's/"/\\"/g' | tr '\n' ' ')
+
+  local memory_json
+  # Issue #1801: goalOrigin field added so check_v06_milestone() Criterion 3 can detect emergent goals
+  memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","goalOrigin":"%s","dissolvedAt":"%s","recordedBy":"%s"}\n' \
+    "$swarm_name" \
+    "$safe_goal" \
+    "$members_json" \
+    "$tasks_completed" \
+    "$safe_decisions" \
+    "$safe_origin" \
+    "$timestamp" \
+    "${AGENT_NAME:-unknown}")
+
+  local s3_path="s3://${s3_bucket}/swarm-memories/${swarm_name}.json"
+
+  if echo "$memory_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
+    log "write_swarm_memory: persisted swarm memory for ${swarm_name} to ${s3_path}"
+    return 0
+  else
+    log "WARNING: write_swarm_memory: failed to write swarm memory for ${swarm_name} to S3 (non-fatal)"
+    return 0
+  fi
+}
+
+# ── query_swarm_memories ──────────────────────────────────────────────────────
+# Issue #1773 v0.6: Query past swarm memory records from S3.
+#
+# Before forming a new swarm, planners and coordinators can query past swarm
+# memories to find prior experience with similar goals, avoiding repeated mistakes
+# and building on past knowledge.
+#
+# Usage: query_swarm_memories [topic_keyword]
+#
+# Parameters:
+#   topic_keyword - Optional: filter results to swarms whose goal contains this term
+#                   If omitted, lists all swarm memories
+#
+# Output: JSON array of matching swarm memory records, one per line
+#
+# Example:
+#   query_swarm_memories "routing"
+#   # Returns all swarms whose goal mentioned "routing"
+#
+#   query_swarm_memories
+#   # Returns all swarm memories
+query_swarm_memories() {
+  local topic="${1:-}"
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+
+  local memories
+  memories=$(aws s3 ls "s3://${s3_bucket}/swarm-memories/" 2>/dev/null | awk '{print $4}' | while read -r f; do
+    [ -z "$f" ] && continue
+    local record
+    record=$(aws s3 cp "s3://${s3_bucket}/swarm-memories/$f" - 2>/dev/null || echo "")
+    [ -z "$record" ] && continue
+
+    if [ -z "$topic" ]; then
+      echo "$record"
+    else
+      # Filter by topic — check if goal contains the keyword (case-insensitive)
+      local goal_match
+      goal_match=$(echo "$record" | jq -r --arg t "$topic" \
+        'select(.goal | ascii_downcase | test($t | ascii_downcase)) | .swarmName' 2>/dev/null || echo "")
+      if [ -n "$goal_match" ]; then
+        echo "$record"
+      fi
+    fi
+  done)
+
+  if [ -n "$memories" ]; then
+    echo "$memories"
+  else
+    echo "[]"
+  fi
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

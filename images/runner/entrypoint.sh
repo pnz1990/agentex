@@ -5371,18 +5371,43 @@ if [ -n "$SWARM_REF" ]; then
         
         # 300 seconds = 5 minutes idle threshold
         if [ "$IDLE_SECONDS" -gt 300 ]; then
-          log "SWARM DISSOLUTION: $SWARM_REF has completed all tasks and been idle for ${IDLE_SECONDS}s"
+        log "SWARM DISSOLUTION: $SWARM_REF has completed all tasks and been idle for ${IDLE_SECONDS}s"
           
           # Update phase to Disbanded
           # Use timeout to prevent 120s hangs if cluster API is unreachable (issue #458)
           kubectl_with_timeout 10 patch configmap "${SWARM_REF}-state" -n "$NAMESPACE" \
             --type=merge -p '{"data":{"phase":"Disbanded"}}' 2>/dev/null || true
+
+          # Issue #1773 v0.6: Persist swarm memory to S3 before dissolution.
+          # Reads goal and goalOrigin from swarm state ConfigMap.
+          # Issue #1801: goalOrigin field is written so check_v06_milestone() Criterion 3 works.
+          SWARM_GOAL=$(echo "$SWARM_STATE" | jq -r '.data.goal // "unknown goal"' 2>/dev/null || echo "unknown goal")
+          SWARM_GOAL_ORIGIN=$(echo "$SWARM_STATE" | jq -r '.data.goalOrigin // "coordinator-assigned"' 2>/dev/null || echo "coordinator-assigned")
+          # Collect key decisions from recent swarm thoughts (best-effort)
+          SWARM_DECISIONS=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l "agentex/thought,agentex/swarm=${SWARM_REF}" -o json 2>/dev/null | \
+            jq -r '[.items[] | select(.data.thoughtType=="decision" or .data.thoughtType=="insight") | .data.content] | join("; ")' 2>/dev/null | \
+            cut -c1-500 || echo "none recorded")
+          [ -z "$SWARM_DECISIONS" ] && SWARM_DECISIONS="none recorded"
+          # Inline S3 write (write_swarm_memory equivalent for entrypoint.sh context)
+          _SWARM_MEM_BUCKET="${S3_BUCKET:-agentex-thoughts}"
+          _SWARM_MEM_PATH="s3://${_SWARM_MEM_BUCKET}/swarm-memories/${SWARM_REF}.json"
+          _SWARM_MEM_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          _SWARM_MEMBERS_JSON=$(echo "$NEW_MEMBERS" | tr ',' '\n' | jq -R . 2>/dev/null | jq -s . 2>/dev/null || echo "[]")
+          _SWARM_SAFE_GOAL=$(printf '%s' "$SWARM_GOAL" | sed 's/"/\\"/g' | tr -d '\n')
+          _SWARM_SAFE_ORIGIN=$(printf '%s' "$SWARM_GOAL_ORIGIN" | sed 's/"/\\"/g' | tr -d '\n')
+          _SWARM_SAFE_DECISIONS=$(printf '%s' "$SWARM_DECISIONS" | sed 's/"/\\"/g' | tr -d '\n')
+          printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","goalOrigin":"%s","dissolvedAt":"%s","dissolvedBy":"%s"}\n' \
+            "$SWARM_REF" "$_SWARM_SAFE_GOAL" "$_SWARM_MEMBERS_JSON" "$TOTAL_TASKS" \
+            "$_SWARM_SAFE_DECISIONS" "$_SWARM_SAFE_ORIGIN" "$_SWARM_MEM_TS" "${AGENT_NAME:-unknown}" | \
+            aws s3 cp - "$_SWARM_MEM_PATH" --content-type application/json >/dev/null 2>&1 && \
+            log "Swarm memory persisted to S3: $_SWARM_MEM_PATH (goalOrigin=${SWARM_GOAL_ORIGIN})" || \
+            log "WARNING: Failed to persist swarm memory to S3 (non-fatal)"
           
           # Broadcast dissolution message
           post_message "broadcast" "Swarm $SWARM_REF has disbanded after completing all tasks. Members: $NEW_MEMBERS. Total tasks: $TOTAL_TASKS." "status"
           
           # Post thought about dissolution
-          post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed." "insight" 9
+          post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed. Swarm memory persisted to S3 (issues #1773, #1801)." "insight" 9
         else
           log "All tasks complete but only ${IDLE_SECONDS}s idle (need 300s for dissolution)"
         fi
