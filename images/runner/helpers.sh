@@ -897,6 +897,35 @@ civilization_status() {
   fi
   output="${output}Coordinator heartbeat:   ${last_heartbeat}${heartbeat_age}\n"
 
+  # Last planner seen (issue #1810: detect planner chain breaks early)
+  local last_planner_seen planner_age_note=""
+  last_planner_seen=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastPlannerSeen}' 2>/dev/null || echo "")
+  if [ -n "$last_planner_seen" ]; then
+    local lp_epoch lp_now_epoch
+    lp_epoch=$(date -d "$last_planner_seen" +%s 2>/dev/null || echo "0")
+    lp_now_epoch=$(date +%s)
+    local lp_age_secs=$(( lp_now_epoch - lp_epoch ))
+    if [ "$lp_age_secs" -gt 300 ]; then
+      planner_age_note=" (STALE — ${lp_age_secs}s ago, planner chain may be broken)"
+    else
+      planner_age_note=" (${lp_age_secs}s ago)"
+    fi
+  else
+    last_planner_seen="unknown"
+  fi
+  output="${output}Last planner seen:       ${last_planner_seen}${planner_age_note}\n"
+
+  # Unresolved debates (issue #1810: debate health observability)
+  local unresolved_debates unresolved_count=0 unresolved_note=""
+  unresolved_debates=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+  if [ -n "$unresolved_debates" ]; then
+    unresolved_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
+  fi
+  [ "$unresolved_count" -gt 5 ] && unresolved_note=" (HIGH — consider synthesizing open debates)"
+  output="${output}Unresolved debates:      ${unresolved_count}${unresolved_note}\n"
+
   printf "%b" "$output"
 }
 
