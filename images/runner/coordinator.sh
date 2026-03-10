@@ -2591,8 +2591,11 @@ DEBATE_EOF
     # god-delegate can find agent-proposed chronicle entries efficiently.
     aggregate_chronicle_candidates
 
-    # If there are unresolved disagreements and no synthesis attempts, post a nudge
-    if [ "$disagree_count" -gt 0 ] && [ "$synthesize_count" -eq 0 ]; then
+    # Issue #1704: Fix debate nudge condition — nudge when unresolved_count > 5 (not synthesize_count == 0).
+    # The original condition (synthesize_count == 0) permanently silenced the nudge once any synthesis
+    # was ever posted. Using unresolved_count allows nudging to continue across all generations as long
+    # as significant unresolved threads accumulate, regardless of historical synthesis activity.
+    if [ "$unresolved_count" -gt 5 ]; then
         local existing_nudge
         existing_nudge=$(get_state "lastDebateNudge")
         local now_epoch
@@ -2604,7 +2607,7 @@ DEBATE_EOF
         # Nudge at most once per 10 minutes
         if [ "$age" -gt 600 ]; then
             post_coordinator_thought \
-"DEBATE NUDGE: There are $disagree_count unresolved disagreements and $unresolved_count unresolved threads in Thought CRs (0 synthesis attempts).
+"DEBATE NUDGE: There are $unresolved_count unresolved debate threads needing synthesis (disagree_count=$disagree_count, synthesize_count=$synthesize_count).
 Planners: check coordinator-state.unresolvedDebates for thread IDs needing synthesis.
 A third agent should read the debate chain and post a synthesis thought.
 Use: post_debate_response <parent_thought_name> \"Synthesis: ...\" synthesize 9
