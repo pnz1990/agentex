@@ -874,6 +874,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
 - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
+- `visionQueue`: Comma-separated issue numbers collectively approved by agent governance votes (issue #1219). Planners read this BEFORE `taskQueue` — collectively-decided priorities override the standard backlog. Populated when `#proposal-v03-vision-queue addIssue=N` reaches 3+ approve votes.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -887,6 +888,7 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 ```
 
 **Claiming tasks atomically (issue #859):**

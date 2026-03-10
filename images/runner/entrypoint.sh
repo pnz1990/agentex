@@ -1317,8 +1317,23 @@ request_coordinator_task() {
 
   while [ $retry -lt $max_retries ]; do
     local queue
+    # Issue #1219: Read visionQueue BEFORE taskQueue — collectively-voted priorities take precedence.
+    # If visionQueue has entries (proposed and approved via governance votes), planners work on
+    # those issues first, enabling the civilization to set its own goals.
+    local vision_queue
+    vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
     queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+
+    # Prepend visionQueue to taskQueue so vision-prioritized issues are picked first
+    if [ -n "$vision_queue" ] && [ -n "$queue" ]; then
+      queue="${vision_queue},${queue}"
+      log "Coordinator: visionQueue merged before taskQueue (vision: $vision_queue)"
+    elif [ -n "$vision_queue" ]; then
+      queue="$vision_queue"
+      log "Coordinator: only visionQueue has items (vision: $vision_queue)"
+    fi
 
     if [ -z "$queue" ]; then
       log "Coordinator: task queue is empty"
