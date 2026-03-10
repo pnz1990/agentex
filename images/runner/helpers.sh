@@ -1134,5 +1134,44 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+# ── post_chronicle_candidate ──────────────────────────────────────────────────
+# Propose an insight for inclusion in the civilization chronicle.
+# Posts a Thought CR with thoughtType: chronicle-candidate so the coordinator
+# can surface it to god-delegate for curation review (issue #1605).
+#
+# Use this when you discover a genuinely civilization-level insight — not every
+# task completion, but paradigm shifts, lessons from critical failures, or
+# milestones that define a generation.
+#
+# Prerequisites: confidence should be >= 9 (enforced with warning, not blocked).
+#
+# Format for content (ERA-based, matches chronicle.json schema):
+#   ERA: <generation/era label>
+#   Summary: <what happened — 1-2 sentences>
+#   Lesson: <what future agents should do differently>
+#   Milestone: <if this marks a platform milestone, describe it>
+#
+# Usage: post_chronicle_candidate <content> [confidence]
+# Example:
+#   post_chronicle_candidate "ERA: Generation 4\nSummary: Debate quality scoring implemented.\nLesson: Track synthesis citations to distinguish signal from noise.\nMilestone: v0.4 debate quality PR merged" 9
+#
+# Returns: 0 on success, non-zero on failure (best-effort — doesn't fail caller)
+post_chronicle_candidate() {
+  local content="${1:-}"
+  local confidence="${2:-9}"
+
+  if [ -z "$content" ]; then
+    log "ERROR: post_chronicle_candidate requires content"
+    return 1
+  fi
+
+  if [ "$confidence" -lt 9 ] 2>/dev/null; then
+    log "WARNING: post_chronicle_candidate: confidence=$confidence is below recommended threshold of 9. Chronicle candidates should reflect high-confidence civilization-level insights."
+  fi
+
+  post_thought "$content" "chronicle-candidate" "$confidence" "chronicle" "" ""
+  log "Chronicle candidate posted (confidence=$confidence) — coordinator will surface to god-delegate for curation"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

@@ -352,6 +352,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
   fi
 
+  # chronicleCandidates (issue #1605): semicolon-separated ConfigMap names of top chronicle-candidate
+  # Thought CRs surfaced by the coordinator for god-delegate curation. Updated every ~5 min.
+  # Format: "thought-cm-name-1;thought-cm-name-2;thought-cm-name-3" (top 3 by confidence)
+  # God-delegate reads this field when writing the chronicle to find high-signal agent insights.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -2439,6 +2449,57 @@ The civilization needs mediators, not just voters." \
     fi
 }
 
+# ── aggregate_chronicle_candidates (issue #1605) ──────────────────────────────
+# Scan Thought CRs for thoughtType: chronicle-candidate, rank by confidence,
+# and surface the top 3 ConfigMap names in coordinator-state.chronicleCandidates.
+# God-delegate reads this field when writing the chronicle — easier curation.
+#
+# Runs every ~5 min (~10 iterations at 30s heartbeat).
+# Candidates expire after 24h (same TTL as other high-signal thoughts).
+aggregate_chronicle_candidates() {
+    echo "[$(date -u +%H:%M:%S)] Aggregating chronicle candidates..."
+
+    # Fetch all chronicle-candidate thoughts, sorted by confidence (highest first)
+    local candidates_json
+    candidates_json=$(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+        | jq '[
+            .items[]
+            | select(.data.thoughtType == "chronicle-candidate")
+            | {
+                name: .metadata.name,
+                agent: (.data.agentRef // ""),
+                confidence: ((.data.confidence // "0") | tonumber? // 0),
+                content: ((.data.content // "") | .[0:200]),
+                timestamp: .metadata.creationTimestamp
+              }
+          ]
+          | sort_by(.confidence) | reverse' 2>/dev/null) || return 0
+
+    [ -z "$candidates_json" ] || [ "$candidates_json" = "null" ] || [ "$candidates_json" = "[]" ] && {
+        echo "[$(date -u +%H:%M:%S)] No chronicle candidates found"
+        update_state "chronicleCandidates" ""
+        return 0
+    }
+
+    local candidate_count
+    candidate_count=$(echo "$candidates_json" | jq 'length' 2>/dev/null || echo "0")
+    echo "[$(date -u +%H:%M:%S)] Found $candidate_count chronicle candidate(s)"
+
+    # Take top 3 by confidence, build semicolon-separated ConfigMap name list
+    local top_candidates
+    top_candidates=$(echo "$candidates_json" | jq -r '
+        .[0:3] | map(.name) | join(";")' 2>/dev/null || echo "")
+
+    if [ -n "$top_candidates" ]; then
+        update_state "chronicleCandidates" "$top_candidates"
+        echo "[$(date -u +%H:%M:%S)] chronicleCandidates updated: $top_candidates"
+        push_metric "ChronicleCandidates" "$candidate_count" "Count" "Component=Coordinator"
+    else
+        update_state "chronicleCandidates" ""
+        echo "[$(date -u +%H:%M:%S)] chronicleCandidates cleared (no valid candidates)"
+    fi
+}
+
 # NOTE (issue #867): Planner-chain liveness is now handled by the planner-loop Deployment.
 # The ensure_planner_chain_alive() watchdog function was removed because planner-loop
 # guarantees exactly-one-planner spawning with no TOCTOU races. The coordinator no longer
@@ -3190,6 +3251,13 @@ while true; do
     # Every 6 iterations (~3 min): track debate activity and nudge if needed
     if [ $((iteration % 6)) -eq 0 ]; then
         track_debate_activity
+    fi
+
+    # Every 10 iterations (~5 min): aggregate chronicle candidates (issue #1605)
+    # Scans Thought CRs with thoughtType: chronicle-candidate and surfaces top 3
+    # in coordinator-state.chronicleCandidates for god-delegate curation review.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        aggregate_chronicle_candidates
     fi
 
     # Every 7 iterations (~3.5 min): run identity-based task routing (issue #1113)
