@@ -136,6 +136,30 @@ gh_auth_with_retry() {
 touch /tmp/coordinator-alive
 touch /tmp/coordinator-ready
 
+# Issue #1581: Early spawn slot reconciliation BEFORE GitHub auth retries.
+# When coordinator restarts, spawnSlots retains its stale value (often 0 when all slots were
+# used before restart). Auth retry can take up to 90s (3 attempts: 30s + 60s backoff).
+# During that window, civilization is frozen — no agents can spawn.
+# This inline fix uses raw kubectl (no helper function dependencies) to correct spawnSlots
+# BEFORE the auth wait begins. Helper functions (kubectl_with_timeout etc.) are not yet
+# defined at this point in script execution, so we use raw kubectl with a short timeout.
+echo "[$(date +%H:%M:%S)] Early spawn slot reconciliation (issue #1581, before gh auth)..."
+_early_limit=$(kubectl get configmap agentex-constitution -n "${NAMESPACE:-agentex}" \
+  -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+[[ "$_early_limit" =~ ^[0-9]+$ ]] || _early_limit=6
+_early_active=$(kubectl get jobs -n "${NAMESPACE:-agentex}" -o json 2>/dev/null | \
+  jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+  2>/dev/null || echo "0")
+_early_slots=$(( _early_limit - _early_active ))
+[ "$_early_slots" -lt 0 ] && _early_slots=0
+if kubectl patch configmap coordinator-state -n "${NAMESPACE:-agentex}" \
+  --type=merge -p "{\"data\":{\"spawnSlots\":\"$_early_slots\"}}" 2>/dev/null; then
+  echo "[$(date +%H:%M:%S)] Early spawn reconciliation: limit=$_early_limit active=$_early_active slots=$_early_slots (civilization unfrozen)"
+else
+  echo "[$(date +%H:%M:%S)] WARNING: Early spawn reconciliation failed — coordinator-state may not exist yet (first boot)"
+fi
+unset _early_limit _early_active _early_slots
+
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
   echo "GitHub token loaded from read-only file mount"
