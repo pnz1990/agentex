@@ -1182,16 +1182,23 @@ NUDGE_EOF
                     fi
                 done <<< "$kv_pairs"
 
-                if [ -n "$add_issue" ]; then
-                    local current_vq
-                    current_vq=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
-                        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+                 if [ -n "$add_issue" ]; then
+                     # Issue #1436: Validate issue is OPEN before adding to visionQueue
+                     local add_issue_state
+                     add_issue_state=$(gh issue view "$add_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                     if [ "$add_issue_state" != "OPEN" ]; then
+                         echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue is $add_issue_state — skipping visionQueue add"
+                     else
 
-                    # Deduplication: only add if not already present
-                    if echo "$current_vq" | tr ',' '\n' | grep -q "^${add_issue}$"; then
-                        echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already present, skipping"
-                    else
-                        local new_vq="${current_vq:+$current_vq,}${add_issue}"
+                     local current_vq
+                     current_vq=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+                         -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
+                     # Deduplication: only add if not already present
+                     if echo "$current_vq" | tr ',' '\n' | grep -q "^${add_issue}$"; then
+                         echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already present, skipping"
+                     else
+                         local new_vq="${current_vq:+$current_vq,}${add_issue}"
                         kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
                             --type=merge \
                             -p "{\"data\":{\"visionQueue\":\"$new_vq\"}}" \
@@ -1209,12 +1216,13 @@ NUDGE_EOF
                         kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
                             --type=merge \
                             -p "{\"data\":{\"visionQueueLog\":\"$new_vql\"}}" 2>/dev/null || true
-                        echo "[$(date -u +%H:%M:%S)] ✓ visionQueueLog updated"
-                    fi
-                    vision_queue_patched=true
-                else
-                    echo "[$(date -u +%H:%M:%S)] WARNING: vision-feature/vision-queue proposal missing addIssue=<N> — cannot enact"
-                fi
+                         echo "[$(date -u +%H:%M:%S)] ✓ visionQueueLog updated"
+                     fi
+                     vision_queue_patched=true
+                     fi  # end open-state validation
+                 else
+                     echo "[$(date -u +%H:%M:%S)] WARNING: vision-feature/vision-queue proposal missing addIssue=<N> — cannot enact"
+                 fi
             fi
             # ── End vision queue handler ───────────────────────────────────────────────
 
@@ -1246,30 +1254,38 @@ NUDGE_EOF
                 # When 3+ approve, coordinator adds it to visionQueue with vote count
                 # Format: "issueNumber:voteCount" pairs, coordinator reads this BEFORE taskQueue
                 # Issue #1311: Use glob matching for topic variants (v03-vision-queue, etc.)
-                if [[ "$topic" == *"vision-feature"* ]]; then
-                    local vision_issue
-                    # Issue #1311: Accept both issueNumber= and addIssue= formats
-                    vision_issue=$(echo "$kv_pairs" | grep -oE '(issueNumber|addIssue)=[0-9]+' | head -1 | cut -d= -f2 || echo "")
-                    if [ -n "$vision_issue" ]; then
-                        local current_vq
-                        current_vq=$(get_state "visionQueue")
-                        local new_entry="${vision_issue}:${approve_votes}"
-                        # Only add if not already in visionQueue
-                        if ! echo "$current_vq" | grep -q "^${vision_issue}:" && \
-                           ! echo "$current_vq" | grep -q ",${vision_issue}:"; then
-                            if [ -z "$current_vq" ]; then
-                                update_state "visionQueue" "$new_entry"
-                            else
-                                update_state "visionQueue" "${current_vq},${new_entry}"
-                            fi
-                            echo "[$(date -u +%H:%M:%S)] ✓ VISION QUEUE: Added issue #$vision_issue (${approve_votes} votes) to visionQueue"
-                            patched=true
-                        else
-                            echo "[$(date -u +%H:%M:%S)] VISION QUEUE: Issue #$vision_issue already in visionQueue, skipping"
-                            patched=true
-                        fi
-                    fi
-                fi
+                 if [[ "$topic" == *"vision-feature"* ]]; then
+                     local vision_issue
+                     # Issue #1311: Accept both issueNumber= and addIssue= formats
+                     vision_issue=$(echo "$kv_pairs" | grep -oE '(issueNumber|addIssue)=[0-9]+' | head -1 | cut -d= -f2 || echo "")
+                     if [ -n "$vision_issue" ]; then
+                         # Issue #1436: Validate issue is OPEN before adding to visionQueue
+                         local vision_issue_state
+                         vision_issue_state=$(gh issue view "$vision_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                         if [ "$vision_issue_state" != "OPEN" ]; then
+                             echo "[$(date -u +%H:%M:%S)] VISION QUEUE: issue #$vision_issue is $vision_issue_state — skipping visionQueue add"
+                             patched=true
+                         else
+                         local current_vq
+                         current_vq=$(get_state "visionQueue")
+                         local new_entry="${vision_issue}:${approve_votes}"
+                         # Only add if not already in visionQueue
+                         if ! echo "$current_vq" | grep -q "^${vision_issue}:" && \
+                            ! echo "$current_vq" | grep -q ",${vision_issue}:"; then
+                             if [ -z "$current_vq" ]; then
+                                 update_state "visionQueue" "$new_entry"
+                             else
+                                 update_state "visionQueue" "${current_vq},${new_entry}"
+                             fi
+                             echo "[$(date -u +%H:%M:%S)] ✓ VISION QUEUE: Added issue #$vision_issue (${approve_votes} votes) to visionQueue"
+                             patched=true
+                         else
+                             echo "[$(date -u +%H:%M:%S)] VISION QUEUE: Issue #$vision_issue already in visionQueue, skipping"
+                             patched=true
+                         fi
+                         fi  # end open-state validation
+                     fi
+                 fi
 
                 if [ "$patched" = true ]; then
                     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
@@ -1318,30 +1334,37 @@ NUDGE_EOF
                 # Extract addIssue value from kv_pairs (issue number format)
                 local add_issue
                 add_issue=$(echo "$kv_pairs" | tr ' ' '\n' | grep "^addIssue=" | cut -d= -f2 | head -1 || echo "")
-                if [ -n "$add_issue" ] && [[ "$add_issue" =~ ^[0-9]+$ ]]; then
-                    # Read current visionQueue
-                    local vision_queue
-                    vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-                        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+                 if [ -n "$add_issue" ] && [[ "$add_issue" =~ ^[0-9]+$ ]]; then
+                     # Issue #1436: Validate issue is OPEN before adding to visionQueue
+                     local add_issue_open_state
+                     add_issue_open_state=$(gh issue view "$add_issue" --repo "${GITHUB_REPO}" --json state --jq '.state' 2>/dev/null || echo "unknown")
+                     if [ "$add_issue_open_state" != "OPEN" ]; then
+                         echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue is $add_issue_open_state — skipping visionQueue add"
+                     else
+                     # Read current visionQueue
+                     local vision_queue
+                     vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+                         -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
 
-                    # Check if issue already in queue
-                    if echo ",$vision_queue," | grep -q ",$add_issue,"; then
-                        echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue already in visionQueue ($vision_queue)"
-                    else
-                        # Add to queue
-                        local new_vision_queue
-                        if [ -z "$vision_queue" ]; then
-                            new_vision_queue="$add_issue"
-                        else
-                            new_vision_queue="${vision_queue},${add_issue}"
-                        fi
-                        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
-                            --type=merge \
-                            -p "{\"data\":{\"visionQueue\":\"${new_vision_queue}\"}}" \
-                            && echo "[$(date -u +%H:%M:%S)] ✓ VISION-FEATURE: added issue #$add_issue to visionQueue (was: ${vision_queue:-empty}, now: $new_vision_queue)" \
-                            || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to update visionQueue for vision-feature $topic"
-                        patched=true
-                    fi
+                     # Check if issue already in queue
+                     if echo ",$vision_queue," | grep -q ",$add_issue,"; then
+                         echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue already in visionQueue ($vision_queue)"
+                     else
+                         # Add to queue
+                         local new_vision_queue
+                         if [ -z "$vision_queue" ]; then
+                             new_vision_queue="$add_issue"
+                         else
+                             new_vision_queue="${vision_queue},${add_issue}"
+                         fi
+                         kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+                             --type=merge \
+                             -p "{\"data\":{\"visionQueue\":\"${new_vision_queue}\"}}" \
+                             && echo "[$(date -u +%H:%M:%S)] ✓ VISION-FEATURE: added issue #$add_issue to visionQueue (was: ${vision_queue:-empty}, now: $new_vision_queue)" \
+                             || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to update visionQueue for vision-feature $topic"
+                         patched=true
+                     fi
+                     fi  # end open-state validation
                 else
                     # Named feature format (issue #1149): feature=<name> description=<desc>
                     local feature_name feature_desc vision_entry
