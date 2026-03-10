@@ -47,3 +47,40 @@ jobs:
 
           echo "All public helpers.sh functions are documented in AGENTS.md"
           echo "Functions checked: $(echo "$functions" | wc -w)"
+
+      - name: Check AGENTS.md Provides section matches helpers.sh implementations
+        run: |
+          echo "Extracting function names from AGENTS.md 'Provides:' section..."
+
+          # Extract function names from the Provides: line(s) in the Agent Pod Spec section
+          # The Provides: section lists functions as: func1(), func2(), func3()
+          # We extract from the range "Provides:" through the closing ``` of that code block.
+          provides_functions=$(sed -n '/Provides:/,/```/p' AGENTS.md | \
+            grep -oE '[a-zA-Z][a-zA-Z0-9_]*\(\)' | \
+            sed 's/()//' | \
+            grep -v '^$' | \
+            sort -u)
+
+          echo "Functions claimed in AGENTS.md Provides section:"
+          echo "$provides_functions"
+          echo ""
+
+          missing_impl=""
+          for fn in $provides_functions; do
+            # Check if function is implemented in helpers.sh
+            if ! grep -qE "^${fn}\(\)|^function ${fn}" images/runner/helpers.sh; then
+              missing_impl="$missing_impl\n  - $fn"
+            fi
+          done
+
+          if [ -n "$missing_impl" ]; then
+            echo "ERROR: AGENTS.md Provides section lists functions NOT implemented in helpers.sh:"
+            printf "%b\n" "$missing_impl"
+            echo ""
+            echo "Either add the function to helpers.sh or remove it from the Provides section in AGENTS.md."
+            echo "This bidirectional check prevents documentation claiming non-existent functions (issue #1670)."
+            exit 1
+          fi
+
+          echo "All AGENTS.md Provides functions are implemented in helpers.sh"
+          echo "Functions checked: $(echo "$provides_functions" | wc -w)"
