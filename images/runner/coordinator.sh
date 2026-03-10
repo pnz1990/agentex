@@ -171,6 +171,18 @@ ensure_state_fields_initialized() {
       -p '{"data":{"spawnSlots":"0"}}' 2>/dev/null || true
   fi
 
+  # visionQueue (issue #1219): comma-separated issue numbers voted in by collective governance.
+  # Planners read this BEFORE taskQueue, enabling agent-voted goals to override the standard backlog.
+  # visionQueueLog: audit log for all visionQueue additions (semicolon-separated entries).
+  for field in visionQueue visionQueueLog; do
+    val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null)
+    if [ -z "$val" ]; then
+      [ "$silent" = "false" ] && echo "  Initializing $field (was empty/null)"
+      kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+    fi
+  done
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -828,9 +840,63 @@ tally_and_enact_votes() {
             
             push_metric "ConsensusEnacted" 1 "Count" "Topic=${topic}"
 
+            # ── Vision Queue governance handler (issue #1219) ──────────────────────────
+            # For vision-feature and vision-queue proposals, add the issue to visionQueue
+            # instead of patching the constitution. This enables agent collective self-direction.
+            # Proposal format: "#proposal-vision-feature addIssue=<N> reason=<why>"
+            # or:               "#proposal-vision-queue addIssue=<N> reason=<why>"
+            local vision_queue_patched=false
+            if [[ "$topic" == "vision-feature" || "$topic" == "vision-queue" ]]; then
+                local add_issue=""
+                while IFS= read -r kv; do
+                    [ -z "$kv" ] && continue
+                    local kv_key="${kv%%=*}"
+                    local kv_val="${kv##*=}"
+                    if [ "$kv_key" = "addIssue" ] && [[ "$kv_val" =~ ^[0-9]+$ ]]; then
+                        add_issue="$kv_val"
+                        break
+                    fi
+                done <<< "$kv_pairs"
+
+                if [ -n "$add_issue" ]; then
+                    local current_vq
+                    current_vq=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+                        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
+                    # Deduplication: only add if not already present
+                    if echo "$current_vq" | tr ',' '\n' | grep -q "^${add_issue}$"; then
+                        echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already present, skipping"
+                    else
+                        local new_vq="${current_vq:+$current_vq,}${add_issue}"
+                        kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+                            --type=merge \
+                            -p "{\"data\":{\"visionQueue\":\"$new_vq\"}}" \
+                            && echo "[$(date -u +%H:%M:%S)] ✓ visionQueue updated: issue #$add_issue added (visionQueue=$new_vq)" \
+                            || echo "[$(date -u +%H:%M:%S)] ERROR: Failed to update visionQueue"
+
+                        # Append to visionQueueLog for audit trail
+                        local ts_log
+                        ts_log=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                        local current_vql
+                        current_vql=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+                            -o jsonpath='{.data.visionQueueLog}' 2>/dev/null || echo "")
+                        local log_entry="${ts_log} issue=${add_issue} votes=${approve_votes} proposer=${proposer_agent}"
+                        local new_vql="${current_vql:+$current_vql;}$log_entry"
+                        kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+                            --type=merge \
+                            -p "{\"data\":{\"visionQueueLog\":\"$new_vql\"}}" 2>/dev/null || true
+                        echo "[$(date -u +%H:%M:%S)] ✓ visionQueueLog updated"
+                    fi
+                    vision_queue_patched=true
+                else
+                    echo "[$(date -u +%H:%M:%S)] WARNING: vision-feature/vision-queue proposal missing addIssue=<N> — cannot enact"
+                fi
+            fi
+            # ── End vision queue handler ───────────────────────────────────────────────
+
             # Try to patch constitution for known keys
             local patched=false
-            if [ -n "$kv_pairs" ]; then
+            if [ -n "$kv_pairs" ] && [ "$vision_queue_patched" = false ]; then
                 # Build JSON patch for all key=value pairs
                 local patch_data="{"
                 local first=true
@@ -890,7 +956,13 @@ tally_and_enact_votes() {
 
             # Post verdict Thought CR
             local verdict_text
-            if [ "$patched" = true ]; then
+            if [ "$vision_queue_patched" = true ]; then
+                verdict_text="VISION QUEUE ENACTED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Changes: $kv_pairs
+Issue added to visionQueue at ${ts}. Planners will prioritize this issue above taskQueue.
+Vision score: 10/10 — civilization is self-directing its future."
+            elif [ "$patched" = true ]; then
                 verdict_text="CONSENSUS ENACTED: $topic
 Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
 Changes: $kv_pairs

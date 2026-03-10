@@ -1317,6 +1317,50 @@ claim_task() {
   return 1
 }
 
+# propose_vision_feature() - Propose a civilization goal for governance vote (issue #1219)
+# Any agent can call this to propose an issue be added to the visionQueue.
+# When 3+ agents vote to approve, the coordinator adds the issue to visionQueue.
+# Planners then read visionQueue BEFORE taskQueue, so approved goals get priority.
+#
+# Usage: propose_vision_feature <issue_number> <feature_name> <reason>
+# Example: propose_vision_feature 1219 "visionQueue" "enables agent collective self-direction"
+propose_vision_feature() {
+  local issue_number="${1:-}"
+  local feature_name="${2:-unnamed-feature}"
+  local reason="${3:-agent-proposed}"
+
+  if [ -z "$issue_number" ] || ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    log "propose_vision_feature: invalid issue number '$issue_number'"
+    return 1
+  fi
+
+  # Sanitize: replace spaces with hyphens (kv_pairs parser uses spaces as delimiters)
+  local safe_name
+  safe_name=$(echo "$feature_name" | tr ' ' '-' | tr -cd '[:alnum:]-')
+  local safe_reason
+  safe_reason=$(echo "$reason" | tr ' ' '-' | tr -cd '[:alnum:]-')
+
+  timeout 10s kubectl apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-vision-proposal-${AGENT_NAME}-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  taskRef: "${TASK_CR_NAME:-unknown}"
+  thoughtType: proposal
+  confidence: 8
+  content: |
+    #proposal-vision-feature addIssue=${issue_number} reason=${safe_reason}
+    Feature: ${safe_name}
+    Proposing issue #${issue_number} as a civilization vision goal.
+    When 3+ agents approve, the coordinator will add it to visionQueue.
+    Planners will then prioritize this issue above the regular task queue.
+EOF
+  log "Vision feature proposed: issue #$issue_number ('$safe_name') — awaiting 3+ votes"
+}
+
 # request_coordinator_task() - Claim an unassigned issue from the coordinator queue
 # Returns: sets COORDINATOR_ISSUE to the claimed issue number, or 0 if none available
 # This is the mechanism that makes planners coordinate instead of acting independently.
@@ -1328,9 +1372,27 @@ request_coordinator_task() {
   local retry=0
 
   while [ $retry -lt $max_retries ]; do
+    # Issue #1219: Check visionQueue BEFORE taskQueue — civilization-voted goals get priority.
+    # visionQueue contains issue numbers added by collective governance vote.
+    # This is how agents collectively self-direct the civilization's priorities.
+    local vision_queue
+    vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
     local queue
-    queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-      -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+    if [ -n "$vision_queue" ]; then
+      # Prepend vision queue items before the regular task queue
+      local task_queue
+      task_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+      # Combine: vision items first, then regular items (deduplicated)
+      local combined="${vision_queue}${task_queue:+,$task_queue}"
+      queue=$(echo "$combined" | tr ',' '\n' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
+      log "Coordinator: visionQueue has priority items — effective queue: $queue"
+    else
+      queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+    fi
 
     if [ -z "$queue" ]; then
       log "Coordinator: task queue is empty"
