@@ -2144,6 +2144,114 @@ fi)"
   fi
 }
 
+# civilization_status() — Single-command civilization health overview (issue #1224)
+# Outputs a structured health summary covering generation, active agents, open issues,
+# debate health, specialization routing, visionQueue, kill switch, and S3 debate outcomes.
+# Planners call this at startup to surface the health snapshot in the thought stream.
+civilization_status() {
+  local output=""
+  output="${output}=== Civilization Status ===\n"
+
+  # Generation
+  local gen
+  gen=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "unknown")
+  output="${output}Generation:              ${gen}\n"
+
+  # Circuit breaker limit
+  local cb_limit
+  cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "unknown")
+
+  # Active agents (active Jobs in namespace)
+  local active_jobs
+  active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+    2>/dev/null || echo "?")
+  output="${output}Active agents:           ${active_jobs} (limit: ${cb_limit})\n"
+
+  # spawnSlots (spawn gate health)
+  local spawn_slots
+  spawn_slots=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo "?")
+  output="${output}spawnSlots:              ${spawn_slots}\n"
+
+  # Open GitHub issues
+  local open_issues
+  open_issues=$(gh issue list --repo "${REPO:-pnz1990/agentex}" --state open --limit 100 \
+    --json number -q 'length' 2>/dev/null || echo "?")
+  local issue_warning=""
+  if [[ "$open_issues" =~ ^[0-9]+$ ]] && [ "$open_issues" -lt 5 ]; then
+    issue_warning=" (⚠️  LOW — should be 10+)"
+  fi
+  output="${output}Open issues:             ${open_issues}${issue_warning}\n"
+
+  # Debate health from coordinator-state
+  local debate_stats
+  debate_stats=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "unavailable")
+  output="${output}Debate health:           ${debate_stats}\n"
+
+  # Specialization routing (v0.2)
+  local spec_assignments generic_assignments
+  spec_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+  generic_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.genericAssignments}' 2>/dev/null || echo "0")
+  local routing_note=""
+  if [ "${spec_assignments:-0}" = "0" ]; then
+    routing_note=" (v0.2 not yet confirmed)"
+  fi
+  output="${output}Specialization routing:  specializedAssignments=${spec_assignments:-0} genericAssignments=${generic_assignments:-0}${routing_note}\n"
+
+  # visionQueue (v0.3 sub-feature)
+  local vision_queue
+  vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+  if [ -z "$vision_queue" ]; then vision_queue="[] (v0.3 not started)"; fi
+  output="${output}visionQueue:             ${vision_queue}\n"
+
+  # Kill switch status
+  local ks_enabled
+  ks_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "unknown")
+  local ks_display="disabled"
+  if [ "$ks_enabled" = "true" ]; then
+    local ks_reason
+    ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+      -o jsonpath='{.data.reason}' 2>/dev/null || echo "")
+    ks_display="🚨 ACTIVE — ${ks_reason}"
+  fi
+  output="${output}Kill switch:             ${ks_display}\n"
+
+  # S3 debate outcomes
+  local s3_debates
+  s3_debates=$(aws s3 ls "s3://${S3_BUCKET}/debates/" \
+    --region "${BEDROCK_REGION}" 2>/dev/null | wc -l || echo "?")
+  output="${output}S3 debate outcomes:      ${s3_debates}\n"
+
+  # Coordinator heartbeat freshness
+  local last_heartbeat heartbeat_age=""
+  last_heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+  if [ -n "$last_heartbeat" ]; then
+    local hb_epoch now_epoch
+    hb_epoch=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo "0")
+    now_epoch=$(date +%s)
+    local age_secs=$(( now_epoch - hb_epoch ))
+    if [ "$age_secs" -gt 120 ]; then
+      heartbeat_age=" (⚠️  STALE — ${age_secs}s old)"
+    else
+      heartbeat_age=" (${age_secs}s ago)"
+    fi
+  else
+    last_heartbeat="unknown"
+  fi
+  output="${output}Coordinator heartbeat:   ${last_heartbeat}${heartbeat_age}\n"
+
+  printf "%b" "$output"
+}
+
 # ── 3. Announce startup ───────────────────────────────────────────────────────
 log "Agent starting. Role=$AGENT_ROLE Task=$TASK_CR_NAME Model=$BEDROCK_MODEL"
 push_metric "AgentRun" 1
@@ -2338,13 +2446,28 @@ If claim fails (returns 1), pick a different issue — another agent already cla
          ROUTING_BLOCKER="Identities with specialization exist but routing threshold (score>5) not met yet. More task history needed, or consider lowering SPECIALIZATION_ROUTING_THRESHOLD."
        fi
 
-       log "v0.2 routing status: not yet firing. Blocker: ${ROUTING_BLOCKER}"
-       post_thought "v0.2 validation: specialization routing NOT yet firing (specializedAssignments=${SPECIALIZED_ASSIGNMENTS:-0}). Diagnosis: ${ROUTING_BLOCKER} [identityFiles=${IDENTITY_COUNT:-0}, withSpec=${IDENTITY_WITH_SPEC}]. Monitor coordinator-state.specializedAssignments each planner generation." "insight" 7
-     else
-       log "v0.2 specialization routing confirmed: ${SPECIALIZED_ASSIGNMENTS} specialized assignment(s). Last: ${LAST_ROUTING:-unknown}"
-       post_thought "v0.2 VALIDATED: specialization routing fired ${SPECIALIZED_ASSIGNMENTS} times. Recent: ${LAST_ROUTING:-none}. Identity-based task routing is operational." "insight" 9
-     fi
-   fi
+        log "v0.2 routing status: not yet firing. Blocker: ${ROUTING_BLOCKER}"
+        post_thought "v0.2 validation: specialization routing NOT yet firing (specializedAssignments=${SPECIALIZED_ASSIGNMENTS:-0}). Diagnosis: ${ROUTING_BLOCKER} [identityFiles=${IDENTITY_COUNT:-0}, withSpec=${IDENTITY_WITH_SPEC}]. Monitor coordinator-state.specializedAssignments each planner generation." "insight" 7
+      else
+        log "v0.2 specialization routing confirmed: ${SPECIALIZED_ASSIGNMENTS} specialized assignment(s). Last: ${LAST_ROUTING:-unknown}"
+        post_thought "v0.2 VALIDATED: specialization routing fired ${SPECIALIZED_ASSIGNMENTS} times. Recent: ${LAST_ROUTING:-none}. Identity-based task routing is operational." "insight" 9
+      fi
+
+      # Issue #1224: Civilization health snapshot — post a one-line summary to thought stream.
+      # This gives successors and the god-delegate immediate visibility into system state.
+      log "Planner: running civilization_status() health check..."
+      CIV_STATUS_OUTPUT=$(civilization_status 2>/dev/null || echo "(status unavailable)")
+      log "$CIV_STATUS_OUTPUT"
+      # Summarize key fields for thought stream (keep it concise — agents read many thoughts)
+      ACTIVE_JOBS_SNAP=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "?")
+      DEBATE_STATS_SNAP=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "unavailable")
+      OPEN_ISSUES_SNAP=$(gh issue list --repo "${REPO:-pnz1990/agentex}" --state open --limit 100 \
+        --json number -q 'length' 2>/dev/null || echo "?")
+      post_thought "Civilization health (gen=${CIVILIZATION_GENERATION:-unknown}): activeAgents=${ACTIVE_JOBS_SNAP} openIssues=${OPEN_ISSUES_SNAP} debateStats=[${DEBATE_STATS_SNAP}] spawnSlots=$(kubectl_with_timeout 10 get configmap coordinator-state -n agentex -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo '?')" "insight" 7 "civilization-status"
+    fi
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
