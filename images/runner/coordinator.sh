@@ -2889,9 +2889,16 @@ check_v05_milestone() {
     local criteria_met=0
     local criteria_report=""
 
-    # ── Criterion 1: 3+ agents with promotedRole ─────────────────────────────
+    # ── Criteria 1, 3, 4: Single S3 download loop (issue #1764 — reduce 3x duplicate downloads) ─
+    # Download each identity file ONCE and extract all three metrics in one pass.
+    # This reduces S3 API calls from 3×N to 1×N per check_v05_milestone() call.
+    # Also fixes wrong field paths from PR #1753 (issue #1759):
+    #   Criterion 3: .proactiveIssuesFound → .stats.proactiveIssuesFound
+    #   Criterion 4: .mentorCredits (integer) → (.specializationDetail.mentorCredits // []) | length
     local promoted_count=0
-    # Scan all identity files in S3 for promotedRole field
+    local proactive_count=0
+    local mentor_credit_count=0
+    # Scan all identity files in S3
     local identity_files
     identity_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
@@ -2902,9 +2909,21 @@ check_v05_milestone() {
         ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$ijson" ] && continue
+
+        # Criterion 1: promotedRole field
         local prole
         prole=$(echo "$ijson" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
         [ -n "$prole" ] && promoted_count=$((promoted_count + 1))
+
+        # Criterion 3: proactiveIssuesFound (correct path: .stats.proactiveIssuesFound)
+        local pif
+        pif=$(echo "$ijson" | jq -r '.stats.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
+        [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
+
+        # Criterion 4: mentorCredits array length (correct path: .specializationDetail.mentorCredits)
+        local mc
+        mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
+        [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
     done
 
     if [ "$promoted_count" -ge 3 ]; then
@@ -2934,18 +2953,7 @@ check_v05_milestone() {
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 2: ${edge_count} trust graph edges (need 5)"
 
-    # ── Criterion 3: 2+ agents with proactiveIssuesFound > 0 ─────────────────
-    local proactive_count=0
-    for ifile in $identity_files; do
-        local ijson
-        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-        [ -z "$ijson" ] && continue
-        local pif
-        pif=$(echo "$ijson" | jq -r '.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
-        [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
-    done
-
+    # Criterion 3 result (computed in merged loop above)
     if [ "$proactive_count" -ge 2 ]; then
         criteria_met=$((criteria_met + 1))
         criteria_report="${criteria_report}✅ Criterion 3: Proactive issue discovery — ${proactive_count} agents discovered issues\n"
@@ -2954,18 +2962,7 @@ check_v05_milestone() {
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 3: ${proactive_count} agents with proactiveIssuesFound > 0 (need 2)"
 
-    # ── Criterion 4: 1+ agent with mentorCredits > 0 ─────────────────────────
-    local mentor_credit_count=0
-    for ifile in $identity_files; do
-        local ijson
-        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-        [ -z "$ijson" ] && continue
-        local mc
-        mc=$(echo "$ijson" | jq -r '.mentorCredits // 0 | tonumber' 2>/dev/null || echo "0")
-        [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
-    done
-
+    # Criterion 4 result (computed in merged loop above)
     if [ "$mentor_credit_count" -ge 1 ]; then
         criteria_met=$((criteria_met + 1))
         criteria_report="${criteria_report}✅ Criterion 4: Mentor credit loop — ${mentor_credit_count} mentor(s) credited\n"
