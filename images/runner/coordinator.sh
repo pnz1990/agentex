@@ -183,6 +183,20 @@ ensure_state_fields_initialized() {
     fi
   done
 
+  # issueLabels: label cache for claimed issues (issue #1268, PR #1298).
+  # Format: "issue:label1,label2|issue2:label3|..."
+  # Written by claim_task() in helpers.sh/_cache_issue_labels() at claim time.
+  # Read by exit handler specialization tracking to avoid GitHub API rate-limit failures.
+  # Must be initialized here so the field is present in coordinator-state from the start,
+  # ensuring consistent observability and preventing jsonpath parse surprises on fresh clusters.
+  issuelabels_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq -r 'if (.data | has("issueLabels")) then "present" else "absent" end' 2>/dev/null || echo "absent")
+  if [ "$issuelabels_val" = "absent" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing issueLabels (field was absent — issue #1268/PR #1298)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"issueLabels":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
