@@ -3525,33 +3525,60 @@ route_tasks_by_specialization() {
     # pre-claimed generates false-positive "v0.2 routing regression" issues.
     local unassigned_count=0
 
-    # Issue #1430: Pre-fetch issueLabels cache to avoid per-issue GitHub API calls
-    # Cache format: "issue:label1,label2|issue2:label3|..."
-    local labels_cache
-    labels_cache=$(get_state "issueLabels" 2>/dev/null || echo "")
+     # Issue #1430: Pre-fetch issueLabels cache to avoid per-issue GitHub API calls
+     # Cache format: "issue:label1,label2|issue2:label3|..."
+     local labels_cache
+     labels_cache=$(get_state "issueLabels" 2>/dev/null || echo "")
 
-    IFS=',' read -ra queue_issues <<< "$task_queue"
-    for issue_num in "${queue_issues[@]}"; do
-        [ -z "$issue_num" ] && continue
-        # Issue #1521: trim whitespace — taskQueue can have legacy space-padded entries
-        # (e.g., "1436 " from pre-PR-#1473 update_state() writes). Without trimming,
-        # [[ "1436 " =~ ^[0-9]+$ ]] fails and routing skips ALL such entries, keeping
-        # specializedAssignments=0 even when valid agents and matching issues exist.
-        issue_num=$(echo "$issue_num" | tr -d '[:space:]')
-        # Only handle numeric issue numbers
-        [[ "$issue_num" =~ ^[0-9]+$ ]] || continue
+     # Issue #1811: Pre-fetch open PRs to skip issues that already have an open PR.
+     # update_taskqueue() filters issues when building taskQueue, but there is a
+     # timing race: a PR opened between the last taskQueue refresh (~2.5 min interval)
+     # and this routing run (~3.5 min interval) causes routing to pre-claim an issue
+     # that is already being implemented, resulting in duplicate PRs.
+     # Fetching open PRs once here (outside the loop) prevents this without adding
+     # per-issue API calls.
+     local routing_covered_prs_json routing_covered_pr_issues
+     routing_covered_prs_json=$(gh api "/repos/${GITHUB_REPO}/pulls?state=open&per_page=100" 2>/dev/null) || true
+     routing_covered_pr_issues=""
+     if [ -n "$routing_covered_prs_json" ]; then
+         routing_covered_pr_issues=$(echo "$routing_covered_prs_json" | \
+             jq -r '.[].body // ""' 2>/dev/null | \
+             grep -oiE '(closes|fixes|resolves) #[0-9]+' | \
+             grep -oE '[0-9]+' | sort -u | tr '\n' ' ')
+         local routing_covered_count
+         routing_covered_count=$(echo "$routing_covered_pr_issues" | wc -w | tr -d ' ')
+         echo "[$(date -u +%H:%M:%S)] Issue #1811: Routing open-PR check found $routing_covered_count covered issues — will skip from specialization routing"
+     fi
 
-        # Skip if already assigned
-        # Issue #1488: Normalize spaces before grep — activeAssignments can have space-padded entries
-        local normalized_active_assignments
-        normalized_active_assignments=$(echo "$active_assignments" | tr -d ' ')
-        if echo "$normalized_active_assignments" | grep -q ":${issue_num}$" || \
-           echo "$normalized_active_assignments" | grep -q ":${issue_num},"; then
-            continue
-        fi
+     IFS=',' read -ra queue_issues <<< "$task_queue"
+     for issue_num in "${queue_issues[@]}"; do
+         [ -z "$issue_num" ] && continue
+         # Issue #1521: trim whitespace — taskQueue can have legacy space-padded entries
+         # (e.g., "1436 " from pre-PR-#1473 update_state() writes). Without trimming,
+         # [[ "1436 " =~ ^[0-9]+$ ]] fails and routing skips ALL such entries, keeping
+         # specializedAssignments=0 even when valid agents and matching issues exist.
+         issue_num=$(echo "$issue_num" | tr -d '[:space:]')
+         # Only handle numeric issue numbers
+         [[ "$issue_num" =~ ^[0-9]+$ ]] || continue
 
-        # Count unassigned issues seen this cycle (issue #1675: needed for false-positive prevention)
-        unassigned_count=$((unassigned_count + 1))
+         # Skip if already assigned
+         # Issue #1488: Normalize spaces before grep — activeAssignments can have space-padded entries
+         local normalized_active_assignments
+         normalized_active_assignments=$(echo "$active_assignments" | tr -d ' ')
+         if echo "$normalized_active_assignments" | grep -q ":${issue_num}$" || \
+            echo "$normalized_active_assignments" | grep -q ":${issue_num},"; then
+             continue
+         fi
+
+         # Issue #1811: Skip issues that already have an open PR to prevent duplicate work.
+         # Guards against the race between taskQueue refresh and routing pre-claim.
+         if [ -n "$routing_covered_pr_issues" ] && echo " $routing_covered_pr_issues " | grep -q " $issue_num "; then
+             echo "[$(date -u +%H:%M:%S)] Issue #1811: Skipping issue #$issue_num in routing — open PR already exists"
+             continue
+         fi
+
+         # Count unassigned issues seen this cycle (issue #1675: needed for false-positive prevention)
+         unassigned_count=$((unassigned_count + 1))
 
         # Get issue labels for scoring — use cache first (issue #1430: rate-limit resilient)
         local issue_labels=""
