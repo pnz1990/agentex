@@ -1,0 +1,662 @@
+---
+# Real-Time Observability Dashboard for Agentex (issue #1836)
+#
+# Provides:
+#   - Agent Status Panel (active, completed, failed agents)
+#   - Work Queue Panel (queued, in-progress, done tasks)
+#   - Activity Feed (real-time, last 20 thoughts)
+#   - Debate & Governance Panel (proposals, votes, debate stats)
+#   - Problems View (stuck agents, crashes, missed heartbeats)
+#   - Recent Reports (vision scores, PRs opened)
+#
+# Deploy:
+#   kubectl apply -f manifests/system/dashboard.yaml
+#
+# Access (local):
+#   kubectl port-forward svc/agentex-dashboard 8080:8080 -n agentex
+#   open http://localhost:8080
+#
+# Access (in-cluster):
+#   Service type is ClusterIP by default. Change to LoadBalancer for external access.
+#   kubectl patch svc agentex-dashboard -n agentex -p '{"spec":{"type":"LoadBalancer"}}'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-dashboard-server
+  namespace: agentex
+  labels:
+    app: agentex
+    component: dashboard
+data:
+  server.js: |
+    #!/usr/bin/env node
+    // Agentex Real-Time Observability Dashboard Server (issue #1836)
+    // Uses Node.js built-in http module + child_process for kubectl calls.
+    // No external npm dependencies required.
+    'use strict';
+
+    const http = require('http');
+    const { execSync } = require('child_process');
+    const { URL } = require('url');
+
+    const NAMESPACE = process.env.NAMESPACE || 'agentex';
+    const PORT = parseInt(process.env.DASHBOARD_PORT || '8080', 10);
+    const REFRESH = parseInt(process.env.DASHBOARD_REFRESH || '15', 10);
+
+    function kubectl(args, defaultVal = '') {
+      try {
+        return execSync(`kubectl ${args}`, { timeout: 12000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      } catch (e) {
+        return defaultVal;
+      }
+    }
+
+    function kubectlJson(args) {
+      try {
+        const out = execSync(`kubectl ${args} -o json`, { timeout: 15000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        return JSON.parse(out);
+      } catch (e) {
+        return { items: [] };
+      }
+    }
+
+    function esc(s) {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '';
+      try {
+        return new Date(ts).toISOString().substring(11, 19);
+      } catch (e) { return ts.substring(0, 8); }
+    }
+
+    function elapsed(startTs) {
+      if (!startTs) return '';
+      try {
+        const secs = Math.floor((Date.now() - new Date(startTs).getTime()) / 1000);
+        if (secs < 60) return `${secs}s`;
+        if (secs < 3600) return `${Math.floor(secs/60)}m`;
+        return `${Math.floor(secs/3600)}h${Math.floor((secs%3600)/60)}m`;
+      } catch(e) { return ''; }
+    }
+
+    function getAgents() {
+      const jobs = kubectlJson(`get jobs -n ${NAMESPACE}`);
+      return (jobs.items || []).map(job => {
+        const name = job.metadata.name;
+        const labels = job.metadata.labels || {};
+        const role = labels['agentex/role'] || 'unknown';
+        const generation = labels['agentex/generation'] || '?';
+        const status = job.status || {};
+        const active = status.active || 0;
+        const succeeded = status.succeeded || 0;
+        const failed = status.failed || 0;
+        const startTime = status.startTime || '';
+        const completionTime = status.completionTime || '';
+
+        let state, symbol;
+        if (active > 0) { state = 'active'; symbol = '●'; }
+        else if (succeeded > 0) { state = 'done'; symbol = '○'; }
+        else if (failed > 0) { state = 'failed'; symbol = '✕'; }
+        else { state = 'pending'; symbol = '◌'; }
+
+        return { name, role, generation, state, symbol, startTime, completionTime, runtime: elapsed(startTime) };
+      }).sort((a, b) => {
+        const order = { active: 0, pending: 1, failed: 2, done: 3 };
+        return (order[a.state] || 99) - (order[b.state] || 99);
+      });
+    }
+
+    function getCoordState() {
+      const fields = [
+        'taskQueue','activeAssignments','spawnSlots','debateStats',
+        'unresolvedDebates','lastHeartbeat','visionQueue','voteRegistry',
+        'enactedDecisions','lastPlannerSeen','routingCyclesWithZeroSpec',
+        'specializedAssignments','genericAssignments','v06MilestoneStatus',
+        'v05CriteriaStatus','v06CriteriaStatus','decisionLog','chronicleCandidates'
+      ];
+      const state = {};
+      fields.forEach(f => {
+        state[f] = kubectl(`get configmap coordinator-state -n ${NAMESPACE} -o=jsonpath={.data.${f}}`, '');
+      });
+      return state;
+    }
+
+    function getThoughts() {
+      const cms = kubectlJson(`get configmaps -n ${NAMESPACE} -l agentex/thought --sort-by=.metadata.creationTimestamp`);
+      return (cms.items || []).slice(-20).reverse().map(cm => ({
+        name: cm.metadata.name,
+        timestamp: cm.metadata.creationTimestamp,
+        agent: (cm.data || {}).agentRef || '',
+        type: (cm.data || {}).thoughtType || '',
+        content: ((cm.data || {}).content || '').substring(0, 150),
+        confidence: (cm.data || {}).confidence || '',
+      }));
+    }
+
+    function getReports() {
+      const cms = kubectlJson(`get configmaps -n ${NAMESPACE} -l agentex/report --sort-by=.metadata.creationTimestamp`);
+      return (cms.items || []).slice(-10).reverse().map(cm => ({
+        timestamp: cm.metadata.creationTimestamp,
+        agent: (cm.data || {}).agentRef || '',
+        role: (cm.data || {}).role || '',
+        status: (cm.data || {}).status || '',
+        visionScore: (cm.data || {}).visionScore || '',
+        workDone: ((cm.data || {}).workDone || '').substring(0, 100),
+        prOpened: (cm.data || {}).prOpened || '',
+        generation: (cm.data || {}).generation || '',
+      }));
+    }
+
+    function getTasks(coord) {
+      const queueStr = coord.taskQueue || '';
+      const assignStr = coord.activeAssignments || '';
+      const queued = queueStr.split(',').map(s => s.trim()).filter(Boolean);
+      const claimed = {};
+      assignStr.split(',').forEach(a => {
+        const parts = a.trim().split(':');
+        if (parts.length === 2) claimed[parts[1]] = parts[0];
+      });
+      const tasks = [];
+      queued.forEach(issue => {
+        tasks.push({ issue, status: claimed[issue] ? 'claimed' : 'queued', agent: claimed[issue] || '' });
+      });
+      Object.entries(claimed).forEach(([issue, agent]) => {
+        if (!queued.includes(issue)) tasks.push({ issue, status: 'in-progress', agent });
+      });
+      return tasks.slice(0, 15);
+    }
+
+    function getProblems(agents, coord) {
+      const problems = [];
+      const now = Date.now();
+
+      // Stuck agents (>15 min)
+      agents.filter(a => a.state === 'active' && a.startTime).forEach(a => {
+        const secs = (now - new Date(a.startTime).getTime()) / 1000;
+        if (secs > 900) problems.push({ severity: 'warning', msg: `${a.name}: running ${Math.floor(secs/60)}min (may be stuck)` });
+      });
+
+      // Failed agents
+      agents.filter(a => a.state === 'failed').slice(0, 3).forEach(a => {
+        problems.push({ severity: 'error', msg: `${a.name}: agent failed` });
+      });
+
+      // Coordinator heartbeat
+      if (coord.lastHeartbeat) {
+        const secs = (now - new Date(coord.lastHeartbeat).getTime()) / 1000;
+        if (secs > 120) problems.push({ severity: 'critical', msg: `Coordinator heartbeat missing for ${Math.floor(secs)}s!` });
+      }
+
+      // Routing regression
+      const rc = parseInt(coord.routingCyclesWithZeroSpec || '0', 10);
+      if (rc >= 3) problems.push({ severity: 'warning', msg: `Specialization routing broken for ${rc} consecutive cycles` });
+
+      // Unresolved debates
+      const unresolved = (coord.unresolvedDebates || '').split(',').filter(Boolean).length;
+      if (unresolved > 3) problems.push({ severity: 'warning', msg: `${unresolved} unresolved debates need synthesis` });
+
+      if (problems.length === 0) problems.push({ severity: 'ok', msg: 'No problems detected' });
+      return problems;
+    }
+
+    function getHealth(agents, coord) {
+      const now = Date.now();
+      const issues = [];
+      if (coord.lastHeartbeat && (now - new Date(coord.lastHeartbeat).getTime()) / 1000 > 120) issues.push('coordinator_missing');
+      if (coord.lastPlannerSeen && (now - new Date(coord.lastPlannerSeen).getTime()) / 1000 > 300) issues.push('planner_missing');
+      const active = agents.filter(a => a.state === 'active').length;
+      const failed = agents.filter(a => a.state === 'failed').length;
+      if (failed > active && active > 0) issues.push('high_failure_rate');
+      if (issues.length === 0) return ['HEALTHY', '#3fb950'];
+      if (issues.length === 1) return ['DEGRADED', '#e3b341'];
+      return ['CRITICAL', '#f85149'];
+    }
+
+    function buildData() {
+      const agents = getAgents();
+      const coord = getCoordState();
+      const thoughts = getThoughts();
+      const reports = getReports();
+      const tasks = getTasks(coord);
+      const problems = getProblems(agents, coord);
+      const [health, healthColor] = getHealth(agents, coord);
+
+      // Governance
+      const debateStats = coord.debateStats || '';
+      const unresolvedCount = (coord.unresolvedDebates || '').split(',').filter(Boolean).length;
+      const visionQueue = (coord.visionQueue || '').split(';').map(s => s.trim()).filter(Boolean);
+      const enactedDecisions = (coord.enactedDecisions || '').split('|').map(s => s.trim()).filter(Boolean);
+
+      // Open proposals from thoughts
+      const openProposals = thoughts.filter(t => t.type === 'proposal').slice(0, 5);
+
+      // Extract debate response count
+      let debateResponses = '?';
+      const m = debateStats.match(/responses=(\d+)/);
+      if (m) debateResponses = m[1];
+
+      const activeAgents = agents.filter(a => a.state === 'active');
+      const gen = (activeAgents[0] || {}).generation || '?';
+
+      return {
+        timestamp: new Date().toISOString(),
+        health,
+        healthColor,
+        generation: gen,
+        agents: {
+          active: activeAgents.slice(0, 8),
+          doneCount: agents.filter(a => a.state === 'done').length,
+          failedCount: agents.filter(a => a.state === 'failed').length,
+          total: agents.length,
+        },
+        tasks,
+        thoughts,
+        reports,
+        governance: { debateStats, unresolvedCount, visionQueue, enactedDecisions, openProposals, debateResponses },
+        problems,
+        coordinator: {
+          heartbeat: coord.lastHeartbeat,
+          spawnSlots: coord.spawnSlots,
+          lastPlanner: coord.lastPlannerSeen,
+          specAssignments: coord.specializedAssignments || '0',
+          genericAssignments: coord.genericAssignments || '0',
+          v06Milestone: coord.v06MilestoneStatus,
+          v06Status: coord.v06CriteriaStatus,
+        },
+      };
+    }
+
+    function renderHtml(data) {
+      const { health, healthColor, generation } = data;
+      const active = data.agents.active;
+      const ts = data.timestamp.substring(0, 19).replace('T', ' ') + 'Z';
+
+      // Agents HTML
+      let agentsHtml = active.length ? active.map(a => {
+        const cls = { active: 'symbol-active', done: 'symbol-done', failed: 'symbol-failed', pending: 'symbol-pending' }[a.state] || '';
+        return `<div class="agent-row">
+          <span class="agent-symbol ${cls}">${a.symbol}</span>
+          <span class="agent-name">${esc(a.name.substring(0, 28))}</span>
+          <span class="agent-role">${esc(a.role)}</span>
+          <span class="agent-runtime">${esc(a.runtime)}</span>
+        </div>`;
+      }).join('') : '<div class="empty">No active agents</div>';
+      agentsHtml += `<div style="color:#6e7681;font-size:10px;margin-top:6px;">Active: ${active.length} · Done: ${data.agents.doneCount} · Failed: ${data.agents.failedCount}</div>`;
+
+      // Tasks HTML
+      const tasksHtml = data.tasks.length ? data.tasks.map(t => {
+        const sc = { 'queued': 'status-queued', 'claimed': 'status-claimed', 'in-progress': 'status-inprogress' }[t.status] || 'status-queued';
+        const agentShort = t.agent ? t.agent.substring(Math.max(0, t.agent.length - 22)) : '';
+        return `<div class="task-row">
+          <a class="task-issue" href="https://github.com/pnz1990/agentex/issues/${esc(t.issue)}" target="_blank">#${esc(t.issue)}</a>
+          <span class="task-status ${sc}">${esc(t.status)}</span>
+          <span class="task-agent">${esc(agentShort)}</span>
+        </div>`;
+      }).join('') : '<div class="empty">No tasks in queue</div>';
+
+      // Thoughts/Activity HTML
+      const THOUGHT_TYPE_CLASSES = { insight: 'type-insight', debate: 'type-debate', proposal: 'type-proposal', vote: 'type-vote', planning: 'type-planning', directive: 'type-directive' };
+      const thoughtsHtml = data.thoughts.length ? data.thoughts.map(t => {
+        const tc = THOUGHT_TYPE_CLASSES[t.type] || 'type-other';
+        const agentShort = t.agent ? t.agent.substring(Math.max(0, t.agent.length - 16)) : '?';
+        const content = esc(t.content.replace(/\n/g, ' ').substring(0, 90));
+        return `<div class="thought-row">
+          <span class="thought-time">${fmtTime(t.timestamp)}</span>
+          <span class="thought-agent">${esc(agentShort)}</span>
+          <span class="thought-type ${tc}">${esc((t.type || 'other').substring(0, 8))}</span>
+          <span class="thought-content">${content}</span>
+        </div>`;
+      }).join('') : '<div class="empty">No recent thoughts</div>';
+
+      // Problems HTML
+      const SEV_ICONS = { ok: '✓', warning: '⚠', error: '✕', critical: '‼' };
+      const problemsHtml = data.problems.map(p => {
+        const icon = SEV_ICONS[p.severity] || '?';
+        return `<div class="problem-row">
+          <span class="problem-icon sev-${p.severity}">${icon}</span>
+          <span class="problem-msg sev-${p.severity}">${esc(p.msg)}</span>
+        </div>`;
+      }).join('');
+
+      // Coordinator HTML
+      const coord = data.coordinator;
+      let coordHtml = `
+        <div class="coord-stat"><span class="coord-label">heartbeat </span><span class="coord-val">${fmtTime(coord.heartbeat)}</span></div>
+        <div class="coord-stat"><span class="coord-label">last-planner </span><span class="coord-val">${fmtTime(coord.lastPlanner)}</span></div>
+        <div class="coord-stat"><span class="coord-label">spawn-slots </span><span class="coord-val">${esc(coord.spawnSlots || '?')}</span></div>
+        <div class="coord-stat"><span class="coord-label">spec-routes </span><span class="coord-val">${esc(coord.specAssignments)}</span></div>
+        <div class="coord-stat"><span class="coord-label">generic-routes </span><span class="coord-val">${esc(coord.genericAssignments)}</span></div>
+      `;
+      if (coord.v06Milestone === 'completed') coordHtml += '<div style="color:#3fb950;font-size:11px;margin-top:4px;">✓ v0.6 milestone COMPLETE</div>';
+
+      // Governance HTML
+      const gov = data.governance;
+      let govHtml = `
+        <div class="governance-row">${esc(gov.debateStats || 'no debate stats')}</div>
+        <div class="governance-row">Unresolved debates: <span style="color:#e3b341">${gov.unresolvedCount}</span></div>
+      `;
+      if (gov.visionQueue.length) {
+        govHtml += `<div class="section-label">Vision Queue (${gov.visionQueue.length} items)</div>`;
+        gov.visionQueue.slice(0, 3).forEach(item => {
+          govHtml += `<div class="governance-row" style="color:#bc8cff">▸ ${esc(item.substring(0, 50))}</div>`;
+        });
+      }
+      if (gov.openProposals.length) {
+        govHtml += `<div class="section-label">Open Proposals (${gov.openProposals.length})</div>`;
+        gov.openProposals.slice(0, 3).forEach(p => {
+          govHtml += `<div class="governance-row" style="color:#e3b341">▸ ${esc(p.content.replace(/\n/g,' ').substring(0, 55))}</div>`;
+        });
+      }
+      if (gov.enactedDecisions.length) {
+        govHtml += '<div class="section-label">Recently Enacted</div>';
+        gov.enactedDecisions.slice(-2).forEach(e => {
+          govHtml += `<div class="governance-row" style="color:#3fb950">✓ ${esc(e.substring(0, 55))}</div>`;
+        });
+      }
+
+      // Reports HTML
+      const reportsHtml = data.reports.length ? data.reports.map(r => {
+        const vs = parseInt(r.visionScore || '0', 10);
+        const vsClass = vs >= 7 ? 'vs-high' : vs >= 4 ? 'vs-mid' : 'vs-low';
+        const work = esc(r.workDone.replace(/\n/g,' ').trim().substring(0, 60));
+        const agent = esc(r.agent.substring(Math.max(0, r.agent.length - 22)));
+        return `<div class="report-row">
+          <span class="report-agent">${agent}</span>
+          <span class="report-role">${esc(r.role)}</span>
+          <span class="vision-score ${vsClass}">${esc(r.visionScore || '?')}</span>
+          <span class="report-pr">${esc((r.prOpened || '').substring(0, 20))}</span>
+          <span style="color:#8b949e;flex:1">${work}</span>
+          <span style="color:#6e7681;width:60px;text-align:right">${fmtTime(r.timestamp)}</span>
+        </div>`;
+      }).join('') : '<div class="empty">No recent reports</div>';
+
+      const activeCount = active.length;
+      const failedCount = data.agents.failedCount;
+      const queuedCount = data.tasks.filter(t => t.status === 'queued').length;
+      const failedColor = failedCount > 0 ? '#f85149' : '#6e7681';
+
+      return `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Agentex Observatory</title>
+      <meta http-equiv="refresh" content="${REFRESH}">
+      <style>
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:'Courier New',monospace;background:#0d1117;color:#c9d1d9;font-size:13px;min-height:100vh}
+        .header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;align-items:center;justify-content:space-between}
+        .header-left{display:flex;align-items:center;gap:16px}
+        .title{font-size:16px;font-weight:bold;color:#58a6ff;letter-spacing:1px}
+        .health{padding:3px 10px;border-radius:4px;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:1px}
+        .health-HEALTHY{background:#1a4731;color:#3fb950;border:1px solid #2ea043}
+        .health-DEGRADED{background:#4d3a1a;color:#e3b341;border:1px solid #bb8009}
+        .health-CRITICAL{background:#5d1a1a;color:#f85149;border:1px solid #da3633}
+        .timestamp{color:#6e7681;font-size:11px}
+        .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#30363d}
+        .panel{background:#0d1117;padding:12px;min-height:200px}
+        .panel-title{font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:1px;color:#8b949e;border-bottom:1px solid #21262d;padding-bottom:6px;margin-bottom:10px}
+        .panel-wide{grid-column:span 2}
+        .panel-full{grid-column:span 3}
+        .agent-row{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid #161b22}
+        .agent-symbol{font-size:10px;width:14px;text-align:center}
+        .symbol-active{color:#3fb950}.symbol-done{color:#6e7681}.symbol-failed{color:#f85149}.symbol-pending{color:#e3b341}
+        .agent-name{color:#58a6ff;flex:1;font-size:12px}
+        .agent-role{color:#8b949e;width:80px;font-size:11px}
+        .agent-runtime{color:#6e7681;width:50px;font-size:11px;text-align:right}
+        .task-row{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid #161b22}
+        .task-issue{color:#58a6ff;width:60px;font-size:12px}
+        .task-status{width:80px;font-size:10px;padding:1px 5px;border-radius:3px;text-align:center}
+        .status-queued{background:#1c2128;color:#6e7681}
+        .status-claimed{background:#1a3a4d;color:#58a6ff}
+        .status-inprogress{background:#1a4731;color:#3fb950}
+        .task-agent{color:#8b949e;flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .thought-row{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #161b22;font-size:11px}
+        .thought-time{color:#6e7681;width:50px;flex-shrink:0}
+        .thought-agent{color:#58a6ff;width:100px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .thought-type{width:70px;flex-shrink:0;font-size:10px;padding:1px 4px;border-radius:3px;text-align:center}
+        .type-insight{background:#1a3a4d;color:#79c0ff}
+        .type-debate{background:#2d1b4e;color:#bc8cff}
+        .type-proposal{background:#4d3a1a;color:#e3b341}
+        .type-vote{background:#1a4d3a;color:#3fb950}
+        .type-planning{background:#2d2d1b;color:#d29922}
+        .type-directive{background:#4d1a1a;color:#f85149}
+        .type-other{background:#1c2128;color:#8b949e}
+        .thought-content{color:#c9d1d9;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .problem-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #161b22}
+        .problem-icon{width:14px;text-align:center}
+        .sev-ok{color:#3fb950}.sev-warning{color:#e3b341}.sev-error{color:#f85149}.sev-critical{color:#ff7b72;font-weight:bold}
+        .problem-msg{flex:1;font-size:12px}
+        .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+        .stat-box{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:8px;text-align:center}
+        .stat-value{font-size:24px;font-weight:bold;color:#58a6ff}
+        .stat-label{font-size:10px;color:#6e7681;text-transform:uppercase;letter-spacing:1px}
+        .governance-row{padding:3px 0;border-bottom:1px solid #161b22;font-size:11px}
+        .section-label{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin:6px 0 3px 0}
+        .report-row{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #161b22;font-size:11px}
+        .report-agent{color:#58a6ff;width:120px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .report-role{color:#8b949e;width:70px}
+        .vision-score{width:24px;height:16px;display:inline-flex;align-items:center;justify-content:center;border-radius:3px;font-size:10px;font-weight:bold}
+        .vs-high{background:#1a4731;color:#3fb950}
+        .vs-mid{background:#4d3a1a;color:#e3b341}
+        .vs-low{background:#1c2128;color:#6e7681}
+        .report-pr{color:#3fb950;flex:1}
+        .footer{background:#161b22;border-top:1px solid #30363d;padding:8px 20px;font-size:10px;color:#6e7681;display:flex;justify-content:space-between}
+        .tag{display:inline-block;font-size:9px;padding:1px 4px;border-radius:3px;border:1px solid #30363d;color:#8b949e;margin-right:3px}
+        .coord-stat{display:inline-block;margin-right:12px}
+        .coord-label{color:#6e7681;font-size:10px}
+        .coord-val{color:#c9d1d9;font-size:11px}
+        .empty{color:#6e7681;font-style:italic;font-size:11px;padding:4px 0}
+        a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <div class="header-left">
+          <span class="title">⬡ AGENTEX OBSERVATORY</span>
+          <span class="health health-${health}">${health}</span>
+          <span class="tag">Gen ${generation}</span>
+          <span class="tag">${activeCount} active / ${data.agents.total} total</span>
+        </div>
+        <span class="timestamp">Updated: ${ts} · Refreshes every ${REFRESH}s</span>
+      </div>
+
+      <div style="background:#0d1117;padding:12px 12px 0 12px;">
+        <div class="stat-grid">
+          <div class="stat-box"><div class="stat-value" style="color:#3fb950">${activeCount}</div><div class="stat-label">Active Agents</div></div>
+          <div class="stat-box"><div class="stat-value" style="color:#58a6ff">${queuedCount}</div><div class="stat-label">Queued Tasks</div></div>
+          <div class="stat-box"><div class="stat-value" style="color:#bc8cff">${esc(gov.debateResponses)}</div><div class="stat-label">Debate Responses</div></div>
+          <div class="stat-box"><div class="stat-value" style="color:${failedColor}">${failedCount}</div><div class="stat-label">Failed Agents</div></div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <div class="panel-title">⬡ Agents</div>
+          ${agentsHtml}
+        </div>
+        <div class="panel">
+          <div class="panel-title">⬡ Work Queue</div>
+          ${tasksHtml}
+        </div>
+        <div class="panel">
+          <div class="panel-title">⬡ Problems</div>
+          ${problemsHtml}
+          <div class="section-label" style="margin-top:10px;">Coordinator</div>
+          ${coordHtml}
+        </div>
+        <div class="panel panel-wide">
+          <div class="panel-title">⬡ Activity Feed (Thoughts)</div>
+          ${thoughtsHtml}
+        </div>
+        <div class="panel">
+          <div class="panel-title">⬡ Governance &amp; Debate</div>
+          ${govHtml}
+        </div>
+        <div class="panel panel-full">
+          <div class="panel-title">⬡ Recent Agent Reports</div>
+          ${reportsHtml}
+        </div>
+      </div>
+
+      <div class="footer">
+        <span>Agentex Observatory · <a href="https://github.com/pnz1990/agentex" target="_blank">pnz1990/agentex</a> · issue #1836</span>
+        <span>Data: Kubernetes Jobs + ConfigMaps · kubectl port-forward svc/agentex-dashboard 8080:8080 -n agentex</span>
+      </div>
+    </body>
+    </html>`;
+    }
+
+    const server = http.createServer((req, res) => {
+      const path = new URL(req.url, `http://localhost`).pathname;
+
+      if (path === '/health') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+        return;
+      }
+
+      if (path === '/api/dashboard') {
+        try {
+          const data = buildData();
+          const body = JSON.stringify(data, null, 2);
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(body);
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end(`Error: ${e.message}`);
+        }
+        return;
+      }
+
+      if (path === '/' || path === '/dashboard') {
+        try {
+          const data = buildData();
+          const html = renderHtml(data);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(html);
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end(`Error building dashboard: ${e.message}\n${e.stack}`);
+        }
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+    });
+
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Agentex Observatory running on port ${PORT}`);
+      console.log(`Dashboard: http://localhost:${PORT}/`);
+      console.log(`JSON API:  http://localhost:${PORT}/api/dashboard`);
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentex-dashboard
+  namespace: agentex
+  labels:
+    app: agentex
+    component: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentex-dashboard
+  template:
+    metadata:
+      labels:
+        app: agentex-dashboard
+        app.kubernetes.io/name: agentex-dashboard
+    spec:
+      serviceAccountName: agentex-agent-sa
+      containers:
+        - name: dashboard
+          image: agentex/runner:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              # Configure kubectl for in-cluster access
+              kubectl config set-cluster local \
+                --server=https://kubernetes.default.svc \
+                --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              kubectl config set-credentials sa \
+                --token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              kubectl config set-context local --cluster=local --user=sa --namespace=agentex
+              kubectl config use-context local
+              echo "kubectl configured"
+              # Extract the Node.js server from the ConfigMap and run it
+              kubectl get configmap agentex-dashboard-server -n agentex \
+                -o jsonpath='{.data.server\.js}' > /tmp/dashboard-server.js
+              echo "Starting dashboard server..."
+              exec node /tmp/dashboard-server.js
+          env:
+            - name: NAMESPACE
+              value: agentex
+            - name: DASHBOARD_PORT
+              value: "8080"
+            - name: DASHBOARD_REFRESH
+              value: "15"
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentex-dashboard
+  namespace: agentex
+  labels:
+    app: agentex
+    component: dashboard
+  annotations:
+    # To expose externally:
+    # kubectl patch svc agentex-dashboard -n agentex -p '{"spec":{"type":"LoadBalancer"}}'
+spec:
+  type: ClusterIP
+  selector:
+    app: agentex-dashboard
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http

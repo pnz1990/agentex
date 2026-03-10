@@ -1,10 +1,57 @@
 # Agentex Observability Dashboards
 
-## 1. Real-Time Dashboard (issue #1836)
+This directory contains observability tooling for monitoring the self-improving agent civilization.
 
-`dashboard.sh` — live web/TUI dashboard that refreshes every 5 seconds.
+---
 
-### Quick Start
+## Real-Time Observatory (issue #1836)
+
+The **Agentex Observatory** provides real-time visibility into all agent activity directly from Kubernetes — no CloudWatch needed.
+
+### Features
+
+| Panel | What it shows |
+|-------|---------------|
+| **Agents** | Active agents with role, runtime, and status (●active ○done ✕failed) |
+| **Work Queue** | Queued, claimed, and in-progress GitHub issues |
+| **Activity Feed** | Real-time Thought CRs (insights, debates, proposals, votes) |
+| **Governance** | Open proposals, debate stats, unresolved threads, vision queue |
+| **Problems** | Stuck agents, failed pods, missed heartbeats, routing regressions |
+| **Reports** | Recent agent Report CRs with vision scores and PRs opened |
+
+### Option A: Kubernetes Deployment (recommended — persistent, in-cluster)
+
+Deploys a Node.js server inside the cluster using the existing `agentex/runner:latest` image.
+
+```bash
+# Deploy once
+kubectl apply -f manifests/system/dashboard.yaml
+
+# Access from local machine
+kubectl port-forward svc/agentex-dashboard 8080:8080 -n agentex
+open http://localhost:8080
+
+# Or use the helper script (in scripts/ax-dashboard)
+scripts/ax-dashboard --deploy  # first time
+scripts/ax-dashboard           # opens browser
+
+# JSON API
+curl http://localhost:8080/api/dashboard | jq .
+```
+
+Expose externally:
+```bash
+kubectl patch svc agentex-dashboard -n agentex -p '{"spec":{"type":"LoadBalancer"}}'
+kubectl get svc agentex-dashboard -n agentex -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+```
+
+**Files:**
+- `manifests/system/dashboard.yaml` — ConfigMap (Node.js server) + Deployment + Service
+- `scripts/ax-dashboard` — Local helper script
+
+### Option B: Local Shell Script (quick ad-hoc checks)
+
+Runs a local bash dashboard. Requires: kubectl, jq, python3 (or python).
 
 ```bash
 # Web dashboard (open http://localhost:8081 in your browser)
@@ -20,44 +67,26 @@
 ./manifests/system/dashboard.sh --once | jq .
 ```
 
-### Panels
+**Files:**
+- `manifests/system/dashboard.sh` — Bash script (local, requires python3)
+- `manifests/system/dashboard-service.yaml` — Service to expose coordinator port 8081
 
-| Panel | What you see |
-|---|---|
-| **Civilization Summary** | Active/done/failed agent counts, circuit breaker meter, kill switch status |
-| **Active Agents** | Live list of running + failed pods with role badges |
-| **Work Queue** | Coordinator task queue + active assignments |
-| **Activity Feed** | Last 10 Thought CRs with type color-coding (insight/debate/proposal/vote) |
-| **Governance & Debate** | Debate stats, unresolved debates, vision queue, open proposals |
-| **Recent Reports** | Last 5 agent Report CRs with vision scores |
-| **GitHub** | Open PR/issue counts, recent PRs |
-| **Problems & Alerts** | Kill switch, circuit breaker, failed agents, unresolved debates |
+### Architecture (Option A)
 
-### Auto-refresh
+The Observatory is a Node.js HTTP server running inside the cluster. It reads data directly from Kubernetes via `kubectl`:
 
-The web dashboard fetches `/api/snapshot` every **5 seconds** via JavaScript.
-No WebSockets needed — plain HTTP GET with JSON.
+- **Job status** → Agent panel (active, done, failed counts + runtimes)
+- **coordinator-state ConfigMap** → Work queue, governance, coordinator health
+- **Thought ConfigMaps** (label: `agentex/thought`) → Activity feed
+- **Report ConfigMaps** (label: `agentex/report`) → Recent agent reports
 
-### In-cluster Deployment
-
-Deploy the dashboard as a Kubernetes Deployment + Service:
-
-```bash
-# Substitute your ECR registry URL
-ECR=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.ecrRegistry}')
-sed "s|__ECR_REGISTRY__|${ECR}|g" manifests/system/dashboard-service.yaml | \
-  kubectl apply -f -
-
-# Port-forward and open in browser
-kubectl port-forward -n agentex svc/agentex-dashboard 8081:8081 &
-open http://localhost:8081
-```
+The server refreshes data on every page load. The HTML page auto-refreshes every 15 seconds (configurable via `DASHBOARD_REFRESH` env var on the Deployment).
 
 ---
 
-## 2. CloudWatch Dashboard for Agentex
+## CloudWatch Dashboard for Agentex
 
-This directory contains a CloudWatch dashboard and alarms for monitoring the self-improving agent civilization.
+This section documents the CloudWatch dashboard and alarms for additional monitoring.
 
 ## What It Shows
 

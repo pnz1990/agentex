@@ -1,0 +1,162 @@
+#!/bin/bash
+# ax-dashboard — Agentex Observatory quick-access script (issue #1836)
+#
+# Usage:
+#   ax-dashboard           # Open dashboard in browser via port-forward
+#   ax-dashboard --deploy  # Deploy the dashboard to the cluster
+#   ax-dashboard --web     # Port-forward without opening browser
+#   ax-dashboard --json    # Print dashboard JSON snapshot to stdout
+#
+# Requirements: kubectl, gh (optional), python3 (optional for local mode)
+
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-agentex}"
+PORT="${DASHBOARD_PORT:-8080}"
+SVC="agentex-dashboard"
+
+usage() {
+  cat <<EOF
+ax-dashboard — Agentex Observatory
+
+USAGE:
+  ax-dashboard [options]
+
+OPTIONS:
+  (none)          Port-forward and open dashboard in browser
+  --deploy        Deploy dashboard to cluster (first time setup)
+  --web           Port-forward without opening browser (prints URL)
+  --json          Print current dashboard snapshot as JSON
+  --status        Show dashboard deployment status
+  --help          Show this help
+
+FIRST-TIME SETUP:
+  # 1. Deploy the dashboard server
+  ax-dashboard --deploy
+
+  # 2. Open in browser
+  ax-dashboard
+
+  # Or open manually after port-forwarding:
+  ax-dashboard --web
+  # Then open: http://localhost:8080
+
+DIRECT ACCESS (no port-forward needed):
+  # Expose as LoadBalancer for external access:
+  kubectl patch svc agentex-dashboard -n agentex -p '{"spec":{"type":"LoadBalancer"}}'
+  kubectl get svc agentex-dashboard -n agentex -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+EOF
+}
+
+deploy() {
+  echo "Deploying Agentex Observatory..."
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  MANIFEST="${SCRIPT_DIR}/../manifests/system/dashboard.yaml"
+
+  if [ ! -f "$MANIFEST" ]; then
+    echo "ERROR: Could not find dashboard.yaml at $MANIFEST"
+    echo "Run from the agentex repo root or specify MANIFEST path."
+    exit 1
+  fi
+
+  kubectl apply -f "$MANIFEST"
+  echo ""
+  echo "Waiting for dashboard pod to be ready..."
+  kubectl rollout status deployment/agentex-dashboard -n "$NAMESPACE" --timeout=120s
+  echo ""
+  echo "Dashboard deployed! Run 'ax-dashboard' to open in browser."
+}
+
+port_forward() {
+  local open_browser="${1:-true}"
+  echo "Starting port-forward to agentex-dashboard service..."
+
+  # Check if deployment exists
+  if ! kubectl get svc "$SVC" -n "$NAMESPACE" &>/dev/null; then
+    echo "ERROR: Dashboard not deployed. Run: ax-dashboard --deploy"
+    exit 1
+  fi
+
+  local url="http://localhost:${PORT}"
+  echo "Dashboard URL: ${url}"
+  echo "JSON API:      ${url}/api/dashboard"
+  echo "Press Ctrl+C to stop"
+  echo ""
+
+  if [ "$open_browser" = "true" ]; then
+    # Open browser after a short delay
+    (sleep 2 && (
+      if command -v open &>/dev/null; then
+        open "$url"
+      elif command -v xdg-open &>/dev/null; then
+        xdg-open "$url"
+      elif command -v start &>/dev/null; then
+        start "$url"
+      fi
+    ) &>/dev/null &)
+  fi
+
+  kubectl port-forward "svc/${SVC}" "${PORT}:8080" -n "$NAMESPACE"
+}
+
+get_json() {
+  # Try port-forward approach, or just query coordinator state directly
+  if kubectl get svc "$SVC" -n "$NAMESPACE" &>/dev/null; then
+    # If already port-forwarded, hit the API
+    if curl -sf "http://localhost:${PORT}/api/dashboard" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  # Fallback: print raw coordinator state
+  echo "{"
+  echo "  \"note\": \"Dashboard server not running. Start with: ax-dashboard\","
+  echo "  \"coordinator_state\": {"
+  echo "    \"taskQueue\": \"$(kubectl get configmap coordinator-state -n "$NAMESPACE" -o jsonpath='{.data.taskQueue}' 2>/dev/null)\","
+  echo "    \"activeAssignments\": \"$(kubectl get configmap coordinator-state -n "$NAMESPACE" -o jsonpath='{.data.activeAssignments}' 2>/dev/null)\","
+  echo "    \"debateStats\": \"$(kubectl get configmap coordinator-state -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)\","
+  echo "    \"spawnSlots\": \"$(kubectl get configmap coordinator-state -n "$NAMESPACE" -o jsonpath='{.data.spawnSlots}' 2>/dev/null)\""
+  echo "  },"
+  echo "  \"active_jobs\": $(kubectl get jobs -n "$NAMESPACE" --no-headers 2>/dev/null | grep -c "1/1\|Running\|0/1" || echo 0)"
+  echo "}"
+}
+
+status() {
+  echo "=== Agentex Observatory Status ==="
+  if kubectl get deployment agentex-dashboard -n "$NAMESPACE" &>/dev/null; then
+    kubectl get deployment agentex-dashboard -n "$NAMESPACE"
+    echo ""
+    kubectl get pods -n "$NAMESPACE" -l "app=agentex-dashboard"
+    echo ""
+    kubectl get svc agentex-dashboard -n "$NAMESPACE"
+  else
+    echo "Dashboard not deployed. Run: ax-dashboard --deploy"
+  fi
+}
+
+case "${1:-}" in
+  --deploy)
+    deploy
+    ;;
+  --web)
+    port_forward false
+    ;;
+  --json)
+    get_json
+    ;;
+  --status)
+    status
+    ;;
+  --help|-h)
+    usage
+    ;;
+  "")
+    port_forward true
+    ;;
+  *)
+    echo "Unknown option: $1"
+    usage
+    exit 1
+    ;;
+esac
