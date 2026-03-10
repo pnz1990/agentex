@@ -566,8 +566,10 @@ tally_and_enact_votes() {
     trap "rm -f '$thoughts_file'" RETURN
 
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
-    kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
-        | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
+    # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
+    # (causes OOM kill — coordinator only has 512Mi limit)
+    kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+        | jq '[.items[] | {
             agent: (.data.agentRef // "unknown"),
             content: (.data.content // ""),
             type: (.data.thoughtType // ""),
@@ -779,8 +781,10 @@ Vision score: 9/10 — prioritize implementation."
 track_debate_activity() {
     local all_cm
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
-    all_cm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -o json 2>/dev/null \
-        | jq '[.items[] | select(.metadata.name | endswith("-thought")) | {
+    # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
+    # (causes OOM kill — coordinator only has 512Mi limit)
+    all_cm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
+        | jq '[.items[] | {
             name: .metadata.name,
             type: (.data.thoughtType // ""),
             parent: (.data.parentRef // ""),
