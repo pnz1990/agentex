@@ -44,6 +44,11 @@ claim_identity() {
       if [[ -n "$AGENT_DISPLAY_NAME" ]]; then
         echo "[identity] Restored identity: $AGENT_DISPLAY_NAME"
         [[ -n "$AGENT_SPECIALIZATION" ]] && echo "[identity] Specialization: $AGENT_SPECIALIZATION"
+        # Issue #1166: Set AGENT_IDENTITY_FILE so update_identity_stats() and
+        # update_specialization() can persist stats to S3.
+        # Without this, all stat update calls silently return 0 because the guard
+        # `[[ -z "$AGENT_IDENTITY_FILE" ]]` in update_identity_stats() triggers.
+        AGENT_IDENTITY_FILE="$s3_identity_path"
         return 0
       fi
     fi
