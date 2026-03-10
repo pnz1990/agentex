@@ -409,6 +409,15 @@ ensure_state_fields_initialized() {
       -p '{"data":{"v06CriteriaStatus":""}}' 2>/dev/null || true
   fi
 
+  # activeSwarms (issue #1782): pipe-separated "swarm_name:issue_number" entries tracking
+  # coordinator-spawned swarms for swarm-eligible issues. Written by spawn_swarm_for_issue()
+  # and read by check_v06_milestone() to count live swarm formations.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("activeSwarms")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing activeSwarms (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -3871,6 +3880,122 @@ find_best_agent_for_issue() {
     fi
 }
 
+# ── spawn_swarm_for_issue() (issue #1782) ────────────────────────────────────
+# Coordinator-driven swarm spawning: auto-spawn a Swarm CR for GitHub issues
+# labeled "swarm-eligible" or "multi-domain". Called from route_tasks_by_specialization()
+# before single-worker assignment.
+#
+# Steps:
+#   1. Check issue labels for swarm-eligible / multi-domain signal
+#   2. Create a Task CR (planner task) for the swarm planner
+#   3. Create a Swarm CR referencing the task (kro spawns the planner Job)
+#   4. Record swarm name in coordinator-state.activeSwarms
+#
+# Returns:
+#   0 — swarm was spawned (caller should skip single-worker assignment)
+#   1 — issue is not swarm-eligible (caller proceeds with normal routing)
+spawn_swarm_for_issue() {
+    local issue_number="$1"
+    local issue_labels="$2"  # comma-separated label string
+    local issue_title="$3"
+
+    # Check swarm eligibility: labels swarm-eligible or multi-domain
+    if ! echo "$issue_labels" | grep -qE "(^|,)(swarm-eligible|multi-domain)(,|$)"; then
+        return 1
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] SWARM SPAWN: issue #${issue_number} is swarm-eligible (labels: ${issue_labels})"
+
+    local ts
+    ts=$(date +%s)
+    local swarm_name="swarm-issue-${issue_number}-${ts}"
+    local task_name="task-${swarm_name}"
+    local swarm_goal="Collectively resolve GitHub issue #${issue_number}: ${issue_title}"
+
+    # Step 1: Create Task CR for the swarm planner (kro creates the ConfigMap)
+    if ! kubectl_with_timeout 15 apply -f - <<TASKEOF 2>/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${NAMESPACE}
+spec:
+  title: "Swarm: resolve issue #${issue_number}"
+  description: "${swarm_goal}"
+  role: planner
+  effort: L
+  githubIssue: ${issue_number}
+  swarmRef: "${swarm_name}"
+TASKEOF
+    then
+        echo "[$(date -u +%H:%M:%S)] WARNING: spawn_swarm_for_issue: failed to create Task CR ${task_name} — skipping swarm spawn"
+        return 1
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] SWARM SPAWN: Task CR ${task_name} created for swarm planner"
+
+    # Step 2: Wait briefly for kro to create the Task ConfigMap (spec CM must exist before Swarm CR)
+    local spec_cm="${task_name}-spec"
+    local wait_iter=0
+    while [ $wait_iter -lt 6 ]; do
+        if kubectl_with_timeout 5 get configmap "${spec_cm}" -n "$NAMESPACE" &>/dev/null; then
+            break
+        fi
+        sleep 2
+        wait_iter=$((wait_iter + 1))
+    done
+
+    # Step 3: Create Swarm CR (kro spawns a planner Job using plannerTaskRef)
+    # Read portability values from constitution
+    local ecr_registry
+    ecr_registry=$(kubectl_with_timeout 5 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
+    local github_repo="${GITHUB_REPO:-pnz1990/agentex}"
+    local cluster_name
+    cluster_name=$(kubectl_with_timeout 5 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "agentex")
+
+    if ! kubectl_with_timeout 15 apply -f - <<SWARMEOF 2>/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/issue: "${issue_number}"
+    agentex/origin: coordinator-spawned
+spec:
+  goal: "${swarm_goal}"
+  plannerTaskRef: "${task_name}"
+  maxAgents: 3
+  workers: 2
+  githubRepo: "${github_repo}"
+  clusterName: "${cluster_name}"
+  imageRegistry: "${ecr_registry}"
+SWARMEOF
+    then
+        echo "[$(date -u +%H:%M:%S)] WARNING: spawn_swarm_for_issue: failed to create Swarm CR ${swarm_name}"
+        return 1
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] SWARM SPAWN: Swarm CR ${swarm_name} created for issue #${issue_number}"
+
+    # Step 4: Track swarm in coordinator-state.activeSwarms
+    # Format: pipe-separated "swarm_name:issue_number" entries
+    local cur_swarms
+    cur_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    local new_entry="${swarm_name}:${issue_number}"
+    if [ -z "$cur_swarms" ]; then
+        update_state "activeSwarms" "$new_entry"
+    else
+        update_state "activeSwarms" "${cur_swarms}|${new_entry}"
+    fi
+
+    push_metric "SwarmSpawned" 1 "Count" "IssueNumber=${issue_number}"
+    echo "[$(date -u +%H:%M:%S)] SWARM SPAWN: recorded ${swarm_name} in coordinator-state.activeSwarms"
+    return 0
+}
+
 # Perform identity-based task routing cycle:
 # For each issue in the task queue that is NOT yet assigned, attempt to find
 # a specialized agent. Record routing decisions and emit metrics.
@@ -3965,6 +4090,24 @@ route_tasks_by_specialization() {
         if [ -z "$issue_labels" ]; then
             issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
                 --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        fi
+
+        # Issue #1782: Check if issue is swarm-eligible BEFORE single-worker assignment.
+        # Issues labeled "swarm-eligible" or "multi-domain" are dispatched to a Swarm CR
+        # instead of a single worker. spawn_swarm_for_issue() returns 0 on success,
+        # and we skip normal single-worker routing for this issue.
+        if echo "$issue_labels" | grep -qE "(^|,)(swarm-eligible|multi-domain)(,|$)"; then
+            local issue_title
+            issue_title=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+                --json title --jq '.title' 2>/dev/null || echo "Issue #${issue_num}")
+            if spawn_swarm_for_issue "$issue_num" "$issue_labels" "$issue_title"; then
+                echo "[$(date -u +%H:%M:%S)] Issue #${issue_num} dispatched to coordinator-spawned swarm — skipping single-worker assignment"
+                specialized_count=$((specialized_count + 1))
+                routing_log="${routing_log}${issue_num}:swarm-${issue_num};"
+                continue
+            fi
+            # spawn_swarm_for_issue failed — fall through to single-worker assignment
+            echo "[$(date -u +%H:%M:%S)] WARNING: swarm spawn failed for issue #${issue_num} — falling back to single-worker routing"
         fi
 
         # Find best specialized agent

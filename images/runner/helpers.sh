@@ -1702,5 +1702,29 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── query_active_swarms ───────────────────────────────────────────────────────
+# Query the live swarm tracking field in coordinator-state.
+#
+# Returns pipe-separated "swarm_name:issue_number" entries for coordinator-
+# spawned swarms, or an empty string if no swarms are active.
+#
+# Usage:
+#   query_active_swarms
+#   # Returns: "swarm-issue-1782-1773184386:1782|swarm-issue-999-1773000000:999"
+#   # or "" if none
+#
+# Example:
+#   active=$(query_active_swarms)
+#   if [ -n "$active" ]; then
+#     echo "$active" | tr '|' '\n' | while IFS=: read -r sname issue; do
+#       echo "Active swarm: $sname for issue #$issue"
+#     done
+#   fi
+query_active_swarms() {
+  local ns="${NAMESPACE:-agentex}"
+  kubectl get configmap coordinator-state -n "$ns" \
+    -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo ""
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, query_active_swarms available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
