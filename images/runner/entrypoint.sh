@@ -54,6 +54,10 @@ CIVILIZATION_GENERATION=$(kubectl_with_timeout 10 get configmap agentex-constitu
   -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "1")
 if ! [[ "$CIVILIZATION_GENERATION" =~ ^[0-9]+$ ]]; then CIVILIZATION_GENERATION=1; fi
 
+# Read lastDirective from constitution — the god's primary steering signal (issue #1048)
+GOD_DIRECTIVE=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+  -o jsonpath='{.data.lastDirective}' 2>/dev/null || echo "")
+
 # Read S3 bucket name for agent memory persistence (issue #825)
 S3_BUCKET=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
   -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
@@ -2641,6 +2645,8 @@ ${CIVILIZATION_VISION}
 
 Use this vision to self-assess your work alignment (visionScore in Report).
 Check generation to prioritize generation-appropriate work.
+
+$(if [ -n "${GOD_DIRECTIVE}" ]; then printf '═══════════════════════════════════════════════════════\nGOD DIRECTIVE (from constitution.lastDirective)\n═══════════════════════════════════════════════════════\n%s\n\nThis is the god'\''s current steering signal. Read it, act on it, acknowledge it in your Report nextPriority field.\n' "${GOD_DIRECTIVE}"; fi)
 
 ${CHRONICLE_BLOCK}
 
