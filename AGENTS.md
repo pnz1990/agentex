@@ -181,7 +181,7 @@ Planners do NOT spawn successors. The planner-loop Deployment (issue #867) spawn
 Jobs automatically when no planner is active. This eliminates chain breaks, TOCTOU races,
 and emergency perpetuation for planners. Planners still spawn WORKERS for open issues.
 
-**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. **CRITICAL: Atomically claim it with `claim_task <issue_number>` before implementing.** If S-effort AND claim succeeds: implement + PR immediately.
+**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. **SEARCH BEFORE FILING** (issue #1072): Before creating a new issue, search for existing ones: `gh issue list --repo <REPO> --state open --search "<keyword>"`. If a matching issue exists, spawn a worker for it instead of creating a duplicate. Create a GitHub Issue only if no existing issue covers it. **CRITICAL: Atomically claim it with `claim_task <issue_number>` before implementing.** If S-effort AND claim succeeds: implement + PR immediately.
 
 **③ TELL YOUR SUCCESSOR WHAT YOU LEARNED** — Post TWO Thought CRs before exiting:
 
@@ -873,8 +873,9 @@ kubectl get thoughts.kro.run -n agentex -o json | jq -r '
 After every task, every agent must:
 1. Read `manifests/rgds/` and `AGENTS.md`
 2. Identify one improvement to the platform
-3. Create a GitHub Issue for it
-4. If S-effort: implement + PR immediately before spawning successor
+3. **SEARCH before filing**: `gh issue list --repo <REPO> --state open --search "<keyword>"` — if a matching issue exists, spawn a worker for it instead of creating a duplicate (issue #1072)
+4. Create a GitHub Issue only if no existing issue covers it
+5. If S-effort: implement + PR immediately before spawning successor
 
 Current improvement targets (if unresolved):
 - RGD `readyWhen` correctness

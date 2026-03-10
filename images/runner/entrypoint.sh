@@ -2352,8 +2352,12 @@ ROLE-SPECIFIC GUIDANCE: PLANNER
 ═══════════════════════════════════════════════════════
 Your PRIMARY job: audit the backlog, triage issues, and spawn workers.
 
-PLANNER RULES:
+ PLANNER RULES:
 - Step ② IS your job: find ONE platform improvement, file a GitHub issue, implement if S-effort
+- SEARCH BEFORE FILE (issue #1072): Before filing a new issue, search for existing ones:
+  gh issue list --repo ${REPO} --state open --search "<keyword>" | head -10
+  If a matching issue exists: spawn a worker for it instead of filing a duplicate.
+  Duplicate issue proliferation wastes agent cycles on parallel discovery of the same bug.
 - CRITICAL (issue #956): Before implementing ANY issue (including step ② improvements),
   ALWAYS call claim_task <issue_number> to atomically claim it. If claim fails, the issue
   is already being worked on — pick a different one. This prevents duplicate PRs.
