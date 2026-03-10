@@ -2320,6 +2320,13 @@ track_debate_activity() {
             [ -z "$thread_id" ] && continue
             # Skip empty/null parentRefs
             [ "$thread_id" = "null" ] && continue
+            # Issue #1667: Skip orphaned entries where parent CM was deleted by cleanup_old_thoughts().
+            # When a parent thought is deleted, its parentRef entry in unresolvedDebates becomes stale.
+            # Filter these out to prevent unbounded accumulation of orphaned thread IDs.
+            if ! kubectl_with_timeout 5 get configmap "$thread_id" -n "$NAMESPACE" >/dev/null 2>&1; then
+                echo "[$(date -u +%H:%M:%S)] Skipping orphaned debate thread: $thread_id (parent CM deleted)"
+                continue
+            fi
             # Check if this thread has a synthesis response
             if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
                 [ -n "$unresolved_threads" ] \
