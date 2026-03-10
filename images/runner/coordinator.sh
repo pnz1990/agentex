@@ -762,19 +762,74 @@ tally_and_enact_votes() {
         
         echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
         
-        # Get most recent proposal declaration line for this topic (issue #1222)
-        # BUG FIX: Previously used `| tail -1` on multi-line jq output — when 2+ proposals exist,
-        # jq concatenates all their content with newlines, and tail -1 returns the last line of the
-        # COMBINED output (often an empty line after the trailing newline), causing `[ -z "$proposal_content" ]`
-        # to skip ALL proposals silently. The governance engine was completely broken.
+        # Issue #1286 FIX: Select the proposal whose values match the most approve votes.
         #
-        # FIX: Extract only the #proposal-<topic> declaration lines (one per proposal), then take the
-        # last one (most recently written in jq output order). This is all kv_pairs extraction needs.
-        local proposal_content
-        proposal_content=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
+        # PROBLEM: When multiple proposals exist for the same topic with different values,
+        # the old code took the most recent proposal (tail -1), regardless of which proposal
+        # actually received the most votes. This caused wrong values to be enacted:
+        # e.g., circuitBreakerLimit=5 was enacted even though 27+ votes supported 10-12.
+        #
+        # FIX APPROACH: For each candidate proposal declaration line, count how many approve
+        # votes contain that proposal's key=value pairs. Use the proposal with the most votes.
+        # Falls back to the most recent proposal if no vote-matched proposal is found.
+        #
+        # Background: Issue #1222 fixed the previous bug where jq concatenated multiple proposals
+        # and tail -1 returned an empty trailing line. This fix builds on that to also handle
+        # WHICH proposal to pick when multiple valid proposals exist.
+
+        # Step 1: Collect all candidate proposal lines for this topic
+        local all_proposal_lines
+        all_proposal_lines=$(jq -r ".[] | select(.type == \"proposal\" and (.content | contains(\"#proposal-$topic\"))) | .content" \
             "$thoughts_file" 2>/dev/null \
-            | grep "^#proposal-${topic}" | tail -1 || true)
+            | grep "^#proposal-${topic}" || true)
+
+        [ -z "$all_proposal_lines" ] && continue
+
+        # Step 2: For each candidate proposal, count matching approve votes
+        # An approve vote "matches" a proposal if the vote content contains the proposal's key=value pairs.
+        local best_proposal_content=""
+        local best_vote_count=-1
         
+        while IFS= read -r candidate_line; do
+            [ -z "$candidate_line" ] && continue
+            # Extract key=value pairs from this candidate (excluding reason=)
+            local candidate_kv
+            candidate_kv=$(echo "$candidate_line" | grep -oE '[a-zA-Z0-9_]+=[a-zA-Z0-9_.-]+' \
+                | grep -v '^reason=' || true)
+            if [ -z "$candidate_kv" ]; then
+                # No actionable kv_pairs, skip
+                continue
+            fi
+            # Count approve votes that contain ALL of this proposal's key=value pairs
+            local vote_count=0
+            while IFS= read -r kv; do
+                [ -z "$kv" ] && continue
+                local kv_vote_count
+                kv_vote_count=$(jq -r ".[] | select(.type == \"vote\" and (.content | (contains(\"#vote-$topic\") and contains(\"approve\") and contains(\"$kv\")))) | .agent" \
+                    "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+                # Use the minimum count across all key=value pairs (all must match)
+                if [ "$vote_count" -eq 0 ] || [ "$kv_vote_count" -lt "$vote_count" ]; then
+                    vote_count="$kv_vote_count"
+                fi
+            done <<< "$candidate_kv"
+            
+            echo "[$(date -u +%H:%M:%S)]   Proposal candidate: $candidate_line (matching_votes=$vote_count)"
+            
+            if [ "$vote_count" -gt "$best_vote_count" ]; then
+                best_vote_count="$vote_count"
+                best_proposal_content="$candidate_line"
+            fi
+        done <<< "$all_proposal_lines"
+
+        # Step 3: If no vote-matched proposal found (no votes contain kv pairs), fall back to most recent
+        if [ -z "$best_proposal_content" ]; then
+            best_proposal_content=$(echo "$all_proposal_lines" | tail -1)
+            echo "[$(date -u +%H:%M:%S)]   No vote-matched proposal found, falling back to most-recent proposal"
+        else
+            echo "[$(date -u +%H:%M:%S)]   Selected proposal with most matching votes (count=$best_vote_count): $best_proposal_content"
+        fi
+
+        local proposal_content="$best_proposal_content"
         [ -z "$proposal_content" ] && continue
 
         # Extract key=value pairs from proposal declaration line only (issue #754)
