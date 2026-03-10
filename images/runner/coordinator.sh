@@ -1998,16 +1998,43 @@ update_identity_bucket_from_constitution() {
 #   $3 - issue_labels (comma-separated string, e.g., "enhancement,bug")
 #   $4 - issue_keywords (space-separated keywords from title/body)
 # Returns: integer score via stdout (0 if agent has no specialization data)
+#
+# Issue #1475: canonical history lookup.
+# Agents are ephemeral (new agent_name per pod). Specialization history accumulates
+# per-session and is written at exit. A new worker pod has no identity file yet.
+# Fix: after reading agent_name file (may be empty for new pods), also check the
+# canonical history file at identities/canonical/<displayName>.json (written by
+# save_identity() since PR #1489). This allows returning workers (who reclaim a
+# display name) to have their historical specialization considered immediately.
 score_agent_for_issue() {
     local agent_name="$1"
     local issue_number="$2"
     local issue_labels="$3"
     local issue_keywords="$4"
 
-    # Read agent identity from S3
-    local identity_json
+    # Read agent identity from S3 — first try per-session file (may be empty for new agents)
+    local identity_json=""
     identity_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${agent_name}.json" - \
         --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+
+    # Issue #1475: if per-session file exists, try to upgrade to canonical history.
+    # The per-session file contains only THIS session's data (usually empty for new agents).
+    # The canonical file at identities/canonical/<displayName>.json contains accumulated
+    # history across all sessions using this display name (written by identity.sh PR #1489).
+    if [ -n "$identity_json" ]; then
+        local display_name
+        display_name=$(echo "$identity_json" | jq -r '.displayName // ""' 2>/dev/null || echo "")
+        if [ -n "$display_name" ] && [ "$display_name" != "$agent_name" ]; then
+            local canonical_json
+            canonical_json=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/canonical/${display_name}.json" - \
+                --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+            if [ -n "$canonical_json" ]; then
+                # Use canonical (accumulated) history instead of per-session (fresh) file
+                identity_json="$canonical_json"
+                echo "[$(date -u +%H:%M:%S)] Routing: using canonical history for $agent_name (displayName=$display_name)" >&2
+            fi
+        fi
+    fi
 
     if [ -z "$identity_json" ]; then
         echo "0"
@@ -2135,7 +2162,9 @@ find_best_agent_for_issue() {
     for pair in "${agent_pairs[@]}"; do
         [ -z "$pair" ] && continue
         local agent_name="${pair%%:*}"
-        local agent_role="${pair##*:}"
+        # Use cut for role: supports both "name:role" and future "name:role:displayName" format
+        local agent_role
+        agent_role=$(echo "$pair" | cut -d: -f2)
 
         # Only consider worker agents for specialization routing
         [ "$agent_role" != "worker" ] && continue
