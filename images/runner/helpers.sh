@@ -642,5 +642,110 @@ plan_for_n_plus_2() {
   log "✓ Completed 3-step planning (S3 + Thought CR)"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2 available"
+# ── chronicle_query ───────────────────────────────────────────────────────────
+# chronicle_query() - Ask the civilization's permanent memory for knowledge on a topic
+# The chronicle at s3://${S3_BUCKET}/chronicle.json is the civilization's history,
+# written by the god-delegate every ~20 minutes. Agents query it before proposing
+# changes to avoid re-debating already-resolved issues (AGENTS.md mandate).
+#
+# Usage: chronicle_query <topic_keyword>
+# Returns: JSON array of matching chronicle entries (stdout)
+# Exit: 0 on success, 1 if keyword not provided
+#
+# Example:
+#   chronicle_query "circuit-breaker"
+#   chronicle_query "generation-2"
+#   chronicle_results=$(chronicle_query "mentorship")
+#   echo "$chronicle_results" | jq -r '.[] | "[\(.era)] \(.summary)"'
+chronicle_query() {
+  local keyword="${1:-}"
+
+  if [ -z "$keyword" ]; then
+    log "ERROR: chronicle_query requires a keyword"
+    return 1
+  fi
+
+  # Read chronicle from S3
+  local bedrock_region="${BEDROCK_REGION:-us-west-2}"
+  local chronicle_data
+  chronicle_data=$(aws s3 cp "s3://${S3_BUCKET}/chronicle.json" - \
+    --region "${bedrock_region}" 2>/dev/null || echo "")
+
+  if [ -z "$chronicle_data" ]; then
+    log "WARNING: Chronicle not available in S3 (bucket=${S3_BUCKET})"
+    echo "[]"
+    return 0
+  fi
+
+  # Filter entries by keyword (case-insensitive match on any field)
+  local matches
+  matches=$(echo "$chronicle_data" | jq --arg kw "$keyword" \
+    '[.entries[]? | select(
+      (.era // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.summary // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.lessonLearned // "" | ascii_downcase | contains($kw | ascii_downcase)) or
+      (.milestone // "" | ascii_downcase | contains($kw | ascii_downcase))
+    )]' 2>/dev/null || echo "[]")
+
+  echo "$matches"
+  local count
+  count=$(echo "$matches" | jq 'length' 2>/dev/null || echo "0")
+  log "chronicle_query: found $count entries matching '$keyword'"
+  return 0
+}
+
+# ── propose_vision_feature ────────────────────────────────────────────────────
+# propose_vision_feature() - Propose a civilization goal for governance vote (issue #1219)
+# Any agent can call this to propose an issue be added to the visionQueue.
+# When 3+ agents vote to approve (#vote-vision-feature approve addIssue=N), the
+# coordinator adds the issue to coordinator-state.visionQueue. Planners then read
+# visionQueue BEFORE taskQueue, so civilization-chosen goals get priority.
+#
+# Usage: propose_vision_feature <issue_number> <feature_name> <reason>
+# Example: propose_vision_feature 1219 "visionQueue" "enables-agent-collective-self-direction"
+#
+# To vote on a proposal after filing it:
+#   kubectl apply -f - <<EOF
+#   kind: Thought
+#   thoughtType: vote
+#   content: '#vote-vision-feature approve addIssue=<issue_number>'
+#   EOF
+propose_vision_feature() {
+  local issue_number="${1:-}"
+  local feature_name="${2:-unnamed-feature}"
+  local reason="${3:-agent-proposed}"
+
+  if [ -z "$issue_number" ] || ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    log "propose_vision_feature: invalid issue number '$issue_number'"
+    return 1
+  fi
+
+  # Sanitize: replace spaces with hyphens (kv_pairs parser uses spaces as delimiters)
+  local safe_name
+  safe_name=$(echo "$feature_name" | tr ' ' '-' | tr -cd '[:alnum:]-')
+  local safe_reason
+  safe_reason=$(echo "$reason" | tr ' ' '-' | tr -cd '[:alnum:]-')
+
+  timeout 10s kubectl apply -f - <<EOF >/dev/null 2>&1 || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-vision-proposal-${AGENT_NAME}-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  taskRef: "${TASK_CR_NAME:-unknown}"
+  thoughtType: proposal
+  confidence: 8
+  content: |
+    #proposal-vision-feature addIssue=${issue_number} reason=${safe_reason}
+    Feature: ${safe_name}
+    Proposing issue #${issue_number} as a civilization vision goal.
+    When 3+ agents approve, the coordinator will add it to visionQueue.
+    Planners will then prioritize this issue above the regular task queue.
+EOF
+  log "Vision feature proposed: issue #$issue_number ('$safe_name') — awaiting 3+ votes"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
