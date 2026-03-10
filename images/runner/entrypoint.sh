@@ -3279,9 +3279,147 @@ fi)"
   else
     return 1
   fi
+ }
+
+# ── Workspace snapshot functions (issue #1833) ────────────────────────────────
+# Agent session/state separation: save and restore workspace snapshots to S3
+# so agents can resume work across session boundaries (context limit, crash, etc.)
+# See helpers.sh for the full documented version; these are the inline equivalents
+# for use within entrypoint.sh execution context.
+
+# save_workspace_snapshot: persist uncommitted git changes to S3
+# Usage: save_workspace_snapshot <issue_number> <workspace_dir> [branch] [last_action] [next_step]
+save_workspace_snapshot() {
+  local issue_number="${1:-}"
+  local workspace_dir="${2:-}"
+  local branch_name="${3:-}"
+  local last_action="${4:-unknown}"
+  local next_step="${5:-continue implementation}"
+
+  [ -z "$issue_number" ] || [ -z "$workspace_dir" ] || [ ! -d "$workspace_dir" ] && return 0
+
+  local git_status
+  git_status=$(git -C "$workspace_dir" status --porcelain 2>/dev/null || echo "")
+  [ -z "$git_status" ] && return 0  # Nothing to save
+
+  [ -z "$branch_name" ] && branch_name=$(git -C "$workspace_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local timestamp; timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local metadata_key="workspaces/issue-${issue_number}.json"
+  local tmp_archive="/tmp/workspace-issue-${issue_number}-$$.tar.gz"
+  local uncommitted_files
+  uncommitted_files=$(git -C "$workspace_dir" status --porcelain 2>/dev/null | awk '{print $2}' | head -20 | tr '\n' ',' | sed 's/,$//' || echo "")
+
+  log "save_workspace_snapshot: saving for issue #$issue_number (branch=$branch_name)..."
+
+  if ! tar czf "$tmp_archive" -C "$(dirname "$workspace_dir")" "$(basename "$workspace_dir")" \
+    --exclude="$(basename "$workspace_dir")/.git/objects/pack" 2>/dev/null; then
+    log "WARNING: save_workspace_snapshot: tar failed for issue #$issue_number"
+    rm -f "$tmp_archive"; return 0
+  fi
+
+  if ! aws s3 cp "$tmp_archive" "s3://${s3_bucket}/${snapshot_key}" \
+    --content-type application/gzip --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+    log "WARNING: save_workspace_snapshot: S3 upload failed for issue #$issue_number"
+    rm -f "$tmp_archive"; return 0
+  fi
+  rm -f "$tmp_archive"
+
+  local safe_last_action safe_next_step safe_files safe_branch
+  safe_last_action=$(echo "$last_action" | sed 's/"/\\"/g' | tr '\n' ' ')
+  safe_next_step=$(echo "$next_step" | sed 's/"/\\"/g' | tr '\n' ' ')
+  safe_files=$(echo "$uncommitted_files" | sed 's/"/\\"/g')
+  safe_branch=$(echo "$branch_name" | sed 's/"/\\"/g')
+
+  local metadata_json
+  metadata_json=$(printf '{"issue":%s,"branch":"%s","status":"in_progress","savedAt":"%s","savedBy":"%s","lastAction":"%s","uncommittedFiles":"%s","nextStep":"%s","workspace":"issue-%s","snapshotKey":"%s"}\n' \
+    "$issue_number" "$safe_branch" "$timestamp" "${AGENT_NAME:-unknown}" \
+    "$safe_last_action" "$safe_files" "$safe_next_step" "$issue_number" "$snapshot_key")
+
+  if echo "$metadata_json" | aws s3 cp - "s3://${s3_bucket}/${metadata_key}" \
+    --content-type application/json --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+    log "save_workspace_snapshot: saved for issue #$issue_number to s3://${s3_bucket}/${snapshot_key}"
+  else
+    log "WARNING: save_workspace_snapshot: metadata write failed for issue #$issue_number"
+  fi
 }
 
-# civilization_status() — Single-command civilization health overview (issue #1224)
+# restore_workspace_snapshot: download and extract workspace from S3
+# Usage: restore_workspace_snapshot <issue_number> <restore_dir>
+# Returns: 0 if restored, 1 if no snapshot, 2 if restore failed
+# Sets: WORKSPACE_HANDOFF_BRANCH, WORKSPACE_HANDOFF_LAST_ACTION, WORKSPACE_HANDOFF_NEXT_STEP,
+#       WORKSPACE_HANDOFF_FILES, WORKSPACE_HANDOFF_SAVED_BY
+restore_workspace_snapshot() {
+  local issue_number="${1:-}"
+  local restore_dir="${2:-/workspace}"
+  [ -z "$issue_number" ] && return 1
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local metadata_key="workspaces/issue-${issue_number}.json"
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local tmp_archive="/tmp/workspace-restore-issue-${issue_number}-$$.tar.gz"
+
+  if ! aws s3 ls "s3://${s3_bucket}/${metadata_key}" \
+    --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+    return 1  # No snapshot
+  fi
+
+  local metadata_json
+  metadata_json=$(aws s3 cp "s3://${s3_bucket}/${metadata_key}" - \
+    --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null || echo "")
+  [ -z "$metadata_json" ] && return 2
+
+  export WORKSPACE_HANDOFF_BRANCH WORKSPACE_HANDOFF_LAST_ACTION WORKSPACE_HANDOFF_NEXT_STEP
+  export WORKSPACE_HANDOFF_FILES WORKSPACE_HANDOFF_SAVED_BY
+  WORKSPACE_HANDOFF_BRANCH=$(echo "$metadata_json" | jq -r '.branch // "unknown"' 2>/dev/null || echo "unknown")
+  WORKSPACE_HANDOFF_LAST_ACTION=$(echo "$metadata_json" | jq -r '.lastAction // ""' 2>/dev/null || echo "")
+  WORKSPACE_HANDOFF_NEXT_STEP=$(echo "$metadata_json" | jq -r '.nextStep // ""' 2>/dev/null || echo "")
+  WORKSPACE_HANDOFF_FILES=$(echo "$metadata_json" | jq -r '.uncommittedFiles // ""' 2>/dev/null || echo "")
+  WORKSPACE_HANDOFF_SAVED_BY=$(echo "$metadata_json" | jq -r '.savedBy // "unknown"' 2>/dev/null || echo "unknown")
+
+  log "restore_workspace_snapshot: downloading snapshot for issue #$issue_number (savedBy=$WORKSPACE_HANDOFF_SAVED_BY)..."
+
+  if ! aws s3 cp "s3://${s3_bucket}/${snapshot_key}" "$tmp_archive" \
+    --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+    log "WARNING: restore_workspace_snapshot: download failed for issue #$issue_number"
+    return 2
+  fi
+
+  mkdir -p "$restore_dir"
+  if ! tar xzf "$tmp_archive" -C "$restore_dir" 2>/dev/null; then
+    log "WARNING: restore_workspace_snapshot: extraction failed for issue #$issue_number"
+    rm -f "$tmp_archive"; return 2
+  fi
+  rm -f "$tmp_archive"
+  log "restore_workspace_snapshot: restored for issue #$issue_number (branch=$WORKSPACE_HANDOFF_BRANCH)"
+  return 0
+}
+
+# delete_workspace_snapshot: clean up workspace snapshot after task completion
+# Usage: delete_workspace_snapshot <issue_number>
+delete_workspace_snapshot() {
+  local issue_number="${1:-}"
+  [ -z "$issue_number" ] && return 0
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local metadata_key="workspaces/issue-${issue_number}.json"
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+
+  if ! aws s3 ls "s3://${s3_bucket}/${metadata_key}" \
+    --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1; then
+    return 0  # Nothing to delete
+  fi
+
+  aws s3 rm "s3://${s3_bucket}/${metadata_key}" \
+    --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1 || true
+  aws s3 rm "s3://${s3_bucket}/${snapshot_key}" \
+    --region "${BEDROCK_REGION:-us-west-2}" >/dev/null 2>&1 || true
+  log "delete_workspace_snapshot: cleaned up snapshot for issue #$issue_number"
+}
+
+ # civilization_status() — Single-command civilization health overview (issue #1224)
 # Outputs a structured health summary covering generation, active agents, open issues,
 # debate health, specialization routing, visionQueue, kill switch, and S3 debate outcomes.
 # Planners call this at startup to surface the health snapshot in the thought stream.
@@ -3831,10 +3969,50 @@ fi
 log "Cloning repo..."
 gh auth setup-git
 mkdir -p "$WORKSPACE/repo"
-git clone "https://github.com/$REPO.git" "$WORKSPACE/repo" --depth=1
-cd "$WORKSPACE/repo"
+ git clone "https://github.com/$REPO.git" "$WORKSPACE/repo" --depth=1
+ cd "$WORKSPACE/repo"
 
-# ── 7.5. Coordinator script drift check (issues #1682, #1695) ────────────────
+# ── 7.1. Workspace snapshot restore (issue #1833) ────────────────────────────
+# Agent session/state separation: if a previous agent was working on the same issue
+# and saved a workspace snapshot to S3, restore it so this agent can continue from
+# where the previous agent left off. This enables multi-session task completion.
+#
+# Only workers with a coordinator-assigned issue check for snapshots.
+# Planner and other roles work at the repo level, not individual issue workspaces.
+WORKSPACE_HANDOFF_CONTEXT=""
+if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n "${COORDINATOR_ISSUE:-}" ]; then
+  log "Issue #1833: checking for workspace snapshot for issue #${COORDINATOR_ISSUE}..."
+  ISSUE_WORKSPACE="$WORKSPACE/issue-${COORDINATOR_ISSUE}"
+  if restore_workspace_snapshot "${COORDINATOR_ISSUE}" "$WORKSPACE" 2>/dev/null; then
+    log "Issue #1833: workspace snapshot restored for issue #${COORDINATOR_ISSUE}"
+    WORKSPACE_HANDOFF_CONTEXT="
+═══════════════════════════════════════════════════════
+WORKSPACE HANDOFF (issue #1833 — session/state separation)
+═══════════════════════════════════════════════════════
+A previous agent was working on issue #${COORDINATOR_ISSUE} and saved their workspace.
+Their workspace has been restored to: ${ISSUE_WORKSPACE}
+
+Previous agent: ${WORKSPACE_HANDOFF_SAVED_BY:-unknown}
+Branch:         ${WORKSPACE_HANDOFF_BRANCH:-unknown}
+Last action:    ${WORKSPACE_HANDOFF_LAST_ACTION:-unknown}
+Files in progress: ${WORKSPACE_HANDOFF_FILES:-unknown}
+
+RECOMMENDED NEXT STEP:
+  ${WORKSPACE_HANDOFF_NEXT_STEP:-continue implementation}
+
+The workspace at ${ISSUE_WORKSPACE} contains the previous agent's uncommitted changes.
+Switch to that directory and continue from where they left off:
+  cd ${ISSUE_WORKSPACE}
+  git status
+  git diff
+═══════════════════════════════════════════════════════"
+  else
+    log "Issue #1833: no workspace snapshot found for issue #${COORDINATOR_ISSUE} — starting fresh"
+    WORKSPACE_HANDOFF_CONTEXT=""
+  fi
+fi
+
+ # ── 7.5. Coordinator script drift check (issues #1682, #1695) ────────────────
 # CI step that updates coordinator-script ConfigMap fails due to IAM issue (#1682).
 # Planners detect drift via git SHA comparison (deterministic, no spurious restarts
 # from comment/whitespace changes) and auto-update the ConfigMap + restart coordinator.
@@ -4606,9 +4784,11 @@ ${PREDECESSOR_BLOCK}
 
 ${MENTORSHIP_BLOCK}
 
-${COMPONENT_CONTEXT_BLOCK}
+ ${COMPONENT_CONTEXT_BLOCK}
 
-${ROLE_CONTEXT}
+${WORKSPACE_HANDOFF_CONTEXT}
+
+ ${ROLE_CONTEXT}
 
 ═══════════════════════════════════════════════════════
 COORDINATOR STATE (read this before picking tasks)
@@ -5134,10 +5314,49 @@ if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$W
   if [ -n "$WORKED_LABELS" ]; then
     update_specialization "$WORKED_LABELS" 2>/dev/null || true
     log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
+   fi
+ fi
+
+# ── 11.4b. WORKSPACE SNAPSHOT SAVE (issue #1833) ────────────────────────────
+# Agent session/state separation: if this worker has uncommitted changes in an
+# issue-specific workspace directory, save a snapshot to S3 so the next agent
+# working on the same issue can restore and continue from here.
+#
+# This runs AFTER OpenCode completes but BEFORE exit, so even failed runs
+# (context limit, crash) have their partial work preserved.
+#
+# We only snapshot if:
+# 1. This is a worker agent (planners work at repo level, not issue workspaces)
+# 2. The issue-specific workspace directory exists (agent used the recommended pattern)
+# 3. There are uncommitted changes in that workspace
+if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n "${COORDINATOR_ISSUE:-}" ]; then
+  ISSUE_WORKSPACE_SAVE="$WORKSPACE/issue-${COORDINATOR_ISSUE}"
+  if [ -d "$ISSUE_WORKSPACE_SAVE" ]; then
+    # Check if there are uncommitted changes
+    GIT_STATUS_SAVE=$(git -C "$ISSUE_WORKSPACE_SAVE" status --porcelain 2>/dev/null || echo "")
+    if [ -n "$GIT_STATUS_SAVE" ]; then
+      log "Issue #1833: saving workspace snapshot for issue #${COORDINATOR_ISSUE} (uncommitted changes detected)..."
+      CURRENT_BRANCH=$(git -C "$ISSUE_WORKSPACE_SAVE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+      LAST_ACTION_MSG="Partial work by ${AGENT_NAME}: $(echo "$GIT_STATUS_SAVE" | wc -l | tr -d ' ') files modified"
+      NEXT_STEP_MSG="Review uncommitted changes, complete implementation, and open PR for issue #${COORDINATOR_ISSUE}"
+      save_workspace_snapshot \
+        "${COORDINATOR_ISSUE}" \
+        "$ISSUE_WORKSPACE_SAVE" \
+        "$CURRENT_BRANCH" \
+        "$LAST_ACTION_MSG" \
+        "$NEXT_STEP_MSG" 2>/dev/null || true
+      log "Issue #1833: workspace snapshot saved for issue #${COORDINATOR_ISSUE}"
+    else
+      log "Issue #1833: workspace is clean for issue #${COORDINATOR_ISSUE} — no snapshot needed"
+      # Clean up any stale snapshot since work is done
+      delete_workspace_snapshot "${COORDINATOR_ISSUE}" 2>/dev/null || true
+    fi
+  else
+    log "Issue #1833: no issue workspace found at ${ISSUE_WORKSPACE_SAVE} — skipping snapshot"
   fi
 fi
 
-# ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
+ # ── 11.5. ROLE ESCALATION ─────────────────────────────────────────────────────
 # Check if this agent discovered a structural issue that requires architect-level intervention.
 # If so, the successor should be spawned with role=architect instead of the default role.
 ESCALATED_ROLE=""

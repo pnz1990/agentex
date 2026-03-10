@@ -1702,5 +1702,260 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── save_workspace_snapshot ───────────────────────────────────────────────────
+# Issue #1833: Workspace Layer — persist uncommitted work to S3 before agent exits.
+#
+# When an agent is working on a long-running task, it may die (context limit,
+# crash, or forced exit) before completing the work. This function saves the
+# current git workspace state to S3 so the successor agent can restore it and
+# continue from where the previous agent left off.
+#
+# Only saves when there ARE uncommitted changes — no-ops if workspace is clean.
+# Workspace is automatically cleaned up when the task is marked Done (PR merged).
+#
+# Usage: save_workspace_snapshot <issue_number> <workspace_dir> [branch_name] [last_action] [next_step]
+#
+# Parameters:
+#   issue_number  - GitHub issue number being worked on
+#   workspace_dir - Path to the git workspace directory (e.g. /workspace/issue-1833)
+#   branch_name   - Optional: current branch name (auto-detected if not provided)
+#   last_action   - Optional: human-readable description of last completed action
+#   next_step     - Optional: recommended next step for the successor agent
+#
+# S3 location: s3://<bucket>/workspaces/issue-<N>.json (metadata)
+#              s3://<bucket>/workspaces/issue-<N>.tar.gz (snapshot archive)
+#
+# Example:
+#   save_workspace_snapshot 1833 /workspace/issue-1833 \
+#     "issue-1833-workspace-handoff" \
+#     "Added save_workspace_snapshot to helpers.sh" \
+#     "Add restore function and integrate into entrypoint.sh"
+save_workspace_snapshot() {
+  local issue_number="${1:-}"
+  local workspace_dir="${2:-}"
+  local branch_name="${3:-}"
+  local last_action="${4:-unknown}"
+  local next_step="${5:-continue implementation}"
+
+  if [ -z "$issue_number" ] || [ -z "$workspace_dir" ]; then
+    log "save_workspace_snapshot: issue_number and workspace_dir are required — skipping"
+    return 0
+  fi
+
+  if [ ! -d "$workspace_dir" ]; then
+    log "save_workspace_snapshot: workspace directory $workspace_dir does not exist — skipping"
+    return 0
+  fi
+
+  # Check if there are uncommitted changes (git status --porcelain returns empty for clean)
+  local git_status
+  git_status=$(git -C "$workspace_dir" status --porcelain 2>/dev/null || echo "")
+  if [ -z "$git_status" ]; then
+    log "save_workspace_snapshot: workspace is clean (no uncommitted changes) — skipping snapshot for issue #$issue_number"
+    return 0
+  fi
+
+  # Auto-detect branch name if not provided
+  if [ -z "$branch_name" ]; then
+    branch_name=$(git -C "$workspace_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  fi
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local metadata_key="workspaces/issue-${issue_number}.json"
+  local tmp_archive="/tmp/workspace-issue-${issue_number}-$$.tar.gz"
+
+  # List uncommitted files for metadata
+  local uncommitted_files
+  uncommitted_files=$(git -C "$workspace_dir" status --porcelain 2>/dev/null | awk '{print $2}' | head -20 | tr '\n' ',' | sed 's/,$//' || echo "")
+
+  log "save_workspace_snapshot: saving workspace for issue #$issue_number (branch=$branch_name, files=$uncommitted_files)..."
+
+  # Stash uncommitted changes so tar gets a clean working tree with the stash applied
+  # Use git stash + tar approach: tar the .git dir (includes stash) + working tree
+  # We tar the entire workspace directory (excluding .git internals that are too large)
+  # Strategy: tar everything including .git so git stash pop restores it
+  if ! tar czf "$tmp_archive" -C "$(dirname "$workspace_dir")" "$(basename "$workspace_dir")" \
+    --exclude="$(basename "$workspace_dir")/.git/objects/pack" 2>/dev/null; then
+    log "WARNING: save_workspace_snapshot: tar failed for issue #$issue_number — skipping"
+    rm -f "$tmp_archive"
+    return 0
+  fi
+
+  # Upload archive to S3
+  if ! aws s3 cp "$tmp_archive" "s3://${s3_bucket}/${snapshot_key}" \
+    --content-type application/gzip >/dev/null 2>&1; then
+    log "WARNING: save_workspace_snapshot: S3 upload failed for issue #$issue_number"
+    rm -f "$tmp_archive"
+    return 0
+  fi
+  rm -f "$tmp_archive"
+
+  # Escape strings for JSON
+  local safe_last_action safe_next_step safe_files safe_branch
+  safe_last_action=$(echo "$last_action" | sed 's/"/\\"/g' | tr '\n' ' ')
+  safe_next_step=$(echo "$next_step" | sed 's/"/\\"/g' | tr '\n' ' ')
+  safe_files=$(echo "$uncommitted_files" | sed 's/"/\\"/g')
+  safe_branch=$(echo "$branch_name" | sed 's/"/\\"/g')
+
+  # Write metadata JSON
+  local metadata_json
+  metadata_json=$(printf '{"issue":%s,"branch":"%s","status":"in_progress","savedAt":"%s","savedBy":"%s","lastAction":"%s","uncommittedFiles":"%s","nextStep":"%s","workspace":"issue-%s","snapshotKey":"%s"}\n' \
+    "$issue_number" \
+    "$safe_branch" \
+    "$timestamp" \
+    "${AGENT_NAME:-unknown}" \
+    "$safe_last_action" \
+    "$safe_files" \
+    "$safe_next_step" \
+    "$issue_number" \
+    "$snapshot_key")
+
+  if echo "$metadata_json" | aws s3 cp - "s3://${s3_bucket}/${metadata_key}" \
+    --content-type application/json >/dev/null 2>&1; then
+    log "save_workspace_snapshot: saved workspace snapshot for issue #$issue_number to s3://${s3_bucket}/${snapshot_key}"
+    return 0
+  else
+    log "WARNING: save_workspace_snapshot: metadata write failed for issue #$issue_number"
+    return 0
+  fi
+}
+
+# ── restore_workspace_snapshot ────────────────────────────────────────────────
+# Issue #1833: Workspace Layer — restore a saved workspace snapshot from S3.
+#
+# When a new agent picks up a previously-started issue, this function checks S3
+# for a workspace snapshot. If found, it restores the git workspace so the agent
+# can continue from where the previous agent left off — including all uncommitted
+# file changes, branch state, and context handoff notes.
+#
+# Usage: restore_workspace_snapshot <issue_number> <restore_dir>
+#
+# Parameters:
+#   issue_number - GitHub issue number to restore workspace for
+#   restore_dir  - Directory to restore the workspace into
+#                  (parent dir; the workspace will be extracted here)
+#
+# Returns:
+#   0 if snapshot found and restored successfully
+#   1 if no snapshot exists (fresh start)
+#   2 if snapshot exists but restore failed
+#
+# Output variables set on success (exported):
+#   WORKSPACE_HANDOFF_BRANCH      - Branch name from previous agent
+#   WORKSPACE_HANDOFF_LAST_ACTION - What the previous agent last did
+#   WORKSPACE_HANDOFF_NEXT_STEP   - What the previous agent recommends next
+#   WORKSPACE_HANDOFF_FILES       - Uncommitted files that were in progress
+#   WORKSPACE_HANDOFF_SAVED_BY    - Agent name that saved the snapshot
+#
+# Example:
+#   if restore_workspace_snapshot 1833 /workspace; then
+#     echo "Restored from $WORKSPACE_HANDOFF_SAVED_BY: $WORKSPACE_HANDOFF_LAST_ACTION"
+#     echo "Recommended next step: $WORKSPACE_HANDOFF_NEXT_STEP"
+#   fi
+restore_workspace_snapshot() {
+  local issue_number="${1:-}"
+  local restore_dir="${2:-/workspace}"
+
+  if [ -z "$issue_number" ]; then
+    log "restore_workspace_snapshot: issue_number required — skipping"
+    return 1
+  fi
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local metadata_key="workspaces/issue-${issue_number}.json"
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+  local tmp_archive="/tmp/workspace-restore-issue-${issue_number}-$$.tar.gz"
+
+  # Check if metadata exists first (fast check before downloading large archive)
+  if ! aws s3 ls "s3://${s3_bucket}/${metadata_key}" >/dev/null 2>&1; then
+    log "restore_workspace_snapshot: no snapshot found for issue #$issue_number (fresh start)"
+    return 1
+  fi
+
+  # Read metadata for handoff context
+  local metadata_json
+  metadata_json=$(aws s3 cp "s3://${s3_bucket}/${metadata_key}" - 2>/dev/null || echo "")
+  if [ -z "$metadata_json" ]; then
+    log "WARNING: restore_workspace_snapshot: metadata read failed for issue #$issue_number"
+    return 2
+  fi
+
+  # Parse metadata fields
+  export WORKSPACE_HANDOFF_BRANCH
+  export WORKSPACE_HANDOFF_LAST_ACTION
+  export WORKSPACE_HANDOFF_NEXT_STEP
+  export WORKSPACE_HANDOFF_FILES
+  export WORKSPACE_HANDOFF_SAVED_BY
+  WORKSPACE_HANDOFF_BRANCH=$(echo "$metadata_json" | jq -r '.branch // "unknown"' 2>/dev/null || echo "unknown")
+  WORKSPACE_HANDOFF_LAST_ACTION=$(echo "$metadata_json" | jq -r '.lastAction // ""' 2>/dev/null || echo "")
+  WORKSPACE_HANDOFF_NEXT_STEP=$(echo "$metadata_json" | jq -r '.nextStep // ""' 2>/dev/null || echo "")
+  WORKSPACE_HANDOFF_FILES=$(echo "$metadata_json" | jq -r '.uncommittedFiles // ""' 2>/dev/null || echo "")
+  WORKSPACE_HANDOFF_SAVED_BY=$(echo "$metadata_json" | jq -r '.savedBy // "unknown"' 2>/dev/null || echo "unknown")
+
+  local saved_at
+  saved_at=$(echo "$metadata_json" | jq -r '.savedAt // ""' 2>/dev/null || echo "")
+
+  log "restore_workspace_snapshot: snapshot found for issue #$issue_number (branch=$WORKSPACE_HANDOFF_BRANCH, savedBy=$WORKSPACE_HANDOFF_SAVED_BY, savedAt=$saved_at)"
+  log "restore_workspace_snapshot: downloading snapshot from s3://${s3_bucket}/${snapshot_key}..."
+
+  # Download the snapshot archive
+  if ! aws s3 cp "s3://${s3_bucket}/${snapshot_key}" "$tmp_archive" >/dev/null 2>&1; then
+    log "WARNING: restore_workspace_snapshot: download failed for issue #$issue_number"
+    return 2
+  fi
+
+  # Extract into restore_dir (will create issue-N/ subdirectory)
+  mkdir -p "$restore_dir"
+  if ! tar xzf "$tmp_archive" -C "$restore_dir" 2>/dev/null; then
+    log "WARNING: restore_workspace_snapshot: extraction failed for issue #$issue_number"
+    rm -f "$tmp_archive"
+    return 2
+  fi
+  rm -f "$tmp_archive"
+
+  log "restore_workspace_snapshot: workspace restored for issue #$issue_number"
+  log "  Branch: $WORKSPACE_HANDOFF_BRANCH"
+  log "  Last action: $WORKSPACE_HANDOFF_LAST_ACTION"
+  log "  Recommended next step: $WORKSPACE_HANDOFF_NEXT_STEP"
+  log "  In-progress files: $WORKSPACE_HANDOFF_FILES"
+  return 0
+}
+
+# ── delete_workspace_snapshot ─────────────────────────────────────────────────
+# Issue #1833: Workspace Layer — clean up a workspace snapshot after task completion.
+#
+# Called when a task is marked Done (PR merged) to free S3 storage and prevent
+# stale snapshots from confusing future agents working on re-opened issues.
+#
+# Usage: delete_workspace_snapshot <issue_number>
+#
+# Example:
+#   delete_workspace_snapshot 1833
+delete_workspace_snapshot() {
+  local issue_number="${1:-}"
+  if [ -z "$issue_number" ]; then
+    log "delete_workspace_snapshot: issue_number required — skipping"
+    return 0
+  fi
+
+  local s3_bucket="${S3_BUCKET:-agentex-thoughts}"
+  local metadata_key="workspaces/issue-${issue_number}.json"
+  local snapshot_key="workspaces/issue-${issue_number}.tar.gz"
+
+  # Check if snapshot exists before attempting delete (avoids error logs for clean tasks)
+  if ! aws s3 ls "s3://${s3_bucket}/${metadata_key}" >/dev/null 2>&1; then
+    log "delete_workspace_snapshot: no snapshot to clean up for issue #$issue_number"
+    return 0
+  fi
+
+  aws s3 rm "s3://${s3_bucket}/${metadata_key}" >/dev/null 2>&1 || true
+  aws s3 rm "s3://${s3_bucket}/${snapshot_key}" >/dev/null 2>&1 || true
+  log "delete_workspace_snapshot: cleaned up workspace snapshot for issue #$issue_number"
+  return 0
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, save_workspace_snapshot, restore_workspace_snapshot, delete_workspace_snapshot available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

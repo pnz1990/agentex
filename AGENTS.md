@@ -704,8 +704,11 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
  - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
 - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
-- `write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions>` — v0.6 swarm memory (issue #1773). Write a structured swarm dissolution record to `s3://<bucket>/swarm-memories/<swarm-name>.json`. Called automatically by `entrypoint.sh` on swarm dissolution, but agents can also call it manually for partial records.
-- `query_swarm_memories [topic_keyword]` — v0.6 swarm memory (issue #1773). Query past swarm memory records from S3. Planners should call this before forming a new swarm to check for prior experience with similar goals. Returns JSON records, one per line.
+ - `write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions>` — v0.6 swarm memory (issue #1773). Write a structured swarm dissolution record to `s3://<bucket>/swarm-memories/<swarm-name>.json`. Called automatically by `entrypoint.sh` on swarm dissolution, but agents can also call it manually for partial records.
+ - `query_swarm_memories [topic_keyword]` — v0.6 swarm memory (issue #1773). Query past swarm memory records from S3. Planners should call this before forming a new swarm to check for prior experience with similar goals. Returns JSON records, one per line.
+- `save_workspace_snapshot <issue_number> <workspace_dir> [branch] [last_action] [next_step]` — v1.0 workspace handoff (issue #1833). Save uncommitted git changes to `s3://<bucket>/workspaces/issue-<N>.tar.gz`. Called automatically by `entrypoint.sh` at agent exit when uncommitted changes exist. Workers can also call it manually mid-session. No-ops if workspace is clean.
+- `restore_workspace_snapshot <issue_number> <restore_dir>` — v1.0 workspace handoff (issue #1833). Restore saved workspace from S3 into `restore_dir/issue-<N>/`. Returns 0 on success, 1 if no snapshot exists (fresh start), 2 on restore failure. Sets `WORKSPACE_HANDOFF_*` env vars with context from previous agent. Called automatically by `entrypoint.sh` at startup for worker agents.
+- `delete_workspace_snapshot <issue_number>` — v1.0 workspace handoff (issue #1833). Remove workspace snapshot from S3 after task completion. Called automatically when workspace is clean at agent exit.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1268,15 +1271,21 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - kubectl (for reading/writing CRs)
    - gh CLI (authenticated via GITHUB_TOKEN secret)
    - aws CLI (Bedrock via Pod Identity — no credentials needed)
-   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
-    Source with: source /agent/helpers.sh
-      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
-                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
-                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                 cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
-                 write_swarm_memory(), query_swarm_memories()
+    - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
+     Source with: source /agent/helpers.sh
+       Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+                  query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
+                  write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
+                  propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
+                  cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
+                  write_swarm_memory(), query_swarm_memories(),
+                  save_workspace_snapshot(), restore_workspace_snapshot(), delete_workspace_snapshot()
 ```
+
+**Agent lifecycle layers (issue #1833):**
+- **Session layer** (ephemeral): The OpenCode/Claude instance. Dies on context limit, crash, or completion. Disposable by design.
+- **Workspace layer** (persistent per-task): Git workspace saved to S3 before agent exits. Next agent for the same issue restores it automatically via `restore_workspace_snapshot()`. Cleaned up when workspace is clean (PR pushed).
+- **Identity layer** (persistent forever): S3 identity files, display names, specialization. Never cleaned up.
 
 Environment:
 ```
