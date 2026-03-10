@@ -128,6 +128,87 @@ else
 fi
 echo ""
 
+# 5b. COORDINATOR & GOVERNANCE HEALTH
+echo -e "${BLUE}🏛️  Coordinator & Governance Health${NC}"
+
+# Coordinator heartbeat age
+COORD_HEARTBEAT=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
+COORD_PHASE=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.phase}' 2>/dev/null || echo "unknown")
+
+if [ -n "$COORD_HEARTBEAT" ]; then
+  # Calculate age in seconds
+  NOW_EPOCH=$(date -u +%s 2>/dev/null || echo "0")
+  HB_EPOCH=$(date -u -d "$COORD_HEARTBEAT" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$COORD_HEARTBEAT" +%s 2>/dev/null || echo "0")
+  HEARTBEAT_AGE=$(( NOW_EPOCH - HB_EPOCH ))
+  HEARTBEAT_MIN=$(( HEARTBEAT_AGE / 60 ))
+  if [ "$HEARTBEAT_AGE" -gt 300 ]; then
+    echo -e "   Coordinator: ${RED}STALE${NC} (last heartbeat ${HEARTBEAT_MIN}m ago — may be down)"
+  elif [ "$HEARTBEAT_AGE" -gt 120 ]; then
+    echo -e "   Coordinator: ${YELLOW}SLOW${NC} (last heartbeat ${HEARTBEAT_MIN}m ago) phase=${COORD_PHASE}"
+  else
+    echo -e "   Coordinator: ${GREEN}ALIVE${NC} (heartbeat ${HEARTBEAT_AGE}s ago) phase=${COORD_PHASE}"
+  fi
+else
+  echo -e "   Coordinator: ${YELLOW}UNKNOWN${NC} (no heartbeat recorded)"
+fi
+
+# Debate health stats
+DEBATE_STATS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "")
+if [ -n "$DEBATE_STATS" ]; then
+  echo "   Debate stats: $DEBATE_STATS"
+else
+  echo "   Debate stats: (none yet)"
+fi
+
+# Unresolved debates count
+UNRESOLVED_RAW=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
+if [ -n "$UNRESOLVED_RAW" ]; then
+  UNRESOLVED_COUNT=$(echo "$UNRESOLVED_RAW" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
+else
+  UNRESOLVED_COUNT=0
+fi
+if [ "$UNRESOLVED_COUNT" -gt 20 ]; then
+  echo -e "   Unresolved debates: ${RED}${UNRESOLVED_COUNT}${NC} (backlog high)"
+elif [ "$UNRESOLVED_COUNT" -gt 5 ]; then
+  echo -e "   Unresolved debates: ${YELLOW}${UNRESOLVED_COUNT}${NC}"
+else
+  echo -e "   Unresolved debates: ${GREEN}${UNRESOLVED_COUNT}${NC}"
+fi
+
+# Specialization routing ratio
+SPEC_ASSIGN=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+GEN_ASSIGN=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.genericAssignments}' 2>/dev/null || echo "0")
+SPEC_ASSIGN=${SPEC_ASSIGN:-0}
+GEN_ASSIGN=${GEN_ASSIGN:-0}
+TOTAL_ASSIGN=$(( SPEC_ASSIGN + GEN_ASSIGN ))
+if [ "$TOTAL_ASSIGN" -gt 0 ]; then
+  SPEC_PCT=$(( SPEC_ASSIGN * 100 / TOTAL_ASSIGN ))
+  if [ "$SPEC_PCT" -ge 30 ]; then
+    echo -e "   Routing: ${GREEN}${SPEC_PCT}% specialized${NC} (${SPEC_ASSIGN} spec / ${GEN_ASSIGN} generic)"
+  else
+    echo -e "   Routing: ${YELLOW}${SPEC_PCT}% specialized${NC} (${SPEC_ASSIGN} spec / ${GEN_ASSIGN} generic — v0.2 routing may be stalled)"
+  fi
+else
+  echo "   Routing: no assignments recorded yet"
+fi
+
+# Vision queue length
+VISION_QUEUE=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
+  -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+if [ -n "$VISION_QUEUE" ]; then
+  VQ_COUNT=$(echo "$VISION_QUEUE" | tr ';' '\n' | grep -c '.' 2>/dev/null || echo "0")
+  echo -e "   Vision queue: ${GREEN}${VQ_COUNT} item(s)${NC} — civilization self-directed goals active"
+else
+  echo "   Vision queue: (empty — no civilization goals voted in yet)"
+fi
+echo ""
+
 # 6. OPEN GITHUB ISSUES/PRS
 echo -e "${BLUE}🔧 GitHub Status${NC}"
 if command -v gh &> /dev/null; then
@@ -150,40 +231,7 @@ echo "   Vision: ${VISION}..."
 echo "   Generation: $GENERATION"
 echo ""
 
-# 8. MILESTONE PROGRESS (v0.5 Emergent Specialization / v0.6 Collective Action)
-echo -e "${BLUE}🏆 Civilization Milestones${NC}"
-
-# v0.5 Emergent Specialization
-V05_STATUS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
-  -o jsonpath='{.data.v05MilestoneStatus}' 2>/dev/null || echo "")
-V05_CRITERIA=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
-  -o jsonpath='{.data.v05CriteriaStatus}' 2>/dev/null || echo "")
-if [ "$V05_STATUS" = "completed" ]; then
-  echo -e "   v0.5 Emergent Specialization: ${GREEN}COMPLETE${NC}"
-elif [ -n "$V05_CRITERIA" ]; then
-  # Show first 100 chars of criteria to avoid excessive scrolling
-  SHORT_CRITERIA=$(echo "$V05_CRITERIA" | cut -c1-100)
-  echo -e "   v0.5 Emergent Specialization: ${YELLOW}in progress${NC} — ${SHORT_CRITERIA}..."
-else
-  echo -e "   v0.5 Emergent Specialization: ${YELLOW}not yet checked${NC} (coordinator initializing)"
-fi
-
-# v0.6 Collective Action
-V06_STATUS=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
-  -o jsonpath='{.data.v06MilestoneStatus}' 2>/dev/null || echo "")
-V06_CRITERIA=$(kubectl get configmap coordinator-state -n "$NAMESPACE" \
-  -o jsonpath='{.data.v06CriteriaStatus}' 2>/dev/null || echo "")
-if [ "$V06_STATUS" = "completed" ]; then
-  echo -e "   v0.6 Collective Action:       ${GREEN}COMPLETE${NC}"
-elif [ -n "$V06_CRITERIA" ]; then
-  SHORT_V06_CRITERIA=$(echo "$V06_CRITERIA" | cut -c1-100)
-  echo -e "   v0.6 Collective Action:       ${YELLOW}in progress${NC} — ${SHORT_V06_CRITERIA}..."
-else
-  echo -e "   v0.6 Collective Action:       ${YELLOW}not yet initialized${NC} (coordinator v0.6 not deployed)"
-fi
-echo ""
-
-# 9. HEALTH SUMMARY
+# 8. HEALTH SUMMARY
 echo -e "${BLUE}📊 Health Summary${NC}"
 HEALTH_OK=0
 HEALTH_WARN=0
@@ -220,6 +268,17 @@ elif [ "$RECENT_AGENTS" -gt 20 ]; then
 else
   HEALTH_OK=$((HEALTH_OK + 1))
   echo -e "   ${GREEN}✓${NC} Spawn rate normal"
+fi
+
+# Check coordinator heartbeat
+if [ -n "${HEARTBEAT_AGE:-}" ]; then
+  if [ "$HEARTBEAT_AGE" -gt 300 ]; then
+    HEALTH_WARN=$((HEALTH_WARN + 1))
+    echo -e "   ${YELLOW}⚠${NC} Coordinator heartbeat stale (${HEARTBEAT_AGE}s ago)"
+  else
+    HEALTH_OK=$((HEALTH_OK + 1))
+    echo -e "   ${GREEN}✓${NC} Coordinator alive"
+  fi
 fi
 
 echo ""
