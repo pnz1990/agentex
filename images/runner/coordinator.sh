@@ -1071,8 +1071,9 @@ cleanup_orphaned_pods() {
 # positioned for periodic cleanup to supplement planner-initiated cleanup.
 #
 # TTLs match helpers.sh cleanup_old_thoughts / cleanup_old_messages:
-#   Thought low-signal (blocker, observation): 2h TTL
-#   Thought high-signal (insight, decision, debate, proposal, vote): 24h TTL
+#   Thought low-signal (blocker, observation, decision, plan, planning): 2h TTL
+#   Thought high-signal (insight, debate, proposal, vote): 24h TTL
+# Issue #1662: align with PR #1627 fix — decision/plan/planning now use 2h TTL (was 24h)
 #   Messages (read): 24h TTL
 #   Messages (unread): 48h TTL
 #   Reports: 48h TTL
@@ -1101,7 +1102,7 @@ cleanup_old_cluster_resources() {
             --arg cutoff_24h "$cutoff_24h" \
             --arg cutoff_2h "$cutoff_2h" \
             '.items[] |
-             (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+             (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
               then $cutoff_2h
               else $cutoff_24h
               end) as $cutoff |
