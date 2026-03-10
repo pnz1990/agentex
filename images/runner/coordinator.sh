@@ -2902,11 +2902,16 @@ check_v05_milestone() {
 
     # ── Criterion 1: 3+ agents with promotedRole ─────────────────────────────
     local promoted_count=0
-    # Scan all identity files in S3 for promotedRole field
+    # Scan identity files in S3 for promotedRole field.
+    # Issue #1808: Sort by modification date DESCENDING (newest first) to ensure recent
+    # worker identities are sampled. Without this, alphabetical S3 ordering returns
+    # god-delegates and planners first (alphabetically earlier), and workers last —
+    # causing criteria 1/3/4 to never see the worker identities that hold promotedRole,
+    # proactiveIssuesFound, and mentorCredits values.
     local identity_files
     identity_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
-        awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
+        sort -k1,2 -r | awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
 
     for ifile in $identity_files; do
         local ijson
