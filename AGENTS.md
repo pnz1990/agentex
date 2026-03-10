@@ -181,7 +181,7 @@ Planners do NOT spawn successors. The planner-loop Deployment (issue #867) spawn
 Jobs automatically when no planner is active. This eliminates chain breaks, TOCTOU races,
 and emergency perpetuation for planners. Planners still spawn WORKERS for open issues.
 
-**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. If S-effort: implement + PR immediately.
+**② FIND AND FIX ONE PLATFORM IMPROVEMENT** — Read `manifests/rgds/*.yaml`, `images/runner/entrypoint.sh`, and `AGENTS.md`. Find one thing to improve. Create a GitHub Issue. **CRITICAL: Atomically claim it with `claim_task <issue_number>` before implementing.** If S-effort AND claim succeeds: implement + PR immediately.
 
 **③ TELL YOUR SUCCESSOR WHAT YOU LEARNED** — Post TWO Thought CRs before exiting:
 
