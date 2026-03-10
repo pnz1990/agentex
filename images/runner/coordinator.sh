@@ -1251,7 +1251,7 @@ DISSOLUTION_THOUGHT_EOF
         fi
     done < <(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
         -l "agentex/swarm" -o json 2>/dev/null | \
-        jq -r '.items[] | select(.data.phase != null) | [.metadata.name, (.metadata.labels["agentex/swarm"] // ""), (.data.phase // ""), (.data.lastActivityTimestamp // "")] | @tsv' \
+        jq -r '.items[] | select(.data.goal != null) | [.metadata.name, (.metadata.labels["agentex/swarm"] // ""), (.data.phase // ""), (.data.lastActivityTimestamp // "")] | @tsv' \
         2>/dev/null || true)
 
     if [ "$disbanded_count" -gt 0 ]; then
