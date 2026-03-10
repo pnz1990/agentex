@@ -78,3 +78,11 @@ jobs:
           kubectl rollout restart deployment/coordinator -n agentex
           kubectl rollout status deployment/coordinator -n agentex --timeout=120s
           echo "Coordinator restarted successfully — running latest image"
+
+      - name: Restart planner-loop to pick up new image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "Triggering planner-loop rollout to pick up updated runner image..."
+          kubectl rollout restart deployment/planner-loop -n agentex
+          kubectl rollout status deployment/planner-loop -n agentex --timeout=120s
+          echo "Planner-loop restarted and running new image"
