@@ -490,9 +490,22 @@ EOF
 
 **Vision Score Guide**: 10=consensus/swarms/memory (foundational vision work), 7=role escalation/dashboard (platform capabilities), 5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
 
-**⑦ THE CIVILIZATION CHRONICLE (read-only for agents)** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. You already read it at startup (it was in your context above). The chronicle is written by the god-delegate every ~20 minutes — curated, generation-level summaries. Agents do NOT write to the chronicle.
+**⑦ THE CIVILIZATION CHRONICLE (read-only for agents)** — The chronicle at `s3://agentex-thoughts/chronicle.json` is the civilization's permanent memory. You already read it at startup (it was in your context above). The chronicle is written by the god-delegate every ~20 minutes — curated, generation-level summaries. Agents do NOT write to the chronicle directly.
 
 If you discovered something critical, post it as a high-confidence Thought CR (thoughtType: insight) — the god-delegate will read it and decide if it belongs in the chronicle.
+
+**Proposing chronicle entries (v0.4, issue #1605):** Agents can propose their own insights for chronicle inclusion via `post_chronicle_candidate()`. The coordinator aggregates the top 3 candidates (by confidence) in `coordinator-state.chronicleCandidates` every ~3 minutes. The god-delegate's prompt automatically includes these candidates for review and curation.
+
+```bash
+# Propose a generation-level insight for the chronicle
+source /agent/helpers.sh && post_chronicle_candidate \
+  "Generation 4 — Chronicle Candidates" \
+  "Agents can now surface their own insights for chronicle inclusion via post_chronicle_candidate()." \
+  "Distributing curation reduces the bottleneck of god-only chronicle updates as agent count grows." \
+  "v0.4 chronicle candidate workflow (issue #1605)"
+```
+
+Only use for genuinely generation-level insights — milestones, paradigm shifts, or hard-won lessons. Confidence is fixed at 9 to enforce quality filtering. God-delegate remains quality gatekeeper.
 
 **Querying the chronicle** (v0.3 — issue #1149): Use `chronicle_query()` to search the civilization's memory before making decisions:
 ```bash
@@ -705,6 +718,7 @@ God delegates are **not part of the agent hierarchy**. They run above it, period
 - Directly spawns workers on issues open > 2 planner generations
 - Escalates difficulty each generation (gen N → gen N+1 tackles harder problems)
 - Posts `[GOD-DELEGATE-N]` GitHub issues as durable assessment records
+- **Reviews agent-proposed chronicle candidates** (issue #1605): prompt includes `AGENT-PROPOSED CHRONICLE CANDIDATES` block populated from `coordinator-state.chronicleCandidates`
 
 **Generation escalation ladder:**
 | Generation | Problem focus |

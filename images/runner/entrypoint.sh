@@ -3485,6 +3485,57 @@ CIVILIZATION CHRONICLE
 ${CIVILIZATION_CHRONICLE}
 ═══════════════════════════════════════════════════════"
 
+# Issue #1605: Chronicle candidates — inject coordinator-state.chronicleCandidates for god-delegate
+# The coordinator aggregates top 3 chronicle-candidate Thought CRs every ~3 min.
+# God-delegate reads this to efficiently find agent-proposed chronicle entries without
+# reviewing all Thought CRs manually. Part of v0.4 Collective Memory milestone.
+CHRONICLE_CANDIDATES_BLOCK=""
+if [ "$AGENT_ROLE" = "god-delegate" ]; then
+  CHRONICLE_CANDIDATES_RAW=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.chronicleCandidates}' 2>/dev/null || echo "")
+  if [ -n "$CHRONICLE_CANDIDATES_RAW" ] && [ "$CHRONICLE_CANDIDATES_RAW" != '""' ]; then
+    # Fetch the content of each candidate Thought ConfigMap
+    CHRONICLE_CANDIDATES_DETAIL=""
+    IFS=';' read -ra CANDIDATE_NAMES <<< "$CHRONICLE_CANDIDATES_RAW"
+    for cm_name in "${CANDIDATE_NAMES[@]}"; do
+      [ -z "$cm_name" ] && continue
+      cm_content=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
+        -o jsonpath='{.data.content}' 2>/dev/null || echo "")
+      cm_agent=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
+        -o jsonpath='{.data.agentRef}' 2>/dev/null || echo "unknown")
+      cm_confidence=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
+        -o jsonpath='{.data.confidence}' 2>/dev/null || echo "?")
+      if [ -n "$cm_content" ]; then
+        CHRONICLE_CANDIDATES_DETAIL="${CHRONICLE_CANDIDATES_DETAIL}
+--- Candidate: ${cm_name} (agent: ${cm_agent}, confidence: ${cm_confidence}) ---
+${cm_content}
+"
+      fi
+    done
+    if [ -n "$CHRONICLE_CANDIDATES_DETAIL" ]; then
+      CHRONICLE_CANDIDATES_BLOCK="
+═══════════════════════════════════════════════════════
+AGENT-PROPOSED CHRONICLE CANDIDATES (issue #1605)
+═══════════════════════════════════════════════════════
+Agents have proposed the following insights for the civilization chronicle.
+Review these when writing the next chronicle entry. Curate the best ones.
+
+${CHRONICLE_CANDIDATES_DETAIL}
+To add an entry to the chronicle: append_to_chronicle \"era\" \"period\" \"summary\" \"lesson\"
+To see all candidates: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '[.items[] | select(.data.thoughtType==\"chronicle-candidate\")]'
+═══════════════════════════════════════════════════════"
+    fi
+  else
+    CHRONICLE_CANDIDATES_BLOCK="
+═══════════════════════════════════════════════════════
+AGENT-PROPOSED CHRONICLE CANDIDATES (issue #1605)
+═══════════════════════════════════════════════════════
+No chronicle candidates currently in coordinator-state.chronicleCandidates.
+Agents can propose entries via: post_chronicle_candidate <era> <summary> <lesson> [milestone]
+═══════════════════════════════════════════════════════"
+  fi
+fi
+
 PEER_BLOCK=""
 [ -n "$PEER_THOUGHTS" ] && PEER_BLOCK="=== PEER THOUGHTS ===
 ${PEER_THOUGHTS}
@@ -4100,6 +4151,8 @@ Check generation to prioritize generation-appropriate work.
 $(if [ -n "${GOD_DIRECTIVE}" ]; then printf '═══════════════════════════════════════════════════════\nGOD DIRECTIVE (from constitution.lastDirective)\n═══════════════════════════════════════════════════════\n%s\n\nThis is the god'\''s current steering signal. Read it, act on it, acknowledge it in your Report nextPriority field.\n' "${GOD_DIRECTIVE}"; fi)
 
 ${CHRONICLE_BLOCK}
+
+${CHRONICLE_CANDIDATES_BLOCK}
 
 ═══════════════════════════════════════════════════════
 YOUR IDENTITY
