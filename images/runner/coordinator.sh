@@ -2276,6 +2276,32 @@ route_tasks_by_specialization() {
         best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
 
         if [ -n "$best_agent" ]; then
+            # Issue #1474: Pre-claim the issue on the agent's behalf by writing to activeAssignments.
+            # Previously routing only wrote to lastRoutingDecisions, which workers ignored.
+            # Now the coordinator acts as a "pre-assigning authority" — the agent entry is
+            # already in activeAssignments when the worker starts, so claim_task() detects
+            # it as already claimed (by itself) and returns 0 immediately.
+            local current_assignments
+            current_assignments=$(get_state "activeAssignments")
+            # Only pre-assign if agent doesn't already have another issue assigned
+            local normalized_current
+            normalized_current=$(echo "$current_assignments" | tr -d ' ')
+            if ! echo "$normalized_current" | grep -qE "(^|,)${best_agent}:"; then
+                # Append pre-assignment to activeAssignments
+                local pre_assignment="${best_agent}:${issue_num}"
+                if [ -z "$current_assignments" ]; then
+                    update_state "activeAssignments" "$pre_assignment"
+                else
+                    update_state "activeAssignments" "${current_assignments},${pre_assignment}"
+                fi
+                echo "[$(date -u +%H:%M:%S)] PRE-ASSIGNED issue #$issue_num → $best_agent (written to activeAssignments)"
+                # Also write to /tmp for the working issue tracking
+                # Update active_assignments for subsequent loop iterations
+                active_assignments=$(get_state "activeAssignments")
+            else
+                echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING (not pre-assigned: $best_agent already has active issue): #$issue_num"
+            fi
+
             # Record specialized routing decision in coordinator state
             local routing_entry="${issue_num}:${best_agent}"
             routing_log="${routing_log}${routing_entry};"

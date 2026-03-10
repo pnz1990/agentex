@@ -1505,6 +1505,31 @@ request_coordinator_task() {
   local max_retries=3
   local retry=0
 
+  # ── COORDINATOR PRE-ASSIGNMENT CHECK (issue #1474) ───────────────────────
+  # The coordinator's route_tasks_by_specialization() runs every 7 iterations (~3.5 min).
+  # Previously it only wrote to lastRoutingDecisions, which workers never checked.
+  # Fix: coordinator now pre-writes "agent:issue" to activeAssignments before workers start.
+  # Here, we check if the coordinator already pre-assigned an issue to us.
+  # If yes, use it directly — skip the queue scan. claim_task() will return 0 immediately
+  # (detecting it was already claimed by us) and we proceed to work the issue.
+  local pre_assignments
+  pre_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+  if [ -n "$pre_assignments" ]; then
+    # Look for a pre-assignment for this agent
+    local pre_assigned_issue
+    pre_assigned_issue=$(echo "$pre_assignments" | tr -d ' ' | tr ',' '\n' | \
+      grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1)
+    if [ -n "$pre_assigned_issue" ] && [[ "$pre_assigned_issue" =~ ^[0-9]+$ ]]; then
+      log "Coordinator: found coordinator pre-assignment: issue #$pre_assigned_issue (specialized routing)"
+      # Write to temp file for end-of-session specialization tracking (issue #1252)
+      echo "$pre_assigned_issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+      COORDINATOR_ISSUE="$pre_assigned_issue"
+      push_metric "SpecializedTaskClaimed" 1
+      return 0
+    fi
+  fi
+
   # ── VISION QUEUE PRIORITY CHECK (issue #1149) ────────────────────────────
   # Check vision queue BEFORE the regular task queue. If a vision-queue item
   # is a GitHub issue number, claim it. If it's a feature name, log it for the
