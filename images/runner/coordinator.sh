@@ -568,8 +568,11 @@ tally_and_enact_votes() {
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
     # (causes OOM kill — coordinator only has 512Mi limit)
+    # Issue #1056: Filter to only proposal/vote types — reduces loaded data from 1800+ to <50 items,
+    # eliminating coordinator OOM even at 1Gi limit. Insight/planning/observation types are irrelevant
+    # for vote tallying and account for >99% of thought ConfigMaps.
     kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq '[.items[] | {
+        | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote") | {
             agent: (.data.agentRef // "unknown"),
             content: (.data.content // ""),
             type: (.data.thoughtType // ""),
@@ -783,8 +786,10 @@ track_debate_activity() {
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
     # (causes OOM kill — coordinator only has 512Mi limit)
+    # Issue #1056: Filter to only debate type thoughts — this function only needs debate thoughts
+    # for counting responses, threads, and disagreements.
     all_cm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq '[.items[] | {
+        | jq '[.items[] | select(.data.thoughtType == "debate") | {
             name: .metadata.name,
             type: (.data.thoughtType // ""),
             parent: (.data.parentRef // ""),
