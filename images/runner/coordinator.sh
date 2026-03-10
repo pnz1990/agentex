@@ -154,6 +154,48 @@ if [ -z "$unresolved_debates_val" ]; then
 fi
 echo "Coordinator-state initialization complete"
 
+# ── Lazy State Field Initialization (issue #1178) ────────────────────────────
+# The coordinator runs indefinitely. When new state fields are added to coordinator.sh,
+# they are initialized at startup — but if the coordinator was ALREADY RUNNING when
+# the new code was deployed (e.g., after a PR merge), those fields are never initialized.
+# Solution: ensure_state_fields() checks for missing fields and initializes them on every
+# main-loop iteration (via heartbeat). Low overhead: 6 kubectl reads per 30s cycle.
+ensure_state_fields() {
+    # Identity-based routing fields (issue #1113)
+    for field in specializedAssignments genericAssignments; do
+        local val
+        val=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+            -o jsonpath="{.data.$field}" 2>/dev/null)
+        if [ -z "$val" ]; then
+            echo "[$(date -u +%H:%M:%S)] Lazy-init: $field was missing, initializing to 0"
+            kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+                --type=merge -p "{\"data\":{\"$field\":\"0\"}}" 2>/dev/null || true
+        fi
+    done
+    for field in lastSpecializedRouting lastRoutingDecisions; do
+        local val
+        val=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+            -o jsonpath="{.data.$field}" 2>/dev/null)
+        if [ -z "$val" ]; then
+            echo "[$(date -u +%H:%M:%S)] Lazy-init: $field was missing, initializing to empty"
+            kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+                --type=merge -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+        fi
+    done
+    # Debate activity fields (issue #1111)
+    for field in unresolvedDebates lastDebateNudge; do
+        local val
+        val=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+            -o jsonpath="{.data.$field}" 2>/dev/null)
+        if [ -z "$val" ]; then
+            echo "[$(date -u +%H:%M:%S)] Lazy-init: $field was missing, initializing to empty"
+            kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
+                --type=merge -p "{\"data\":{\"$field\":\"\"}}" 2>/dev/null || true
+        fi
+    done
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
 # kubectl timeout wrapper (issue #692: prevent 120s hangs during cluster connectivity issues)
@@ -1584,6 +1626,13 @@ while true; do
 
     # Every iteration: cleanup stale assignments
     cleanup_stale_assignments
+
+    # Every 10 iterations (~5 min): ensure all required coordinator-state fields exist
+    # (issue #1178) — lazy initialization for fields added after coordinator was deployed.
+    # Running every 10 iterations balances prompt recovery with API call overhead.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        ensure_state_fields
+    fi
 
     # Every 4 iterations (~2 min): cleanup stale activeAgents entries (issue #676)
     # Agents register on startup but never deregister, causing activeAgents to accumulate
