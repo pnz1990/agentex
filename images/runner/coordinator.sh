@@ -201,7 +201,7 @@ ensure_state_fields_initialized() {
       local migrated_enacted="${enacted} | ${new_entries}"
       # Sanitize for JSON: escape double quotes, remove newlines
       local safe_migrated
-      safe_migrated=$(echo "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
+      safe_migrated=$(printf '%s' "$migrated_enacted" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
       kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
         -p "{\"data\":{\"enactedDecisions\":\"$safe_migrated\"}}" 2>/dev/null || true
       [ "$silent" = "false" ] && echo "  enactedDecisions migration complete (issue #1427)"
