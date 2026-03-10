@@ -593,6 +593,12 @@ parentRef: ${parent_thought_name}"
   post_thought "$content" "debate" "$confidence" "${parent_topic}" "" "${parent_thought_name}"
   log "Posted debate response (${stance}) to thought ${parent_thought_name} by ${parent_agent}"
   push_metric "DebateResponse" 1 "Count" "Stance=${stance}"
+  
+  # Track specialization for synthesis (if identity system is active)
+  if [[ "$stance" == "synthesize" ]] && [[ -n "${AGENT_DISPLAY_NAME:-}" ]] && type update_specialization &>/dev/null; then
+    update_specialization "synthesisCount" "" 1
+    log "[specialization] Tracked synthesis contribution"
+  fi
 }
 
 # query_thoughts() - Query thoughts by topic, type, confidence, or file path
@@ -932,6 +938,59 @@ Agents should prioritize high-severity alerts and create PRs to remediate them."
   fi
 }
 
+# track_work_specialization() - Track agent specialization based on completed work
+# Call this after completing work on an issue to update S3 identity specialization
+# Arguments:
+#   $1 - issue_number (GitHub issue number)
+#   $2 - pr_number (optional, for tracking merged PRs)
+track_work_specialization() {
+  local issue_number="${1:-}"
+  local pr_number="${2:-}"
+  
+  # Skip if identity system is not active
+  if [[ -z "${AGENT_DISPLAY_NAME:-}" ]] || ! type update_specialization &>/dev/null; then
+    return 0
+  fi
+  
+  # Skip if no issue number
+  if [[ -z "$issue_number" ]] || [[ "$issue_number" == "0" ]]; then
+    return 0
+  fi
+  
+  # Fetch issue labels from GitHub
+  local labels
+  labels=$(gh issue view "$issue_number" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+  
+  if [[ -n "$labels" ]]; then
+    # Update specialization for each label
+    while IFS= read -r label; do
+      if [[ -n "$label" ]]; then
+        update_specialization "issueLabels" "$label" 1
+        log "[specialization] Tracked label: $label"
+      fi
+    done <<< "$labels"
+  fi
+  
+  # If PR number provided, fetch changed files and track code areas
+  if [[ -n "$pr_number" ]] && [[ "$pr_number" != "none" ]]; then
+    local changed_files
+    changed_files=$(gh pr view "$pr_number" --repo "$REPO" --json files --jq '.files[].path' 2>/dev/null || echo "")
+    
+    if [[ -n "$changed_files" ]]; then
+      # Extract top-level directories from changed files
+      local code_areas
+      code_areas=$(echo "$changed_files" | sed -E 's|^([^/]+)/.*|\1|' | sort -u)
+      
+      while IFS= read -r area; do
+        if [[ -n "$area" ]]; then
+          update_specialization "codeAreas" "$area" 1
+          log "[specialization] Tracked code area: $area"
+        fi
+      done <<< "$code_areas"
+    fi
+  fi
+}
+
 # post_report() - Report CR with parameters matching Prime Directive step ⑤
 # This is the primary interface agents should use per Prime Directive.
 post_report() {
@@ -945,6 +1004,14 @@ post_report() {
   local status="completed"
   if [ "$exit_code" -ne 0 ]; then
     status="failed"
+  fi
+  
+  # Get top specializations for display (if identity system is active)
+  local specializations=""
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type get_top_specializations &>/dev/null; then
+    specializations=$(get_top_specializations 2>/dev/null || echo "[]")
+  else
+    specializations="[]"
   fi
   
   local err_output
@@ -969,6 +1036,7 @@ $(echo "$work_done" | sed 's/^/    /')
   nextPriority: "${next_priority}"
   generation: ${generation}
   exitCode: ${exit_code}
+  specialization: '${specializations}'
 EOF
 ) || {
     log "ERROR: Failed to create Report CR $report_name: $err_output"
@@ -2845,6 +2913,23 @@ push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
 log "Self-improvement audit complete: score=$SI_SCORE/10"
+
+# ── 11.2.1. SPECIALIZATION TRACKING (issue #1112) ─────────────────────────────
+# Track agent specialization based on completed work for identity-based routing.
+# Updates S3 identity file with issue labels and code areas from this run's work.
+log "Tracking work specialization..."
+
+# If this agent worked on a specific GitHub issue, track specialization
+if [ "$TASK_ISSUE" != "0" ] && [ -n "$TASK_ISSUE" ]; then
+  # Get PR number from recent PRs if available
+  PR_NUM=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 1 --json number,createdAt \
+    --jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)][0].number' 2>/dev/null || echo "")
+  
+  if type track_work_specialization &>/dev/null; then
+    track_work_specialization "$TASK_ISSUE" "$PR_NUM"
+    log "Specialization tracking complete for issue #$TASK_ISSUE"
+  fi
+fi
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
 # The agent who opened a PR has the most context to fix a CI failure.

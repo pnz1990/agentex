@@ -160,6 +160,12 @@ save_identity() {
     "issuesFiled": 0,
     "prsMerged": 0,
     "thoughtsPosted": 0
+  },
+  "specialization": {
+    "issueLabels": {},
+    "codeAreas": {},
+    "debatesWon": 0,
+    "synthesisCount": 0
   }
 }
 EOF
@@ -219,6 +225,106 @@ update_identity_stats() {
   else
     echo "[identity] WARNING: Could not save updated stats to S3"
   fi
+}
+
+#######################################
+# Update identity specialization in S3
+# Arguments:
+#   $1 - category (issueLabels, codeAreas, debatesWon, synthesisCount)
+#   $2 - key (for issueLabels/codeAreas, empty for counters)
+#   $3 - increment amount (default: 1)
+# Examples:
+#   update_specialization "issueLabels" "enhancement" 1
+#   update_specialization "codeAreas" "manifests/rgds" 1
+#   update_specialization "debatesWon" "" 1
+#   update_specialization "synthesisCount" "" 1
+#######################################
+update_specialization() {
+  local category="${1:-}"
+  local key="${2:-}"
+  local increment="${3:-1}"
+  
+  if [[ -z "$category" ]]; then
+    echo "[identity] ERROR: update_specialization requires category"
+    return 1
+  fi
+  
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    # No S3 identity file, skip update
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity from S3 for specialization update"
+    return 0
+  fi
+  
+  # Update specialization based on category
+  local updated_json
+  case "$category" in
+    issueLabels|codeAreas)
+      # These are objects with keys
+      if [[ -z "$key" ]]; then
+        echo "[identity] ERROR: $category requires a key"
+        return 1
+      fi
+      updated_json=$(echo "$identity_json" | jq \
+        --arg cat "$category" \
+        --arg k "$key" \
+        --argjson inc "$increment" \
+        '.specialization[$cat][$k] = (.specialization[$cat][$k] // 0) + $inc')
+      ;;
+    debatesWon|synthesisCount)
+      # These are simple counters
+      updated_json=$(echo "$identity_json" | jq \
+        --arg cat "$category" \
+        --argjson inc "$increment" \
+        '.specialization[$cat] = (.specialization[$cat] // 0) + $inc')
+      ;;
+    *)
+      echo "[identity] ERROR: Unknown specialization category: $category"
+      return 1
+      ;;
+  esac
+  
+  # Save back to S3
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    echo "[identity] Updated specialization: $category/$key += $increment"
+  else
+    echo "[identity] WARNING: Could not save updated specialization to S3"
+  fi
+}
+
+#######################################
+# Get top specializations for display in Report CR
+# Returns JSON array of top 3 specializations
+#######################################
+get_top_specializations() {
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    echo "[]"
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[]"
+    return 0
+  fi
+  
+  # Extract top 3 specializations
+  echo "$identity_json" | jq -c '
+    [
+      (.specialization.issueLabels // {} | to_entries | map({type: "label", name: .key, count: .value})),
+      (.specialization.codeAreas // {} | to_entries | map({type: "codeArea", name: .key, count: .value}))
+    ] | flatten | sort_by(-.count) | .[0:3]
+  '
 }
 
 #######################################
