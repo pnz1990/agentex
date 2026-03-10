@@ -1506,17 +1506,20 @@ tally_and_enact_votes() {
      # and ensures vote totals are complete even after coordinator restart (voteRegistry reset).
      local cutoff_24h
      cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-     if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
-       # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h)
-       # The 5-min buffer handles clock skew and thoughts created just before last tally.
-       local last_tally_minus5m
-       last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
-       # Compare: use 24h window if lastTallyTimestamp is older than 24h
-       if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
-         tally_cutoff_ts="$cutoff_24h"
-       else
-         tally_cutoff_ts="$last_tally_minus5m"
-       fi
+      if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
+        # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h)
+        # The 5-min buffer handles clock skew and thoughts created just before last tally.
+        # Using the EARLIER (broader) window ensures proposals posted hours ago are still tallied.
+        # Issue #1712: Previous code used LATER (narrower) window — inverted logic caused proposals
+        # older than ~5 min to fall out of the tally window, freezing vote counts permanently.
+        local last_tally_minus5m
+        last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
+        # Compare: use EARLIER of (lastTally - 5min) and (now - 24h) to get broader window
+        if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
+          tally_cutoff_ts="$last_tally_minus5m"  # lastTally - 5min is further back (broader)
+        else
+          tally_cutoff_ts="$cutoff_24h"  # 24h floor is further back (broader)
+        fi
      else
        tally_cutoff_ts="$cutoff_24h"
      fi
