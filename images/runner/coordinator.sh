@@ -538,15 +538,17 @@ refresh_task_queue() {
 
         # Issue #1149: Prepend visionQueue items BEFORE taskQueue so agent-voted issues get priority
         # visionQueue contains issues that 3+ agents voted to prioritize via governance
-        # Format: "issueNumber:voteCount" pairs; extract just the issue numbers
+        # Issue #1444/#1455: visionQueue uses ";" separator (consistent with vision-queue topic
+        # and request_coordinator_task() which parses with cut -d';' -f1)
         local vision_queue
         vision_queue=$(get_state "visionQueue")
         if [ -n "$vision_queue" ]; then
-            # Extract issue numbers from "issueNumber:voteCount" pairs
+            # Extract issue numbers from semicolon-separated entries (each entry may be just a number
+            # or a feature:description:ts:proposer tuple; extract the first field, keep numeric-only)
             local vision_issues
-            vision_issues=$(echo "$vision_queue" | tr ',' '\n' | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+            vision_issues=$(echo "$vision_queue" | tr ';' '\n' | cut -d: -f1 | grep -E '^[0-9]+$' | tr '\n' ',' | sed 's/,$//')
             if [ -n "$vision_issues" ]; then
-                # Prepend vision issues, then deduplicate (vision issues appear first)
+                # Prepend vision issues, then deduplicate (vision items stay at front)
                 sorted_issues="${vision_issues},${sorted_issues}"
                 # Deduplicate while preserving first occurrence (vision items stay at front)
                 sorted_issues=$(echo "$sorted_issues" | tr ',' '\n' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//')
@@ -1311,10 +1313,12 @@ NUDGE_EOF
                          -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
 
                      # Deduplication: only add if not already present
-                     if echo "$current_vq" | tr ',' '\n' | grep -q "^${add_issue}$"; then
+                     # Issue #1444/#1455: Use semicolon separator (consistent with vision-queue topic
+                     # and request_coordinator_task() which parses with cut -d';' -f1)
+                     if echo "$current_vq" | tr ';' '\n' | grep -q "^${add_issue}$"; then
                          echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already present, skipping"
                      else
-                         local new_vq="${current_vq:+$current_vq,}${add_issue}"
+                         local new_vq="${current_vq:+$current_vq;}${add_issue}"
                         kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
                             --type=merge \
                             -p "{\"data\":{\"visionQueue\":\"$new_vq\"}}" \
@@ -1386,12 +1390,13 @@ NUDGE_EOF
                          current_vq=$(get_state "visionQueue")
                          local new_entry="${vision_issue}:${approve_votes}"
                          # Only add if not already in visionQueue
+                         # Issue #1444/#1455: Use semicolon separator for grep checks and join
                          if ! echo "$current_vq" | grep -q "^${vision_issue}:" && \
-                            ! echo "$current_vq" | grep -q ",${vision_issue}:"; then
+                            ! echo "$current_vq" | grep -q ";${vision_issue}:"; then
                              if [ -z "$current_vq" ]; then
                                  update_state "visionQueue" "$new_entry"
                              else
-                                 update_state "visionQueue" "${current_vq},${new_entry}"
+                                 update_state "visionQueue" "${current_vq};${new_entry}"
                              fi
                              echo "[$(date -u +%H:%M:%S)] ✓ VISION QUEUE: Added issue #$vision_issue (${approve_votes} votes) to visionQueue"
                              patched=true
@@ -1463,7 +1468,9 @@ NUDGE_EOF
                          -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
 
                      # Check if issue already in queue
-                     if echo ",$vision_queue," | grep -q ",$add_issue,"; then
+                     # Issue #1444/#1455: Use semicolon separator (consistent with vision-queue topic
+                     # and request_coordinator_task() which parses with cut -d';' -f1)
+                     if echo ";${vision_queue};" | grep -q ";${add_issue};"; then
                          echo "[$(date -u +%H:%M:%S)] VISION-FEATURE: issue #$add_issue already in visionQueue ($vision_queue)"
                      else
                          # Add to queue
@@ -1471,7 +1478,7 @@ NUDGE_EOF
                          if [ -z "$vision_queue" ]; then
                              new_vision_queue="$add_issue"
                          else
-                             new_vision_queue="${vision_queue},${add_issue}"
+                             new_vision_queue="${vision_queue};${add_issue}"
                          fi
                          kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
                              --type=merge \
