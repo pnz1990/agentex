@@ -113,6 +113,14 @@ gh_auth_with_retry() {
   return 1
 }
 
+# Issue #1526: Create liveness probe file BEFORE auth retries.
+# gh_auth_with_retry() can sleep up to 30s+60s=90s waiting for GitHub API.
+# The liveness probe fires at t=30,60,90s (initialDelay=30, period=30, failureThreshold=3).
+# Without this early touch, the pod gets killed by the liveness probe while auth is retrying,
+# resulting in a continuous crash loop that prevents the coordinator from ever starting.
+touch /tmp/coordinator-alive
+touch /tmp/coordinator-ready
+
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
   echo "GitHub token loaded from read-only file mount"
