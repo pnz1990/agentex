@@ -383,6 +383,26 @@ ensure_state_fields_initialized() {
       jq -r '.data | keys[] | select(startswith("voteRegistry_"))' 2>/dev/null || true)
     [ "$stale_count" -gt 0 ] && [ "$silent" = "false" ] && echo "  Issue #1650: Cleaned $stale_count stale voteRegistry keys (enacted topics)"
   fi
+
+  # Issue #1696: One-time cleanup of definitively rejected voteRegistry_* keys.
+  # tally_votes() now handles new rejections inline (reject >= VOTE_THRESHOLD → remove key).
+  # This one-time sweep cleans up keys that accumulated BEFORE this fix was deployed.
+  # A key is definitively rejected if its registry entry contains "reject=N" where N >= VOTE_THRESHOLD.
+  local rejected_count=0
+  while IFS= read -r vote_key; do
+    [ -z "$vote_key" ] && continue
+    local registry_val
+    registry_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" \
+      -o jsonpath="{.data.${vote_key}}" 2>/dev/null || echo "")
+    local reject_count_val
+    reject_count_val=$(echo "$registry_val" | grep -oE 'reject=[0-9]+' | cut -d= -f2 || echo "0")
+    [ -z "$reject_count_val" ] && reject_count_val=0
+    if [ "$reject_count_val" -ge "$VOTE_THRESHOLD" ]; then
+      remove_state "$vote_key" 2>/dev/null && rejected_count=$((rejected_count + 1)) || true
+    fi
+  done < <(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq -r '.data | keys[] | select(startswith("voteRegistry_"))' 2>/dev/null || true)
+  [ "$rejected_count" -gt 0 ] && [ "$silent" = "false" ] && echo "  Issue #1696: Cleaned $rejected_count definitively rejected voteRegistry keys (reject >= $VOTE_THRESHOLD)"
 }
 
 # Run at startup
@@ -1651,6 +1671,18 @@ tally_and_enact_votes() {
         # Update vote registry (multi-topic support)
         local registry_entry="$topic: approve=$approve_votes reject=$reject_votes abstain=$abstain_votes"
         update_state "voteRegistry_${topic}" "$registry_entry"
+
+        # Issue #1696: Clean up voteRegistry keys for definitively rejected proposals.
+        # PR #1659 only removes keys after ENACTION (approve >= threshold). But proposals
+        # with reject >= threshold will NEVER be enacted — they accumulate indefinitely.
+        # Example: voteRegistry_circuit-breaker-aggressive with reject=9, approve=0.
+        # Fix: remove the key immediately when reject_votes >= VOTE_THRESHOLD.
+        if [ "$reject_votes" -ge "$VOTE_THRESHOLD" ]; then
+            echo "[$(date -u +%H:%M:%S)] GOVERNANCE: $topic definitively rejected (reject=$reject_votes >= threshold=$VOTE_THRESHOLD). Cleaning up voteRegistry key."
+            remove_state "voteRegistry_${topic}" 2>/dev/null || true
+            push_metric "GovernanceRejected" 1 "Count" "Topic=${topic}"
+            continue
+        fi
 
         # Check if already enacted (Issue #1398: use in-memory loop_enacted to prevent
         # read-modify-write race condition; also normalize decision_key to topic-only
