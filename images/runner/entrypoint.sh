@@ -3550,31 +3550,73 @@ ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit
 PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Compute self-improvement score
+# Vision-aligned self-improvement audit (governance-enacted: self-improvement-audit-metrics)
+# Replaced volume-based scoring with vision-alignment metrics (issue #1283)
+# Metrics: debate participation, vision-aligned issues, N+2 coordination usage
+
+# 1. Debate participation: did agent post debate/synthesis responses?
+DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null | \
+  jq --arg agent "$AGENT_NAME" --arg start "$AGENT_START_ISO" \
+  '[.items[] | select(.data.agentRef == $agent and .data.thoughtType == "debate" and .metadata.creationTimestamp >= $start)] | length' 2>/dev/null || echo "0")
+
+# 2. Vision-aligned issues: percentage of filed issues with enhancement/self-improvement labels
+VISION_ISSUES=0
+if [ "$ISSUES_CREATED" -gt 0 ]; then
+  VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels \
+    | jq --arg start "$AGENT_START_ISO" \
+    '[.[] | select(.createdAt >= $start) | select(.labels | map(.name) | any(. == "enhancement" or . == "self-improvement"))] | length' 2>/dev/null || echo "0")
+fi
+
+# 3. N+2 coordination: did agent call plan_for_n_plus_2() with meaningful content?
+N2_COORDINATION=0
+if [ -f "/tmp/planning-state.json" ]; then
+  N2_PRIORITY=$(jq -r '.n2Priority // ""' /tmp/planning-state.json 2>/dev/null || echo "")
+  if [ -n "$N2_PRIORITY" ] && [ "$N2_PRIORITY" != "none" ] && [ "$N2_PRIORITY" != "null" ]; then
+    N2_COORDINATION=1
+  fi
+fi
+
+# Compute vision-aligned score (0-10 scale)
 SI_SCORE=0
 SI_DETAILS=""
 
-if [ "$ISSUES_CREATED" -gt 0 ] && [ "$PRS_OPENED" -gt 0 ]; then
-  SI_SCORE=10
-  SI_DETAILS="Full compliance: created $ISSUES_CREATED issue(s) and opened $PRS_OPENED PR(s)"
-elif [ "$ISSUES_CREATED" -gt 0 ]; then
-  SI_SCORE=7
-  SI_DETAILS="Partial compliance: created $ISSUES_CREATED issue(s) but no PR"
-elif [ "$PRS_OPENED" -gt 0 ]; then
-  SI_SCORE=5
-  SI_DETAILS="Partial compliance: opened $PRS_OPENED PR(s) but no new issue"
-else
-  SI_SCORE=2
-  SI_DETAILS="Low compliance: no issues or PRs created (may have worked on assigned issue)"
+# +4 points for debate participation (core vision requirement)
+if [ "$DEBATE_RESPONSES" -gt 0 ]; then
+  SI_SCORE=$((SI_SCORE + 4))
+  SI_DETAILS="${SI_DETAILS}debate=$DEBATE_RESPONSES "
 fi
+
+# +4 points for vision-aligned issues (not just volume)
+if [ "$VISION_ISSUES" -gt 0 ]; then
+  SI_SCORE=$((SI_SCORE + 4))
+  SI_DETAILS="${SI_DETAILS}vision-issues=$VISION_ISSUES/$ISSUES_CREATED "
+fi
+
+# +2 points for N+2 coordination (multi-generation planning)
+if [ "$N2_COORDINATION" -eq 1 ]; then
+  SI_SCORE=$((SI_SCORE + 2))
+  SI_DETAILS="${SI_DETAILS}n2-planning=yes "
+fi
+
+# Fallback: if no vision metrics but agent did assigned work (opened PR), give baseline score
+if [ "$SI_SCORE" -eq 0 ] && [ "$PRS_OPENED" -gt 0 ]; then
+  SI_SCORE=3
+  SI_DETAILS="baseline: opened $PRS_OPENED PR(s) for assigned work"
+fi
+
+# Trim trailing space
+SI_DETAILS=$(echo "$SI_DETAILS" | sed 's/ $//')
 
 # Post audit result as a thought for peer visibility
 post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
 
-# Push metrics to CloudWatch
+# Push metrics to CloudWatch (vision-aligned metrics added in issue #1283)
 push_metric "SelfImprovementScore" "$SI_SCORE" "None"
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
+push_metric "DebateResponsesByAgent" "$DEBATE_RESPONSES" "Count"
+push_metric "VisionAlignedIssuesByAgent" "$VISION_ISSUES" "Count"
+push_metric "N2CoordinationUsage" "$N2_COORDINATION" "None"
 
 # Update identity stats for issues filed and PRs opened (issue #1139)
 if [ "$ISSUES_CREATED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
