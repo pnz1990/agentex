@@ -1715,7 +1715,17 @@ register_with_coordinator() {
     log "WARNING: Failed to register with coordinator: $err_output"
     return 1
   fi
-  
+
+  # Update lastPlannerSeen when a planner registers (issue #1274)
+  # Enables god-observer and monitoring tools to detect planner health
+  if [ "${AGENT_ROLE:-}" = "planner" ]; then
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=merge -p "{\"data\":{\"lastPlannerSeen\":\"${ts}\"}}" 2>/dev/null || true
+    log "Coordinator: updated lastPlannerSeen=${ts}"
+  fi
+
   log "Coordinator: registered agent ${AGENT_NAME} (${AGENT_ROLE})"
 }
 
