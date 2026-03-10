@@ -1294,6 +1294,9 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Track claimed issue for specialization update at end-of-session (issue #1252)
+        # Must be set at claim time before coordinator cleanup can race and clear activeAssignments
+        MY_WORKED_ISSUE="$issue"
         return 0
       fi
     else
@@ -1304,6 +1307,9 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
+        # Track claimed issue for specialization update at end-of-session (issue #1252)
+        # Must be set at claim time before coordinator cleanup can race and clear activeAssignments
+        MY_WORKED_ISSUE="$issue"
         return 0
       fi
     fi
@@ -2385,6 +2391,9 @@ restart_coordinator_if_unhealthy
 # Issue #938: workers were bypassing coordinator queue entirely, causing duplicates
 COORDINATOR_ISSUE=0
 COORDINATOR_CONTEXT=""
+# MY_WORKED_ISSUE tracks the issue claimed this session for specialization update (issue #1252).
+# Set at claim_task() call time (before coordinator 30s cleanup can race and clear activeAssignments).
+MY_WORKED_ISSUE=0
 if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
   log "${AGENT_ROLE}: requesting task from coordinator..."
   request_coordinator_task
@@ -3405,17 +3414,25 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
   push_metric "CIPassOnExit" 1
   
   # Update specialization based on issue labels worked on this session (issue #1098)
-  # Resolve the worked issue number: coordinator-assigned or self-selected (issue #1147)
-  WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
+  # Resolve the worked issue number (issue #1252 fix):
+  # Priority: MY_WORKED_ISSUE (set at claim_task() time) > COORDINATOR_ISSUE
+  # MY_WORKED_ISSUE is set atomically at claim time, so it survives the coordinator's
+  # 30s cleanup loop that wipes activeAssignments before this end-of-session code runs.
+  WORKED_ISSUE="${MY_WORKED_ISSUE:-0}"
   if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
-    # Self-selected path: COORDINATOR_ISSUE was never set (queue was empty).
-    # Look up this agent's active assignment in coordinator-state to find the issue claimed.
+    # Fallback: coordinator-assigned issue (set by request_coordinator_task)
+    WORKED_ISSUE="${COORDINATOR_ISSUE:-0}"
+  fi
+  if [ "$WORKED_ISSUE" = "0" ] || [ -z "$WORKED_ISSUE" ]; then
+    # Last resort: reconstruct from activeAssignments (may fail due to cleanup race)
     ACTIVE_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
     WORKED_ISSUE=$(echo "$ACTIVE_ASSIGNMENTS" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 || echo "0")
     if [ -n "$WORKED_ISSUE" ] && [ "$WORKED_ISSUE" != "0" ]; then
-      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments"
+      log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments (fallback)"
     fi
+  else
+    log "Specialization tracking: using MY_WORKED_ISSUE=#$WORKED_ISSUE (set at claim time)"
   fi
   # Fetch labels from the GitHub issue worked on this session
   if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
