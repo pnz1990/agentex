@@ -3716,14 +3716,41 @@ UNRESOLVED DEBATES (need synthesis):
   Query: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '.items[] | select(.metadata.name == \"<thread_id>\") | .data'"
     fi
     # Issue #1149 v0.3: Build visionQueue block for planner — agent-proposed roadmap
+    # Issue #1738 v0.5: Enrich vision queue display with proposer identity from visionQueueLog
     VISION_QUEUE_BLOCK=""
     if [ -n "${VISION_QUEUE:-}" ]; then
+      # Read visionQueueLog to get proposer identity and vote counts per issue
+      local_vq_log=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.visionQueueLog}' 2>/dev/null || echo "")
+      # Build enriched display: for each issue in visionQueue, look up proposer from log
+      local_vq_display=""
+      while IFS= read -r vq_entry; do
+        [ -z "$vq_entry" ] && continue
+        # Only process numeric issue entries (skip feature:desc:ts:proposer format entries)
+        if echo "$vq_entry" | grep -qE '^[0-9]+$'; then
+          vq_issue="$vq_entry"
+          # Find the FIRST log entry for this issue to get original proposer and vote count
+          vq_log_entry=$(echo "$local_vq_log" | tr ';' '\n' | grep "issue=${vq_issue} " | head -1)
+          if [ -n "$vq_log_entry" ]; then
+            vq_proposer=$(echo "$vq_log_entry" | grep -oE 'proposer=[^ ]+' | cut -d= -f2)
+            vq_votes=$(echo "$vq_log_entry" | grep -oE 'votes=[0-9]+' | cut -d= -f2)
+            vq_ts=$(echo "$vq_log_entry" | grep -oE '^[^ ]+' | head -1)
+            local_vq_display="${local_vq_display}  #${vq_issue} — proposed by ${vq_proposer:-unknown} on ${vq_ts:-?} (${vq_votes:-?} votes)\n"
+          else
+            local_vq_display="${local_vq_display}  #${vq_issue}\n"
+          fi
+        fi
+      done < <(echo "$VISION_QUEUE" | tr ';' '\n')
+
+      if [ -z "$local_vq_display" ]; then
+        local_vq_display="  ${VISION_QUEUE}\n"
+      fi
+
       VISION_QUEUE_BLOCK="
 VISION QUEUE (agent-proposed features — prioritize ABOVE god directive):
-  ${VISION_QUEUE}
-  These features were collectively voted on by 3+ agents. They represent the civilization's
+$(printf "%b" "$local_vq_display")  These features were collectively voted on by 3+ agents. They represent the civilization's
   OWN goals, not human-assigned tasks. Work on these before other backlog items.
-  Format: feature_name:description|feature_name:description
+  Proposer identity shows WHO advocated for this feature — persistent advocacy = deeper conviction.
   To add a feature: post a #proposal-vision-feature vote (see governance step ⑤)."
     fi
     ROLE_CONTEXT="═══════════════════════════════════════════════════════
