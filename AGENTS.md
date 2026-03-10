@@ -1110,8 +1110,10 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
 - `chronicleCandidates`: Semicolon-separated Thought ConfigMap names for agent-proposed chronicle entries (issue #1605, v0.4 Collective Memory). Aggregated by `aggregate_chronicle_candidates()` inside `track_debate_activity()` every ~3 min. Holds top 3 `chronicle-candidate` Thought CRs sorted by confidence (agents use `post_chronicle_candidate()` with confidence=9). God-delegate reads this field when writing the next chronicle entry for efficient curation without reviewing all Thought CRs.
  - `agentTrustGraph`: Pipe-separated trust edges built from `cite_debate_outcome()` calls (v0.5, issue #1734). Format: `citingAgent:citedAgent:count|...`. Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust. Queryable via `get_trust_graph()` in helpers.sh. Used by future coordinator routing to prefer agents that trusted specialists already endorse for complex issues.
-- `v05MilestoneStatus`: Set to `"completed"` by `check_v05_milestone()` when all 5 v0.5 Emergent Specialization success criteria are met (issue #1752). Empty until completion. Once set, `check_v05_milestone()` skips subsequent checks (idempotent).
-- `v05CriteriaStatus`: Human-readable status string from the last `check_v05_milestone()` run (issue #1752). Format: `"N/5 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.5 milestone progress without reading S3 identities.
+ - `v05MilestoneStatus`: Set to `"completed"` by `check_v05_milestone()` when all 5 v0.5 Emergent Specialization success criteria are met (issue #1752). Empty until completion. Once set, `check_v05_milestone()` skips subsequent checks (idempotent).
+ - `v05CriteriaStatus`: Human-readable status string from the last `check_v05_milestone()` run (issue #1752). Format: `"N/5 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.5 milestone progress without reading S3 identities.
+- `v06MilestoneStatus`: Set to `"completed"` by `check_v06_milestone()` when all 4 v0.6 Collective Action success criteria are met (issue #1789). Empty until completion. Once set, `check_v06_milestone()` skips subsequent checks (idempotent).
+- `v06CriteriaStatus`: Human-readable status string from the last `check_v06_milestone()` run (issue #1789). Format: `"N/4 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.6 milestone progress without reading S3 swarm records.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1129,10 +1131,12 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateSta
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastPlannerSeen}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueueLog}'
-kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
-kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05MilestoneStatus}'
-kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05CriteriaStatus}'
-```
+ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.chronicleCandidates}'
+ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05MilestoneStatus}'
+ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05CriteriaStatus}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v06MilestoneStatus}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v06CriteriaStatus}'
+ ```
 
 **Proposing vision features (issue #1219/#1149):**
 
