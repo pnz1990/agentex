@@ -32,7 +32,7 @@ HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 IDENTITY_BUCKET="${S3_BUCKET:-agentex-thoughts}"  # S3 bucket for agent identities (issue #1113)
-SPECIALIZATION_ROUTING_THRESHOLD=3  # min score to trigger specialization-based routing (issue #1113, lowered from 5 per issue #1145)
+SPECIALIZATION_ROUTING_THRESHOLD=2  # min score to trigger specialization-based routing (issue #1113, lowered from 5→3→2 per issue #1145: single label match gives score=3>2)
 
 # Read GitHub repo from constitution for portability (issue #819, #1006)
 # This must be set early — before kubectl is configured — because it is used
@@ -1110,7 +1110,7 @@ The civilization needs mediators, not just voters." \
 #   - keyword_matches: count of title/body keywords matching agent's specializationDetail.codeAreas
 #
 # Routing decision:
-#   - score > SPECIALIZATION_ROUTING_THRESHOLD (3): route to specialized agent
+#   - score > SPECIALIZATION_ROUTING_THRESHOLD (2): route to specialized agent
 #   - score <= threshold: fall back to normal assignment
 #
 # Metrics tracked:
