@@ -68,9 +68,20 @@ count_active_jobs() {
 }
 
 count_active_planners() {
-    # Redirect stderr to /dev/null to avoid mixing error output with the integer result
+    # Count planner Jobs that are either:
+    # 1. Actively running (status.active > 0), OR
+    # 2. Recently created but not yet active (within 30s grace window)
+    # This prevents the race condition where a Job was just spawned but Kubernetes
+    # hasn't set status.active = 1 yet, causing a second planner to be spawned.
+    # Evidence: planner-1773128676 (07:44:46Z) + planner-1773128680 (07:44:50Z) spawned 4s apart.
     timeout 10s kubectl get jobs -n "$NAMESPACE" -l agentex/role=planner -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' 2>/dev/null || echo "0"
+        jq --argjson now "$(date +%s)" '[.items[] | select(
+            .status.completionTime == null and
+            (
+                (.status.active // 0) > 0 or
+                ((.metadata.creationTimestamp | fromdateiso8601) > ($now - 30))
+            )
+        )] | length' 2>/dev/null || echo "0"
 }
 
 spawn_planner_job() {
