@@ -243,6 +243,51 @@ if ! type push_metric >/dev/null 2>&1; then
   push_metric() { true; }
 fi
 
+# ── _cache_issue_labels_at_claim ─────────────────────────────────────────────
+# Internal helper: cache issue labels at claim time to prevent GitHub rate-limit
+# failures at exit time (issue #1268). Called by claim_task() after a successful claim.
+# Writes to /tmp/agentex-issue-labels AND coordinator-state.issueLabels.
+# Fails silently — does not affect claim_task() return value.
+_cache_issue_labels_at_claim() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  # Fetch labels from GitHub (best-effort at claim time)
+  local labels
+  labels=$(gh issue view "$issue" --repo "$REPO" \
+    --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+  if [ -z "$labels" ]; then
+    log "Label cache: could not fetch labels for issue #$issue at claim time (fallback to GitHub at exit)"
+    return 0
+  fi
+
+  # Write to temp file for fast, reliable access at exit time
+  echo "${issue}:${labels}" > /tmp/agentex-issue-labels 2>/dev/null || true
+
+  # Also write to coordinator-state.issueLabels for cross-pod durability
+  local current_labels_cache
+  current_labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+
+  # Remove any existing entry for this issue (dedup), then append new entry
+  local cleaned_cache
+  cleaned_cache=$(echo "$current_labels_cache" | sed -E "s/(^|\\|)${issue}:[^|]*(\\||$)/|/g" | sed 's/^|//;s/|$//')
+
+  local new_cache
+  if [ -z "$cleaned_cache" ]; then
+    new_cache="${issue}:${labels}"
+  else
+    new_cache="${cleaned_cache}|${issue}:${labels}"
+  fi
+
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" 2>/dev/null || true
+
+  log "Label cache: cached labels for issue #$issue: '$labels'"
+  return 0
+}
+
 # ── claim_task ────────────────────────────────────────────────────────────────
 # Atomically claim a GitHub issue to prevent duplicate work (issue #859).
 # Uses CAS (compare-and-swap) on coordinator-state.activeAssignments so only one
@@ -312,30 +357,30 @@ claim_task() {
       if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
         --type=json \
         -p "[{\"op\":\"add\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
-        2>/dev/null; then
-        log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
-        push_metric "TaskClaimed" 1
-        # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
-        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
-        # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
-        _cache_issue_labels "$issue"
-        return 0
-      fi
-    else
-      # Field exists: use test+replace for atomic CAS
-      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
-        --type=json \
-        -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
-        2>/dev/null; then
-        log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
-        push_metric "TaskClaimed" 1
-        # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
-        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
-        # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
-        _cache_issue_labels "$issue"
-        return 0
-      fi
-    fi
+         2>/dev/null; then
+         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
+         push_metric "TaskClaimed" 1
+         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
+         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
+         _cache_issue_labels_at_claim "$issue"
+         return 0
+       fi
+     else
+       # Field exists: use test+replace for atomic CAS
+       if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+         --type=json \
+         -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+         2>/dev/null; then
+         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
+         push_metric "TaskClaimed" 1
+         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
+         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
+         _cache_issue_labels_at_claim "$issue"
+         return 0
+       fi
+     fi
 
     # CAS failed: another agent concurrently modified activeAssignments — retry with fresh read
     log "Coordinator: CAS failed for issue #$issue (attempt $attempt/$max_attempts) — retrying"

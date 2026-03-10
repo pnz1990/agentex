@@ -1327,6 +1327,57 @@ append_to_chronicle() {
 }
 
 # ── Coordinator integration ───────────────────────────────────────────────────
+
+# _cache_issue_labels_on_claim() - Cache GitHub issue labels at claim time (issue #1268)
+# Called immediately after a successful claim in claim_task(). Fetches labels from GitHub
+# and stores them in coordinator-state.issueLabels AND /tmp/agentex-issue-labels so the
+# end-of-session specialization handler can read them without needing the GitHub API.
+# Format of issueLabels field: "issue1:label1,label2|issue2:label1|..."
+# Fails silently — if GitHub API is unavailable at claim time, the original fallback
+# (fetching labels at exit time) still applies.
+_cache_issue_labels_on_claim() {
+  local issue="$1"
+  [ -z "$issue" ] || [ "$issue" = "0" ] && return 0
+
+  # Fetch labels from GitHub (best-effort — more likely to succeed at claim time
+  # than at exit time because claim happens early in agent lifecycle)
+  local labels
+  labels=$(gh issue view "$issue" --repo "$REPO" \
+    --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+  if [ -z "$labels" ]; then
+    log "Label cache: could not fetch labels for issue #$issue (will fall back to GitHub at exit)"
+    return 0
+  fi
+
+  # Write to temp file for fast access at exit time (survives coordinator cleanup race)
+  echo "${issue}:${labels}" > /tmp/agentex-issue-labels 2>/dev/null || true
+
+  # Also cache in coordinator-state.issueLabels so the labels survive pod restarts
+  # (though in practice /tmp is sufficient since pods don't restart between claim and exit)
+  # Format: "issue:labels|issue:labels|..."  — append our entry, dedup existing
+  local current_labels_cache
+  current_labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+
+  # Remove any existing entry for this issue (dedup by replacing issue:...|)
+  local cleaned_cache
+  cleaned_cache=$(echo "$current_labels_cache" | sed -E "s/(^|\\|)${issue}:[^|]*(\\||$)/|/g" | sed 's/^|//;s/|$//')
+
+  local new_cache
+  if [ -z "$cleaned_cache" ]; then
+    new_cache="${issue}:${labels}"
+  else
+    new_cache="${cleaned_cache}|${issue}:${labels}"
+  fi
+
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+    --type=merge -p "{\"data\":{\"issueLabels\":\"${new_cache}\"}}" 2>/dev/null || true
+
+  log "Label cache: cached labels for issue #$issue: $labels"
+  return 0
+}
+
 # claim_task() - Atomically claim a GitHub issue to prevent duplicate work (issue #859)
 # Uses CAS (compare-and-swap) on coordinator-state.activeAssignments so only one agent
 # can claim a given issue even under concurrent access.
@@ -1382,33 +1433,33 @@ claim_task() {
         2>/dev/null; then
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
-        # Persist claimed issue to temp file so end-of-session specialization tracking
-        # can find it even after coordinator activeAssignments cleanup removes the entry
-        # (issue #1252: WORKED_ISSUE=0 race with coordinator 30s cleanup loop)
-        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
-        # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
-        # (GitHub API may be rate-limited at exit time during high agent activity)
-        cache_issue_labels_on_claim "$issue"
-        return 0
-      fi
-    else
-      # Field exists: use test+replace for atomic CAS
-      if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
-        --type=json \
-        -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
-        2>/dev/null; then
-        log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
-        push_metric "TaskClaimed" 1
-        # Persist claimed issue to temp file so end-of-session specialization tracking
-        # can find it even after coordinator activeAssignments cleanup removes the entry
-        # (issue #1252: WORKED_ISSUE=0 race with coordinator 30s cleanup loop)
-        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
-        # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
-        # (GitHub API may be rate-limited at exit time during high agent activity)
-        cache_issue_labels_on_claim "$issue"
-        return 0
-      fi
-    fi
+         # Persist claimed issue to temp file so end-of-session specialization tracking
+         # can find it even after coordinator activeAssignments cleanup removes the entry
+         # (issue #1252: WORKED_ISSUE=0 race with coordinator 30s cleanup loop)
+         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
+         # (GitHub API may be rate-limited at exit time during high agent activity)
+         cache_issue_labels_on_claim "$issue"
+         return 0
+       fi
+     else
+       # Field exists: use test+replace for atomic CAS
+       if kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+         --type=json \
+         -p "[{\"op\":\"test\",\"path\":\"/data/activeAssignments\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/activeAssignments\",\"value\":\"${new_assignments}\"}]" \
+         2>/dev/null; then
+         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
+         push_metric "TaskClaimed" 1
+         # Persist claimed issue to temp file so end-of-session specialization tracking
+         # can find it even after coordinator activeAssignments cleanup removes the entry
+         # (issue #1252: WORKED_ISSUE=0 race with coordinator 30s cleanup loop)
+         echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+         # Issue #1268: Cache issue labels at claim time for resilient specialization tracking
+         # (GitHub API may be rate-limited at exit time during high agent activity)
+         cache_issue_labels_on_claim "$issue"
+         return 0
+       fi
+     fi
 
     # CAS failed: another agent concurrently modified activeAssignments — retry with fresh read
     log "Coordinator: CAS failed for issue #$issue (attempt $attempt/$max_attempts) — retrying"
@@ -3952,31 +4003,49 @@ if [ "$PRS_OPENED" -gt 0 ] && [ "$OPENCODE_EXIT" -eq 0 ]; then
       log "Specialization tracking: resolved self-selected issue #$WORKED_ISSUE from coordinator activeAssignments (fallback)"
     fi
   fi
-  # Fetch labels from the GitHub issue worked on this session.
-  # Issue #1268: Check coordinator-state issueLabels cache FIRST (populated by claim_task()
-  # at claim time). This is resilient to GitHub API rate limits (common during high agent
-  # activity when 10+ agents are concurrently hitting the GitHub API at exit time).
-  # Falls back to direct GitHub API call only on cache miss.
-  if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
-    WORKED_LABELS=""
-    # Step 1: Check coordinator-state label cache (populated by claim_task() at claim time)
-    ISSUE_LABELS_CACHE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-      -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
-    if [ -n "$ISSUE_LABELS_CACHE" ]; then
-      WORKED_LABELS=$(echo "$ISSUE_LABELS_CACHE" | tr '|' '\n' | grep "^${WORKED_ISSUE}:" | cut -d: -f2- | head -1 || echo "")
-      if [ -n "$WORKED_LABELS" ]; then
-        log "Specialization tracking: using cached labels for issue #$WORKED_ISSUE: '$WORKED_LABELS'"
-      fi
-    fi
-    # Step 2: Fall back to GitHub API if cache miss (e.g., issue claimed before this fix)
-    if [ -z "$WORKED_LABELS" ]; then
-      log "Specialization tracking: cache miss for issue #$WORKED_ISSUE — querying GitHub API"
-      WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
-        --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-      if [ -z "$WORKED_LABELS" ]; then
-        log "WARNING: GitHub API unavailable for label fetch on issue #$WORKED_ISSUE — specialization not updated (issue #1268)"
-      fi
-    fi
+   # Fetch labels from the GitHub issue worked on this session
+   # Priority: 1) /tmp/agentex-issue-labels (cached at claim time, issue #1268)
+   #           2) coordinator-state.issueLabels cache (survives pod restart)
+   #           3) GitHub API direct fetch (original fallback)
+   if type update_specialization &>/dev/null && [ -n "${WORKED_ISSUE:-}" ] && [ "$WORKED_ISSUE" != "0" ]; then
+     WORKED_LABELS=""
+
+     # Check 1: temp file cache written at claim time (fastest, most reliable)
+     if [ -f "/tmp/agentex-issue-labels" ]; then
+       local cached_entry
+       cached_entry=$(grep "^${WORKED_ISSUE}:" /tmp/agentex-issue-labels 2>/dev/null || echo "")
+       if [ -n "$cached_entry" ]; then
+         WORKED_LABELS="${cached_entry#*:}"
+         log "Specialization tracking: got labels from claim-time cache for issue #$WORKED_ISSUE: $WORKED_LABELS"
+       fi
+     fi
+
+     # Check 2: coordinator-state.issueLabels cache (survives pod restart)
+     if [ -z "$WORKED_LABELS" ]; then
+       local labels_cache
+       labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+         -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+       if [ -n "$labels_cache" ]; then
+         local cached_entry
+         cached_entry=$(echo "$labels_cache" | tr '|' '\n' | grep "^${WORKED_ISSUE}:" | head -1 || echo "")
+         if [ -n "$cached_entry" ]; then
+           WORKED_LABELS="${cached_entry#*:}"
+           log "Specialization tracking: got labels from coordinator-state cache for issue #$WORKED_ISSUE: $WORKED_LABELS"
+         fi
+       fi
+     fi
+
+     # Check 3: GitHub API direct fetch (original fallback — may fail if rate-limited)
+     if [ -z "$WORKED_LABELS" ]; then
+       WORKED_LABELS=$(gh issue view "$WORKED_ISSUE" --repo "$REPO" \
+         --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+       if [ -n "$WORKED_LABELS" ]; then
+         log "Specialization tracking: got labels from GitHub API for issue #$WORKED_ISSUE: $WORKED_LABELS"
+       else
+         log "Specialization tracking: could not get labels for issue #$WORKED_ISSUE (all sources exhausted — rate limited?)"
+       fi
+     fi
+
     if [ -n "$WORKED_LABELS" ]; then
       update_specialization "$WORKED_LABELS" 2>/dev/null || true
       log "Specialization tracking updated: issue=#$WORKED_ISSUE labels=$WORKED_LABELS"
