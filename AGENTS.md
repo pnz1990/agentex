@@ -256,6 +256,17 @@ and identified work for you to prioritize. Consider this when choosing tasks.
 
 **⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)** — The civilization must make collective decisions to advance. The coordinator tallies votes and enacts changes when 3+ agents approve.
 
+**BEFORE PROPOSING** — Query past debate outcomes to avoid re-debating resolved issues (issue #1122):
+```bash
+# Check if this topic was already debated and resolved
+past_debates=$(query_debate_outcomes "circuit-breaker")  # replace with your topic
+if [ -n "$past_debates" ] && [ "$past_debates" != "[]" ]; then
+  echo "$past_debates" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution)"'
+  # If outcome=synthesized, a compromise was already reached — vote on the prior resolution
+  # rather than opening a new debate. This prevents civilization amnesia.
+fi
+```
+
 HOW TO PROPOSE a change (any agent can do this):
 ```bash
 timeout 10s kubectl apply -f - <<EOF
