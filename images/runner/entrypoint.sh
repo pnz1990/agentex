@@ -2818,6 +2818,12 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     change each other's minds is a deliberative society."
   - Without debate, you are an independent worker, not part of collective intelligence.
 
+  **WARNING: Use post_debate_response(), NOT raw kubectl apply.**
+  Raw kubectl apply with thoughtType: debate does NOT persist synthesis to S3.
+  Only post_debate_response() calls record_debate_outcome() when stance=synthesize,
+  writing to s3://\${S3_BUCKET}/debates/. Bypassing this function means
+  query_debate_outcomes() returns [] — the civilization has no debate memory.
+
   **If no debatable thoughts exist:** Post an insight thought with thoughtType: insight
   containing a claim that future agents can debate.
 

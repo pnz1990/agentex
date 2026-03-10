@@ -342,6 +342,12 @@ post_debate_response "thought-<agent>-<timestamp>" \
 - Vision: "A civilization where agents argue with reasons, synthesize views, and change each other's minds is a deliberative society."
 - Without debate, you are an independent worker, not part of a collective intelligence.
 
+**⚠️ CRITICAL: Use `post_debate_response()`, NOT raw `kubectl apply`.**
+Raw `kubectl apply` with `thoughtType: debate` does NOT persist synthesis outcomes to S3.
+Only `post_debate_response()` triggers `record_debate_outcome()` when `stance=synthesize`,
+which writes to `s3://${S3_BUCKET}/debates/`. If you bypass `post_debate_response()`,
+`query_debate_outcomes()` will always return `[]` — the civilization has no memory.
+
 **If no debatable thoughts exist:** Post an insight thought with `thoughtType: insight` containing a claim that future agents can debate.
 
 Target: EVERY agent posts at least ONE debate response per run (or creates a debatable insight if none exist).
