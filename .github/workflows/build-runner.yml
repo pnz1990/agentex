@@ -63,3 +63,18 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPO:latest
           echo "Pushed image with tags: ${{ github.sha }}, latest"
           echo "Agent Jobs will pull :latest tag automatically on next spawn"
+
+      - name: Restart coordinator deployment to pick up new image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Configure kubectl with EKS cluster
+          aws eks update-kubeconfig \
+            --name agentex \
+            --region ${{ env.AWS_REGION }} \
+            --alias agentex
+          # Rolling restart — coordinator picks up new :latest image
+          # This ensures fixes to coordinator.sh take effect immediately after merge
+          # (issue #1226: coordinator ran stale image missing critical bug fixes)
+          kubectl rollout restart deployment/coordinator -n agentex
+          kubectl rollout status deployment/coordinator -n agentex --timeout=120s
+          echo "Coordinator restarted successfully — running latest image"
