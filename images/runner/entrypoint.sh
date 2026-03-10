@@ -4219,7 +4219,9 @@ if [ "$OPENCODE_EXIT" -eq 0 ]; then
   patch_task_status "Done" "Completed successfully"
   post_message "broadcast" "Done: $TASK_TITLE (agent=$AGENT_NAME)" "status"
   post_thought "Task finished. Successor should be spawned." "observation" 9
-  post_report 8 "$TASK_TITLE completed successfully" "" "" "" "" 0
+  # Issue #1725: post_report() for SUCCESS is deferred to AFTER section 11.2 (self-improvement audit)
+  # so that visionScore reflects the actual SI_SCORE computed from debate, synthesis, vision-issues,
+  # and N+2 coordination — not a hardcoded "8". Failure case below is still immediate (no audit needed).
 else
   log "OpenCode exited with code $OPENCODE_EXIT"
   patch_task_status "Done" "exit=$OPENCODE_EXIT"
@@ -4372,6 +4374,37 @@ if [ "$PRS_OPENED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_id
 fi
 
 log "Self-improvement audit complete: score=$SI_SCORE/10 (debate=$DEBATE_RESPONSES synthesis-persisted=$SYNTHESIS_PERSISTED_FLAG primary-contrib[${AGENT_ROLE}/${PRIMARY_LABEL}]=${PRIMARY_CONTRIBUTION} n2=$N2_COORDINATION)"
+
+# Issue #1725: File Report CR for successful runs HERE (after SI_SCORE is computed).
+# This ensures visionScore in the Report reflects actual vision-aligned behavior:
+#   - debate participation (+3), synthesis to S3 (+3), vision issues (+3), N+2 (+1)
+# Previously, post_report was called in section 11 with hardcoded score=8 before SI_SCORE existed.
+# The failure path (section 11 above) still calls post_report immediately with score=3
+# since the audit doesn't run for failed agents.
+if [ "$OPENCODE_EXIT" -eq 0 ]; then
+  # Build work done summary from audit data
+  REPORT_WORK_DONE="$TASK_TITLE completed. Audit: $SI_DETAILS"
+  # Build issues/PRs string for the report
+  # COORDINATOR_ISSUE is available here (set at line 3050 before OpenCode runs)
+  # WORKED_ISSUE is not computed yet (section 11.4) — use COORDINATOR_ISSUE as fallback
+  REPORT_ISSUE_NUM="${COORDINATOR_ISSUE:-0}"
+  REPORT_ISSUES=""
+  if [ "$ISSUES_CREATED" -gt 0 ] && [ "$REPORT_ISSUE_NUM" != "0" ] && [ -n "$REPORT_ISSUE_NUM" ]; then
+    REPORT_ISSUES="#${REPORT_ISSUE_NUM}"
+  elif [ "$ISSUES_CREATED" -gt 0 ]; then
+    REPORT_ISSUES="${ISSUES_CREATED} issue(s) filed"
+  fi
+  REPORT_PR=""
+  if [ "$PRS_OPENED" -gt 0 ]; then
+    # Get the PR number(s) opened this session for reporting
+    REPORT_PR=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 10 \
+      --json number,createdAt \
+      | jq -r --arg start "$AGENT_START_ISO" \
+        '[.[] | select(.createdAt >= $start)] | .[].number' 2>/dev/null | \
+        head -3 | sed 's/^/PR #/' | tr '\n' ' ' | sed 's/ $//' || echo "")
+  fi
+  post_report "$SI_SCORE" "$REPORT_WORK_DONE" "$REPORT_ISSUES" "$REPORT_PR" "" "" 0
+fi
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
 # The agent who opened a PR has the most context to fix a CI failure.
