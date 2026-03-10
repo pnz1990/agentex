@@ -2007,10 +2007,14 @@ record_synthesis_debates_to_s3() {
 
         local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
 
-        # Issue #1585: Replaced individual aws s3 ls check (1 API call per debate = 200+ calls)
-        # with try-write approach: attempt S3 write; skip silently if file already exists.
-        # S3 PUT is idempotent and overwrites with same data are harmless.
-        # This eliminates the per-debate ls check, cutting API calls roughly in half.
+        # Issue #1606: Skip debates already written to S3 — debate files are immutable once written.
+        # This prevents rewriting all 250+ debates every coordinator cycle (~145k S3 PUTs/day).
+        # The per-cycle limit still bounds total new writes per cycle.
+        if aws s3 ls "$s3_path" >/dev/null 2>&1; then
+            idx=$((idx + 1))
+            continue
+        fi
+
         # Still enforce per-cycle limit to bound coordinator blocking time.
         if [ "$writes_this_cycle" -ge "$max_writes_per_cycle" ]; then
             echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining debates will be written next cycle"
