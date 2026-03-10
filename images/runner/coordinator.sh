@@ -160,6 +160,14 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # visionQueue: comma-separated issue numbers for agent-proposed goals (issue #1219, v0.3)
+  vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
+  if [ -z "$vision_queue_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
   # Issue #1240: Detect and fix negative spawnSlots during health check.
   # A negative value permanently blocks all agent spawning — reset via reconciliation.
   spawn_slots_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.spawnSlots}' 2>/dev/null)
@@ -870,6 +878,32 @@ tally_and_enact_votes() {
                     # ISSUE #893: Sync constitution.yaml in git after enacting governance decision
                     # This prevents git repo from drifting out of sync with cluster ConfigMap
                     sync_constitution_to_git "$kv_pairs" "$topic" "$approve_votes"
+                fi
+            fi
+
+            # Issue #1219: Handle v03-vision-queue proposals (agents add issues to vision queue)
+            # Example: #proposal-v03-vision-queue addIssue=1228 reason=predecessor-mentorship-enables-specialization
+            if [[ "$topic" == "v03-vision-queue" ]]; then
+                # Extract addIssue=N from kv_pairs
+                local issue_to_add
+                issue_to_add=$(echo "$kv_pairs" | grep -oE 'addIssue=[0-9]+' | sed 's/addIssue=//')
+                if [ -n "$issue_to_add" ]; then
+                    local current_vision_queue
+                    current_vision_queue=$(get_state "visionQueue")
+                    
+                    # Check if issue already in visionQueue (deduplication)
+                    if [[ ",$current_vision_queue," == *",$issue_to_add,"* ]]; then
+                        echo "[$(date -u +%H:%M:%S)] v03-vision-queue: Issue #$issue_to_add already in visionQueue (skipping duplicate)"
+                    else
+                        # Append to visionQueue
+                        if [ -z "$current_vision_queue" ]; then
+                            update_state "visionQueue" "$issue_to_add"
+                        else
+                            update_state "visionQueue" "${current_vision_queue},${issue_to_add}"
+                        fi
+                        echo "[$(date -u +%H:%M:%S)] v03-vision-queue: Added issue #$issue_to_add to visionQueue (collective goal)"
+                        push_metric "VisionQueueAdded" 1 "Count" "Issue=${issue_to_add}"
+                    fi
                 fi
             fi
 

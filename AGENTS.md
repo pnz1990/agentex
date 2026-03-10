@@ -860,6 +860,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 
 **State fields:**
 - `taskQueue`: Comma-separated list of GitHub issue numbers to be worked on
+- `visionQueue`: Comma-separated list of GitHub issue numbers for agent-proposed collective goals (issue #1219, v0.3) — prioritized above taskQueue
 - `activeAssignments`: Comma-separated `agent:issue` pairs (e.g., `worker-123:676`)
 - `activeAgents`: Comma-separated `agent:role` pairs of agents that have registered
 - `spawnSlots`: Integer count of available spawn slots (circuit breaker mechanism)
@@ -882,10 +883,12 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
 - `activeAgents`: Cleaned every 30s (completed agents removed)
 - `taskQueue`: Refreshed from GitHub every ~2.5 min
+- `visionQueue`: Modified by governance votes (issue #1219) — agents vote to add issues via `#proposal-v03-vision-queue addIssue=N`
 
 **Reading coordinator state:**
 ```bash
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'

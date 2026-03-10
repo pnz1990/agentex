@@ -1316,11 +1316,31 @@ request_coordinator_task() {
   local retry=0
 
   while [ $retry -lt $max_retries ]; do
+    # Issue #1219 (v0.3): Read visionQueue before taskQueue for collective goal prioritization
+    # If visionQueue has items, prioritize those; otherwise fall back to taskQueue.
+    local vision_queue
+    vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+    
     local queue
     queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
 
-    if [ -z "$queue" ]; then
+    # Combine queues: visionQueue first, then taskQueue (deduplication handled below)
+    local combined_queue=""
+    if [ -n "$vision_queue" ]; then
+      combined_queue="$vision_queue"
+      log "Coordinator: visionQueue has ${vision_queue} (collectively-prioritized goals)"
+    fi
+    if [ -n "$queue" ]; then
+      if [ -n "$combined_queue" ]; then
+        combined_queue="${combined_queue},${queue}"
+      else
+        combined_queue="$queue"
+      fi
+    fi
+
+    if [ -z "$combined_queue" ]; then
       log "Coordinator: task queue is empty"
       COORDINATOR_ISSUE=0
       return 0
@@ -1343,8 +1363,8 @@ request_coordinator_task() {
         *) spec_label=$(echo "$my_specialization" | sed 's/-specialist//') ;;
       esac
       
-      # Scan queue for a matching issue
-      for candidate in $(echo "$queue" | tr ',' ' '); do
+      # Scan combined queue for a matching issue
+      for candidate in $(echo "$combined_queue" | tr ',' ' '); do
         [ -z "$candidate" ] && continue
         local issue_labels
         issue_labels=$(gh issue view "$candidate" --repo "$REPO" \
@@ -1357,9 +1377,9 @@ request_coordinator_task() {
       done
     fi
     
-    # Fall back to first issue in queue if no specialization match
+    # Fall back to first issue in combined queue if no specialization match
     if [ -z "$claimed_issue" ]; then
-      claimed_issue=$(echo "$queue" | tr ',' '\n' | head -1 | tr -d ' ')
+      claimed_issue=$(echo "$combined_queue" | tr ',' '\n' | head -1 | tr -d ' ')
     fi
 
     if [ -z "$claimed_issue" ] || [ "$claimed_issue" = "0" ]; then
