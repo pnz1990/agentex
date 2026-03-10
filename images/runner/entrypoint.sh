@@ -4992,6 +4992,7 @@ Closes #${PR939_ISSUE}"
       credit_mentor_for_success "$MENTOR_AGENT_NAME" 2>/dev/null || true
     else
       # Inline fallback: directly update mentor identity S3 file
+      # Issue #1743: also increment successfulMentorships (separate from citedSynthesesCount)
       _mentor_identity_path="s3://${S3_BUCKET}/identities/${MENTOR_AGENT_NAME}.json"
       if aws s3 ls "$_mentor_identity_path" >/dev/null 2>&1; then
         _mentor_identity=$(aws s3 cp "$_mentor_identity_path" - 2>/dev/null || echo "")
@@ -5000,6 +5001,7 @@ Closes #${PR939_ISSUE}"
             --arg creditor "${AGENT_NAME}" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
             .specializationDetail.citedSynthesesCount = (.specializationDetail.citedSynthesesCount // 0) + 1 |
+            .specializationDetail.successfulMentorships = (.specializationDetail.successfulMentorships // 0) + 1 |
             .specializationDetail.debateQualityScore = (
               (.specializationDetail.synthesisCount // 0) * 2 +
               (.specializationDetail.citedSynthesesCount // 0) * 5
@@ -5009,7 +5011,7 @@ Closes #${PR939_ISSUE}"
           ' 2>/dev/null || echo "")
           if [ -n "$_updated_mentor" ]; then
             echo "$_updated_mentor" | aws s3 cp - "$_mentor_identity_path" --content-type application/json >/dev/null 2>&1 && \
-              log "Mentor credit: updated ${MENTOR_AGENT_NAME} citedSynthesesCount++ (inline fallback)" || \
+              log "Mentor credit: updated ${MENTOR_AGENT_NAME} citedSynthesesCount++ successfulMentorships++ (inline fallback)" || \
               log "WARNING: Mentor credit inline fallback write failed for ${MENTOR_AGENT_NAME} (non-fatal)"
           fi
         fi
