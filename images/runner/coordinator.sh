@@ -2900,9 +2900,12 @@ check_v05_milestone() {
     local criteria_met=0
     local criteria_report=""
 
-    # ── Criterion 1: 3+ agents with promotedRole ─────────────────────────────
+    # ── Criteria 1, 3, 4: Single S3 scan loop (issue #1764 — 3x download reduction) ──
+    # Download each identity file once and extract all three metrics in a single pass.
+    # Previously criteria 1, 3, and 4 each had their own loop, causing 3x S3 API calls.
     local promoted_count=0
-    # Scan all identity files in S3 for promotedRole field
+    local proactive_count=0
+    local mentor_credit_count=0
     local identity_files
     identity_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
@@ -2913,9 +2916,21 @@ check_v05_milestone() {
         ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
             --region "$BEDROCK_REGION" 2>/dev/null || echo "")
         [ -z "$ijson" ] && continue
+
+        # Criterion 1: promotedRole
         local prole
         prole=$(echo "$ijson" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
         [ -n "$prole" ] && promoted_count=$((promoted_count + 1))
+
+        # Criterion 3: proactiveIssuesFound (under .stats.proactiveIssuesFound — issue #1759)
+        local pif
+        pif=$(echo "$ijson" | jq -r '.stats.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
+        [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
+
+        # Criterion 4: mentorCredits array length (under .specializationDetail.mentorCredits — issue #1759)
+        local mc
+        mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
+        [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
     done
 
     if [ "$promoted_count" -ge 3 ]; then
@@ -2945,20 +2960,6 @@ check_v05_milestone() {
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 2: ${edge_count} trust graph edges (need 5)"
 
-    # ── Criterion 3: 2+ agents with proactiveIssuesFound > 0 ─────────────────
-    local proactive_count=0
-    for ifile in $identity_files; do
-        local ijson
-        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-        [ -z "$ijson" ] && continue
-        local pif
-        # Issue #1759: proactiveIssuesFound is stored under .stats.proactiveIssuesFound
-        # NOT at top-level .proactiveIssuesFound (which is how identity.sh writes it).
-        pif=$(echo "$ijson" | jq -r '.stats.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
-        [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
-    done
-
     if [ "$proactive_count" -ge 2 ]; then
         criteria_met=$((criteria_met + 1))
         criteria_report="${criteria_report}✅ Criterion 3: Proactive issue discovery — ${proactive_count} agents discovered issues\n"
@@ -2966,22 +2967,6 @@ check_v05_milestone() {
         criteria_report="${criteria_report}⏳ Criterion 3: Proactive issue discovery — ${proactive_count}/2 agents with proactiveIssuesFound > 0\n"
     fi
     echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 3: ${proactive_count} agents with proactiveIssuesFound > 0 (need 2)"
-
-    # ── Criterion 4: 1+ agent with mentorCredits > 0 ─────────────────────────
-    local mentor_credit_count=0
-    for ifile in $identity_files; do
-        local ijson
-        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
-        [ -z "$ijson" ] && continue
-        local mc
-        # Issue #1759: mentorCredits is stored as an ARRAY at
-        # .specializationDetail.mentorCredits (written by credit_mentor_for_success() in helpers.sh).
-        # It is NOT a top-level integer .mentorCredits.
-        # Check if array has at least 1 entry using | length.
-        mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
-        [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
-    done
 
     if [ "$mentor_credit_count" -ge 1 ]; then
         criteria_met=$((criteria_met + 1))
