@@ -234,5 +234,135 @@ query_debate_outcomes() {
   echo "$results"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes available"
+# ── find_predecessor_mentors ──────────────────────────────────────────────────
+# Find predecessor agents with matching specializations for knowledge transfer.
+# Searches S3 identities for agents whose specialization matches issue labels.
+# Returns: JSON array of mentor insights with agent name, specialization, and key stats
+#
+# Usage: find_predecessor_mentors <issue_number>
+# Returns: JSON array like: [{"agent":"ada","spec":"bug-specialist","insights":"..."}]
+#
+# This enables generational knowledge transfer — new agents inherit context from
+# specialists who worked on similar issues before them (issue #1228).
+find_predecessor_mentors() {
+  local issue_number="$1"
+  
+  if [ -z "$issue_number" ] || [ "$issue_number" = "0" ]; then
+    echo "[]"
+    return 0
+  fi
+  
+  # Get issue labels from GitHub (rate limit protected)
+  local issue_labels
+  issue_labels=$(gh issue view "$issue_number" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+  
+  if [ -z "$issue_labels" ]; then
+    log "find_predecessor_mentors: No labels found for issue #${issue_number}"
+    echo "[]"
+    return 0
+  fi
+  
+  log "find_predecessor_mentors: Issue #${issue_number} labels: $(echo $issue_labels | tr '\n' ' ')"
+  
+  # List all identity files in S3
+  local identity_files
+  identity_files=$(aws s3 ls "s3://${S3_BUCKET}/identities/" 2>/dev/null | awk '{print $4}' || echo "")
+  
+  if [ -z "$identity_files" ]; then
+    log "find_predecessor_mentors: No identity files found in S3"
+    echo "[]"
+    return 0
+  fi
+  
+  local mentors="[]"
+  local match_count=0
+  
+  # Search for agents with matching specializations
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    
+    local s3_path="s3://${S3_BUCKET}/identities/${file}"
+    local identity_json
+    identity_json=$(aws s3 cp "$s3_path" - 2>/dev/null || echo "")
+    [ -z "$identity_json" ] && continue
+    
+    local agent_spec
+    agent_spec=$(echo "$identity_json" | jq -r '.specialization // ""' 2>/dev/null)
+    [ -z "$agent_spec" ] && continue
+    
+    local agent_display
+    agent_display=$(echo "$identity_json" | jq -r '.displayName // .agentName' 2>/dev/null)
+    
+    # Check if specialization matches any issue label
+    local matched=false
+    while IFS= read -r label; do
+      [ -z "$label" ] && continue
+      
+      # Match if specialization contains label keyword (e.g., "bug-specialist" matches "bug" label)
+      if echo "$agent_spec" | grep -qi "$label"; then
+        matched=true
+        break
+      fi
+      
+      # Also match reverse: label contains specialization root (e.g., "enhancement" label matches "enhancement-specialist")
+      local spec_root
+      spec_root=$(echo "$agent_spec" | sed 's/-specialist$//')
+      if echo "$label" | grep -qi "$spec_root"; then
+        matched=true
+        break
+      fi
+    done <<< "$issue_labels"
+    
+    if [ "$matched" = "true" ]; then
+      # Extract key stats for context
+      local tasks_completed
+      tasks_completed=$(echo "$identity_json" | jq -r '.stats.tasksCompleted // 0' 2>/dev/null)
+      local prs_merged
+      prs_merged=$(echo "$identity_json" | jq -r '.stats.prsMerged // 0' 2>/dev/null)
+      
+      # Extract specialization detail
+      local code_areas
+      code_areas=$(echo "$identity_json" | jq -c '.specializationDetail.codeAreas // {}' 2>/dev/null)
+      local synthesis_count
+      synthesis_count=$(echo "$identity_json" | jq -r '.specializationDetail.synthesisCount // 0' 2>/dev/null)
+      
+      # Build insight summary
+      local insight="Agent ${agent_display} [${agent_spec}] completed ${tasks_completed} tasks, ${prs_merged} PRs merged"
+      if [ "$synthesis_count" -gt 0 ]; then
+        insight="${insight}, ${synthesis_count} debate syntheses"
+      fi
+      
+      local code_area_list=""
+      if [ "$code_areas" != "{}" ]; then
+        code_area_list=$(echo "$code_areas" | jq -r 'to_entries | sort_by(-.value) | .[0:3] | map(.key) | join(", ")' 2>/dev/null || echo "")
+        if [ -n "$code_area_list" ]; then
+          insight="${insight}. Code areas: ${code_area_list}"
+        fi
+      fi
+      
+      # Add to mentors array
+      local mentor_obj
+      mentor_obj=$(jq -n \
+        --arg agent "$agent_display" \
+        --arg spec "$agent_spec" \
+        --arg insights "$insight" \
+        '{agent: $agent, specialization: $spec, insights: $insights}')
+      
+      mentors=$(echo "$mentors" | jq -r --argjson mentor "$mentor_obj" '. + [$mentor]' 2>/dev/null || echo "$mentors")
+      match_count=$((match_count + 1))
+      
+      log "find_predecessor_mentors: Found mentor ${agent_display} [${agent_spec}]"
+      
+      # Limit to top 3 mentors to avoid overwhelming task description
+      if [ "$match_count" -ge 3 ]; then
+        break
+      fi
+    fi
+  done <<< "$identity_files"
+  
+  log "find_predecessor_mentors: Found ${match_count} matching mentors for issue #${issue_number}"
+  echo "$mentors"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, find_predecessor_mentors available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

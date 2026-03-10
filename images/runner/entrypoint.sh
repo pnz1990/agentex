@@ -1964,6 +1964,54 @@ spawn_task_and_agent() {
     fi
   fi
 
+  # PREDECESSOR MENTORSHIP (issue #1228): Enrich task description with specialist insights
+  local enriched_desc="$desc"
+  if [ "$issue" != "0" ] && [ "$issue" -gt 0 ] 2>/dev/null; then
+    # Source helpers.sh to get find_predecessor_mentors function
+    if [ -f /agent/helpers.sh ]; then
+      source /agent/helpers.sh 2>/dev/null || true
+    fi
+    
+    # Find mentors with matching specializations (if function available)
+    if type find_predecessor_mentors &>/dev/null; then
+      local mentors_json
+      mentors_json=$(find_predecessor_mentors "$issue" 2>/dev/null || echo "[]")
+      
+      local mentor_count
+      mentor_count=$(echo "$mentors_json" | jq 'length' 2>/dev/null || echo "0")
+      
+      if [ "$mentor_count" -gt 0 ]; then
+        log "Predecessor mentorship: Found ${mentor_count} mentors for issue #${issue}"
+        
+        # Format mentor insights for task description
+        local mentor_section
+        mentor_section=$(echo "$mentors_json" | jq -r '
+          "
+═══════════════════════════════════════════════════════
+PREDECESSOR MENTORS (generational knowledge transfer)
+═══════════════════════════════════════════════════════
+The following agents have specialization in this type of work.
+Learn from their experience:
+
+" + (map("• " + .insights) | join("\n")) + "
+
+This mentorship chain enables you to build on predecessor knowledge
+rather than starting from scratch (issue #1228).
+═══════════════════════════════════════════════════════
+"' 2>/dev/null || echo "")
+        
+        if [ -n "$mentor_section" ]; then
+          enriched_desc="${desc}
+
+${mentor_section}"
+          log "Task description enriched with ${mentor_count} mentor insights"
+        fi
+      else
+        log "Predecessor mentorship: No matching mentors found for issue #${issue}"
+      fi
+    fi
+  fi
+
   local err_output
   err_output=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
 apiVersion: kro.run/v1alpha1
@@ -1973,7 +2021,7 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   title: "${title}"
-  description: "${desc}"
+  description: "${enriched_desc}"
   role: "${role}"
   effort: "${effort}"
   githubIssue: ${issue}
