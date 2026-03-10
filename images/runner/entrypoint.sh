@@ -1499,6 +1499,57 @@ request_coordinator_task() {
   local max_retries=3
   local retry=0
 
+  # ── COORDINATOR PRE-ASSIGNMENT CHECK (issue #1474) ───────────────────────
+  # Check if the coordinator's routing cycle has pre-assigned an issue to THIS
+  # agent before the generic queue scan. This is how specialization routing
+  # actually fires: route_tasks_by_specialization() writes agent:issue into
+  # activeAssignments on the agent's behalf; we detect it here and return it
+  # directly, bypassing the first-come-first-served generic queue race.
+  #
+  # Without this check, workers would see the pre-claim as "already taken" and
+  # skip to the next issue — the opposite of the intended routing behavior.
+  local pre_assignments
+  pre_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
+  if [ -n "$pre_assignments" ]; then
+    # Look for an entry of form "AGENT_NAME:ISSUE_NUMBER" in the assignments
+    local pre_assigned_issue
+    pre_assigned_issue=$(echo "$pre_assignments" | tr ',' '\n' | grep "^${AGENT_NAME}:" | head -1 | cut -d: -f2 || true)
+    if [ -n "$pre_assigned_issue" ] && [ "$pre_assigned_issue" != "0" ]; then
+      # Coordinator pre-assigned this issue via specialization routing — return it directly
+      log "Coordinator: found pre-assigned issue #$pre_assigned_issue for $AGENT_NAME (specialization routing)"
+      # Write to temp file for end-of-session specialization tracking (issue #1252)
+      echo "$pre_assigned_issue" > /tmp/agentex-worked-issue 2>/dev/null || true
+      # Cache issue labels at claim time (issue #1268)
+      local pre_labels
+      pre_labels=$(gh issue view "$pre_assigned_issue" --repo "${REPO}" \
+        --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+      if [ -n "$pre_labels" ]; then
+        local existing_labels_cache
+        existing_labels_cache=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+          -o jsonpath='{.data.issueLabels}' 2>/dev/null || echo "")
+        local updated_cache
+        updated_cache=$(echo "$existing_labels_cache" | tr '|' '\n' | grep -v "^${pre_assigned_issue}:" || true)
+        updated_cache=$(echo "${updated_cache}" | tr '\n' '|' | sed 's/|$//')
+        [ -n "$updated_cache" ] && updated_cache="${updated_cache}|${pre_assigned_issue}:${pre_labels}" || updated_cache="${pre_assigned_issue}:${pre_labels}"
+        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+          --type=merge -p "{\"data\":{\"issueLabels\":\"${updated_cache}\"}}" 2>/dev/null || true
+      fi
+      # Validate issue is still open
+      local pre_issue_state
+      pre_issue_state=$(gh issue view "$pre_assigned_issue" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+      if [ "$pre_issue_state" = "OPEN" ]; then
+        push_metric "SpecializedPreAssignmentClaimed" 1
+        COORDINATOR_ISSUE="$pre_assigned_issue"
+        return 0
+      else
+        log "Coordinator: pre-assigned issue #$pre_assigned_issue is $pre_issue_state — releasing pre-claim"
+        release_coordinator_task "$pre_assigned_issue"
+        # Fall through to normal queue
+      fi
+    fi
+  fi
+
   # ── VISION QUEUE PRIORITY CHECK (issue #1149) ────────────────────────────
   # Check vision queue BEFORE the regular task queue. If a vision-queue item
   # is a GitHub issue number, claim it. If it's a feature name, log it for the
