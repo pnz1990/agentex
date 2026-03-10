@@ -320,7 +320,15 @@ cleanup_agent_cr_on_exit() {
   kubectl_with_timeout 10 delete agent.kro.run "$AGENT_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null \
     && log "Agent CR $AGENT_NAME deleted successfully" \
     || log "WARNING: Could not delete Agent CR $AGENT_NAME (may already be deleted)"
-  
+
+  # Step 3: Release identity name back to registry (issue #1483)
+  # This allows future agents to claim the same name and inherit accumulated
+  # specialization history from S3 (genuine persistent identity across generations).
+  # Only releases names claimed from registry (not generated fallback names).
+  if type release_identity >/dev/null 2>&1; then
+    release_identity || log "WARNING: release_identity failed (non-fatal)"
+  fi
+
   log "Agent exiting. Task=$TASK_CR_NAME Role=$AGENT_ROLE ExitCode=$exit_code"
 }
 

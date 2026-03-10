@@ -96,6 +96,23 @@ claim_identity() {
       
       AGENT_DISPLAY_NAME="$claimed_name"
       echo "[identity] Successfully claimed name: $AGENT_DISPLAY_NAME"
+
+      # Issue #1483: Check for inherited specialization history stored by display name.
+      # When a previous agent with this display name exited, it saved its identity
+      # to s3://.../identities/${AGENT_DISPLAY_NAME}.json. Restore it now so this
+      # new agent inherits accumulated specializationLabelCounts and codeAreas.
+      local display_s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${AGENT_DISPLAY_NAME}.json"
+      if aws s3 ls "$display_s3_path" >/dev/null 2>&1; then
+        local display_identity
+        display_identity=$(aws s3 cp "$display_s3_path" - 2>/dev/null || echo "")
+        if [[ -n "$display_identity" ]]; then
+          AGENT_SPECIALIZATION=$(echo "$display_identity" | jq -r '.specialization // ""')
+          local inherited_labels
+          inherited_labels=$(echo "$display_identity" | jq -r '.specializationLabelCounts | keys | join(",")' 2>/dev/null || echo "")
+          echo "[identity] Inherited specialization history from $AGENT_DISPLAY_NAME: specialization=$AGENT_SPECIALIZATION labels=$inherited_labels"
+        fi
+      fi
+
       save_identity
       return 0
     else
@@ -530,6 +547,85 @@ get_identity_signature() {
     else
       echo "I am $AGENT_NAME"
     fi
+  fi
+}
+
+#######################################
+# Release the agent's name back to the registry on exit
+# This allows future agents of the same role to reuse the name slot,
+# enabling genuine persistent identity (same name → accumulated specialization)
+# when the NEXT agent claiming that name restores S3 history.
+#
+# The S3 identity file is preserved — the next agent claiming this name
+# will inherit specializationLabelCounts, codeAreas, and stats.
+# The registry slot is released (claimed → available) so new agents can claim it.
+#
+# Arguments: none
+# Globals:
+#   AGENT_NAME - the agent's k8s name
+#   AGENT_DISPLAY_NAME - the claimed registry name (e.g., "ada")
+#   AGENT_ROLE - the agent's role
+#######################################
+release_identity() {
+  # Only release names that were claimed from the registry (not generated names)
+  # Generated names have format "role-adjective-noun" (e.g., "worker-bold-tensor")
+  # Registry names are single words (e.g., "ada", "turing")
+  if [[ -z "$AGENT_DISPLAY_NAME" ]]; then
+    return 0
+  fi
+
+  # Check if the display name matches a registry key pattern (no hyphens for registry names)
+  # Generated names always have hyphens (role-adj-noun format)
+  if echo "$AGENT_DISPLAY_NAME" | grep -q '-'; then
+    echo "[identity] Generated name $AGENT_DISPLAY_NAME — no registry release needed"
+    return 0
+  fi
+
+  # Verify the name registry exists
+  if ! timeout 10s kubectl get configmap agentex-name-registry -n agentex >/dev/null 2>&1; then
+    echo "[identity] WARNING: agentex-name-registry not found — cannot release name $AGENT_DISPLAY_NAME"
+    return 0
+  fi
+
+  # Verify this agent owns the name (prevent releasing names we didn't claim)
+  local current_value
+  current_value=$(timeout 10s kubectl get configmap agentex-name-registry -n agentex \
+    -o jsonpath="{.data.${AGENT_DISPLAY_NAME}}" 2>/dev/null || echo "")
+
+  local expected_value="${AGENT_ROLE}:claimed:${AGENT_NAME}"
+  if [[ "$current_value" != "$expected_value" ]]; then
+    echo "[identity] Name $AGENT_DISPLAY_NAME not owned by $AGENT_NAME (current: $current_value) — skipping release"
+    return 0
+  fi
+
+  # Atomically release the name: claimed → available using CAS patch
+  local release_value="${AGENT_ROLE}:available"
+  if timeout 10s kubectl patch configmap agentex-name-registry -n agentex \
+    --type=json \
+    -p "[{\"op\":\"test\",\"path\":\"/data/${AGENT_DISPLAY_NAME}\",\"value\":\"${expected_value}\"},{\"op\":\"replace\",\"path\":\"/data/${AGENT_DISPLAY_NAME}\",\"value\":\"${release_value}\"}]" \
+    2>/dev/null; then
+    echo "[identity] Released name $AGENT_DISPLAY_NAME back to registry (role: $AGENT_ROLE)"
+
+    # Issue #1483: Save current identity to display-name-keyed S3 path so the
+    # next agent claiming this name inherits accumulated specialization history.
+    # This enables genuine persistent identity: "ada" builds specialization
+    # across many different agent pod generations.
+    local display_s3_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/${AGENT_DISPLAY_NAME}.json"
+    if [[ -n "$AGENT_IDENTITY_FILE" ]]; then
+      local current_identity
+      current_identity=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+      if [[ -n "$current_identity" ]]; then
+        if echo "$current_identity" | aws s3 cp - "$display_s3_path" 2>/dev/null; then
+          echo "[identity] Saved specialization history to $display_s3_path for next $AGENT_DISPLAY_NAME"
+        else
+          echo "[identity] WARNING: Could not save display-name history to S3 (non-fatal)"
+        fi
+      fi
+    fi
+
+    echo "[identity] Next agent claiming $AGENT_DISPLAY_NAME will inherit S3 specialization history"
+  else
+    echo "[identity] WARNING: Could not release name $AGENT_DISPLAY_NAME (CAS failed — may have been reclaimed)"
   fi
 }
 
