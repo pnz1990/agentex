@@ -116,6 +116,14 @@ if [[ "$CLUSTER" == "agentex" ]]; then
   log "WARNING: Using default cluster name — new god should set 'clusterName' in constitution"
 fi
 
+# ── Export runtime variables for subprocess visibility (issue #1218) ──────────
+# OpenCode's Bash tool runs commands in fresh subprocesses that do NOT inherit
+# shell functions defined in this script. Exporting variables ensures they are
+# available when agents source /tmp/agentex-helpers.sh from bash tool commands.
+export AGENT_NAME AGENT_ROLE TASK_CR_NAME SWARM_REF NAMESPACE
+export REPO CLUSTER BEDROCK_REGION BEDROCK_MODEL WORKSPACE
+export S3_BUCKET ECR_REGISTRY CIRCUIT_BREAKER_LIMIT
+
 ts() { date +%s; }
 
 # ── Early stub definitions (issue #738) ──────────────────────────────────────
@@ -2528,6 +2536,132 @@ cat > "${HOME}/.config/opencode/config.json" <<CONFIG
   "permission": "allow"
 }
 CONFIG
+
+# ── 8.5. Write standalone helpers.sh for OpenCode bash tool context (issue #1218) ──
+# OpenCode's Bash tool spawns fresh subprocesses that do NOT inherit shell functions.
+# Write a standalone script agents can source: source /tmp/agentex-helpers.sh
+# This enables post_thought(), post_debate_response(), record_debate_outcome(), etc.
+# from inside OpenCode bash tool commands.
+log "Writing /tmp/agentex-helpers.sh for OpenCode bash tool context..."
+cat > /tmp/agentex-helpers.sh << 'HELPERS_EOF'
+#!/bin/bash
+# agentex-helpers.sh — standalone helper functions for OpenCode bash tool context
+# Source this file at the start of any bash command that needs agentex functions:
+#   source /tmp/agentex-helpers.sh
+#
+# Variables are read from exported environment (set by entrypoint.sh).
+# Functions that need S3_BUCKET, NAMESPACE, AGENT_NAME etc. will work correctly.
+
+# Re-export to ensure subshell has them
+export AGENT_NAME="${AGENT_NAME:-unknown}"
+export AGENT_ROLE="${AGENT_ROLE:-worker}"
+export TASK_CR_NAME="${TASK_CR_NAME:-}"
+export NAMESPACE="${NAMESPACE:-agentex}"
+export S3_BUCKET="${S3_BUCKET:-agentex-thoughts}"
+export REPO="${REPO:-pnz1990/agentex}"
+export BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"
+export AGENT_DISPLAY_NAME="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
+
+# Minimal kubectl wrapper (no timeout dependency in subprocess context)
+kubectl_h() { kubectl "$@"; }
+
+# log to stderr
+log_h() {
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] $*" >&2
+}
+
+# post_thought: Create a Thought CR in the cluster
+# Usage: post_thought_h <content> [type] [confidence] [topic] [file_path] [parent_ref]
+post_thought_h() {
+  local content="$1" type="${2:-observation}" confidence="${3:-7}"
+  local topic="${4:-}" file_path="${5:-}" parent_ref="${6:-}"
+  local thought_name="thought-${AGENT_NAME}-$(date +%s%3N)"
+  kubectl apply -f - <<EOF 2>&1 >/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: ${thought_name}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  displayName: "${AGENT_DISPLAY_NAME}"
+  taskRef: "${TASK_CR_NAME}"
+  thoughtType: "${type}"
+  confidence: ${confidence}
+  topic: "${topic}"
+  filePath: "${file_path}"
+  parentRef: "${parent_ref}"
+  content: |
+$(echo "$content" | sed 's/^/    /')
+EOF
+  log_h "Posted thought: ${thought_name} (type=${type})"
+}
+
+# record_debate_outcome_h: Write debate resolution to S3
+# Usage: record_debate_outcome_h <thread_id> <outcome> <resolution> [topic]
+record_debate_outcome_h() {
+  local thread_id="$1" outcome="$2" resolution="$3" topic="${4:-}"
+  if [ -z "$thread_id" ] || [ -z "$outcome" ] || [ -z "$resolution" ]; then
+    log_h "ERROR: record_debate_outcome_h requires thread_id, outcome, resolution"
+    return 1
+  fi
+  local s3_path="s3://${S3_BUCKET}/debates/${thread_id}.json"
+  local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local escaped_resolution
+  escaped_resolution=$(echo "$resolution" | jq -Rs '.')
+  local debate_json
+  debate_json=$(cat <<JSONEOF
+{
+  "threadId": "${thread_id}",
+  "topic": "${topic}",
+  "outcome": "${outcome}",
+  "resolution": ${escaped_resolution},
+  "participants": ["${AGENT_NAME}"],
+  "timestamp": "${timestamp}",
+  "recordedBy": "${AGENT_NAME}"
+}
+JSONEOF
+)
+  echo "$debate_json" | aws s3 cp - "$s3_path" \
+    --region "${BEDROCK_REGION}" \
+    --content-type "application/json" 2>/dev/null \
+    && log_h "Debate outcome recorded: ${s3_path}" \
+    || log_h "WARNING: Failed to write debate outcome to ${s3_path}"
+}
+
+# post_debate_response_h: Post a debate response and optionally record S3 outcome
+# Usage: post_debate_response_h <parent_thought_name> <reasoning> [agree|disagree|synthesize] [confidence]
+post_debate_response_h() {
+  local parent_thought_name="$1" reasoning="$2"
+  local stance="${3:-respond}" confidence="${4:-7}"
+  local parent_topic
+  parent_topic=$(kubectl get configmap "${parent_thought_name}-thought" -n "$NAMESPACE" \
+    -o jsonpath='{.data.topic}' 2>/dev/null || echo "")
+  local parent_agent
+  parent_agent=$(kubectl get configmap "${parent_thought_name}-thought" -n "$NAMESPACE" \
+    -o jsonpath='{.data.agentRef}' 2>/dev/null || echo "unknown")
+  local content="DEBATE RESPONSE [${stance}] to ${parent_agent}:
+
+${reasoning}
+
+parentRef: ${parent_thought_name}"
+  post_thought_h "$content" "debate" "$confidence" "${parent_topic}" "" "${parent_thought_name}"
+  log_h "Posted debate response (${stance}) to ${parent_thought_name} by ${parent_agent}"
+  # For synthesize stance, also record S3 outcome
+  if [ "$stance" = "synthesize" ]; then
+    local thread_id
+    thread_id=$(echo "$parent_thought_name" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+    record_debate_outcome_h "$thread_id" "synthesized" "$reasoning" "$parent_topic"
+  fi
+}
+
+log_h "agentex-helpers.sh loaded: AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET}"
+HELPERS_EOF
+chmod +x /tmp/agentex-helpers.sh
+log "helpers.sh written to /tmp/agentex-helpers.sh ✓"
+
+# Re-export AGENT_DISPLAY_NAME now that identity is claimed
+export AGENT_DISPLAY_NAME="${AGENT_DISPLAY_NAME:-$AGENT_NAME}"
 
 # ── 9. Build OpenCode prompt ──────────────────────────────────────────────────
 ISSUE_LINE=""
