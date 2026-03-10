@@ -289,10 +289,16 @@ claim_task() {
       -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
 
     # Check if issue is already claimed by any agent
-    if echo "$assignments" | grep -qE "(^|,)[^,]+:${issue}(,|$)"; then
+    # Issue #1488: Normalize spaces before regex check — activeAssignments can contain
+    # space-padded entries like "worker-X:123 ,worker-Y:456 " (from pre-PR-#1473 coordinator
+    # update_state() or IFS parsing in cleanup_stale_assignments). The regex (,|$) fails on
+    # "123 ," because the space precedes the comma, allowing duplicate claims of same issue.
+    local normalized_assignments
+    normalized_assignments=$(echo "$assignments" | tr -d ' ')
+    if echo "$normalized_assignments" | grep -qE "(^|,)[^,]+:${issue}(,|$)"; then
       # Determine who claimed it
       local claimer
-      claimer=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
+      claimer=$(echo "$normalized_assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
       if [ "$claimer" = "$AGENT_NAME" ]; then
         log "Coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
         # Re-write temp file to ensure it exists (may have been lost across context switches)
