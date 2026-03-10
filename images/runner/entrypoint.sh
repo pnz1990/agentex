@@ -1986,6 +1986,91 @@ EOF
   return 0
 }
 
+# civilization_status() - Single command for civilization health overview (issue #1224)
+# Prints a formatted summary of civilization health for god and agents.
+# Planners call this at startup and post a one-line summary to the thought stream.
+# Usage: civilization_status
+# Returns: 0 always (non-critical — status is informational)
+civilization_status() {
+  # Generation
+  local generation
+  generation=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.civilizationGeneration}' 2>/dev/null || echo "unknown")
+
+  # Active agents (jobs)
+  local active_jobs
+  active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+    2>/dev/null || echo "unknown")
+  local job_limit="${CIRCUIT_BREAKER_LIMIT:-unknown}"
+
+  # Open GitHub issues
+  local open_issues
+  open_issues=$(gh issue list --repo "${REPO}" --state open --limit 100 2>/dev/null | wc -l | tr -d ' ' || echo "unknown")
+  local issue_health="OK"
+  if [ "$open_issues" != "unknown" ] && [ "$open_issues" -lt 10 ] 2>/dev/null; then
+    issue_health="⚠️ LOW — should be 10+"
+  fi
+
+  # Debate health from coordinator-state
+  local debate_stats
+  debate_stats=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "")
+  local debate_responses debate_threads debate_synth
+  if [ -n "$debate_stats" ]; then
+    debate_responses=$(echo "$debate_stats" | jq -r '.responses // 0' 2>/dev/null || echo "0")
+    debate_threads=$(echo "$debate_stats" | jq -r '.threads // 0' 2>/dev/null || echo "0")
+    debate_synth=$(echo "$debate_stats" | jq -r '.synthesize // 0' 2>/dev/null || echo "0")
+  else
+    debate_responses="0"; debate_threads="0"; debate_synth="0"
+  fi
+
+  # Specialization routing
+  local spec_assignments
+  spec_assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
+  spec_assignments="${spec_assignments:-0}"
+
+  # visionQueue (v0.3 goal-setting)
+  local vision_queue
+  vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+  vision_queue="${vision_queue:-[]}"
+
+  # Kill switch status
+  local killswitch
+  killswitch=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+    -o jsonpath='{.data.enabled}' 2>/dev/null || echo "unknown")
+  local ks_status="disabled"
+  [ "$killswitch" = "true" ] && ks_status="⚠️ ACTIVE"
+
+  # S3 debate outcomes count
+  local s3_debates
+  s3_debates=$(aws s3 ls "s3://${S3_BUCKET}/debates/" --region "${BEDROCK_REGION}" 2>/dev/null | \
+    wc -l | tr -d ' ' || echo "0")
+  s3_debates="${s3_debates:-0}"
+
+  local status_output
+  status_output=$(cat <<EOF
+=== Civilization Status ===
+Generation:              ${generation}
+Active agents:           ${active_jobs} (limit: ${job_limit})
+Open issues:             ${open_issues} (${issue_health})
+Debate health:           responses=${debate_responses} threads=${debate_threads} synthesize=${debate_synth}
+Specialization routing:  specializedAssignments=${spec_assignments}
+visionQueue:             ${vision_queue}
+Kill switch:             ${ks_status}
+S3 debates:              ${s3_debates} outcomes recorded
+===========================
+EOF
+)
+  log "$status_output"
+
+  # Return status string for callers (post to thought stream if planner)
+  echo "$status_output"
+  return 0
+}
+
 # post_recovery_health_check() - Validate system health after emergency events (issue #562)
 # Returns: 0 if healthy, 1 if unhealthy, sets RECOVERY_MODE=true if issues found
 # Exports: RECOVERY_MODE (true if recent kill switch activation or instability detected)
@@ -2340,11 +2425,24 @@ If claim fails (returns 1), pick a different issue — another agent already cla
 
        log "v0.2 routing status: not yet firing. Blocker: ${ROUTING_BLOCKER}"
        post_thought "v0.2 validation: specialization routing NOT yet firing (specializedAssignments=${SPECIALIZED_ASSIGNMENTS:-0}). Diagnosis: ${ROUTING_BLOCKER} [identityFiles=${IDENTITY_COUNT:-0}, withSpec=${IDENTITY_WITH_SPEC}]. Monitor coordinator-state.specializedAssignments each planner generation." "insight" 7
-     else
-       log "v0.2 specialization routing confirmed: ${SPECIALIZED_ASSIGNMENTS} specialized assignment(s). Last: ${LAST_ROUTING:-unknown}"
-       post_thought "v0.2 VALIDATED: specialization routing fired ${SPECIALIZED_ASSIGNMENTS} times. Recent: ${LAST_ROUTING:-none}. Identity-based task routing is operational." "insight" 9
-     fi
-   fi
+      else
+        log "v0.2 specialization routing confirmed: ${SPECIALIZED_ASSIGNMENTS} specialized assignment(s). Last: ${LAST_ROUTING:-unknown}"
+        post_thought "v0.2 VALIDATED: specialization routing fired ${SPECIALIZED_ASSIGNMENTS} times. Recent: ${LAST_ROUTING:-none}. Identity-based task routing is operational." "insight" 9
+      fi
+
+      # Issue #1224: civilization_status() — single command for civilization health overview
+      # Planners run this at startup and post a one-line summary to the thought stream.
+      log "Planner: generating civilization status..."
+      CIV_STATUS=$(civilization_status)
+      # Extract one-line summary from the status output for the thought stream
+      # Use sed to produce a compact single-line version of the key fields
+      CIV_SUMMARY=$(echo "$CIV_STATUS" | grep -E "Generation:|Active agents:|Open issues:|Debate health:|Specialization|Kill switch:|S3 debates:" | \
+        tr '\n' ' ' | sed 's/  */ /g' | sed 's/=== [^=]* ===//g' | sed 's/^ //;s/ $//')
+      if [ -z "$CIV_SUMMARY" ]; then
+        CIV_SUMMARY="Civilization status gathered (see log for details)"
+      fi
+      post_thought "Civilization status: ${CIV_SUMMARY}" "observation" 7
+    fi
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────

@@ -539,6 +539,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `update_code_area_specialization <pr_number>` — tracks code areas from PR changed files (issue #1112)
 - `update_debate_specialization <stance>` — increments synthesisCount when stance=synthesize (issue #1112)
 - `get_top_specializations` — returns JSON array of top 3 specializations for Report CR display (issue #1112)
+- `civilization_status` — prints single-command health overview: generation, active agents, open issues, debate stats, specialization routing, visionQueue, kill switch status, S3 debate count (issue #1224)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
