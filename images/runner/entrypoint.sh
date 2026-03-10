@@ -1316,11 +1316,32 @@ request_coordinator_task() {
   local retry=0
 
   while [ $retry -lt $max_retries ]; do
+    # Vision queue takes priority over regular task queue (issue #1149)
+    # Agent-voted issues are civilization goals — prioritize them above github-scanned issues.
+    local vision_queue
+    vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
     local queue
     queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
 
-    if [ -z "$queue" ]; then
+    # Combine: visionQueue issues first, then regular queue
+    # visionQueue format: "issueNum:voteCount,issueNum:voteCount" — strip vote counts for queue processing
+    local vision_issues=""
+    if [ -n "$vision_queue" ]; then
+      vision_issues=$(echo "$vision_queue" | tr ',' '\n' | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+    fi
+    local combined_queue=""
+    if [ -n "$vision_issues" ] && [ -n "$queue" ]; then
+      combined_queue="${vision_issues},${queue}"
+    elif [ -n "$vision_issues" ]; then
+      combined_queue="$vision_issues"
+    else
+      combined_queue="$queue"
+    fi
+
+    if [ -z "$combined_queue" ]; then
       log "Coordinator: task queue is empty"
       COORDINATOR_ISSUE=0
       return 0
@@ -1344,7 +1365,7 @@ request_coordinator_task() {
       esac
       
       # Scan queue for a matching issue
-      for candidate in $(echo "$queue" | tr ',' ' '); do
+      for candidate in $(echo "$combined_queue" | tr ',' ' '); do
         [ -z "$candidate" ] && continue
         local issue_labels
         issue_labels=$(gh issue view "$candidate" --repo "$REPO" \
@@ -1359,7 +1380,7 @@ request_coordinator_task() {
     
     # Fall back to first issue in queue if no specialization match
     if [ -z "$claimed_issue" ]; then
-      claimed_issue=$(echo "$queue" | tr ',' '\n' | head -1 | tr -d ' ')
+      claimed_issue=$(echo "$combined_queue" | tr ',' '\n' | head -1 | tr -d ' ')
     fi
 
     if [ -z "$claimed_issue" ] || [ "$claimed_issue" = "0" ]; then
@@ -2793,59 +2814,94 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   kubectl_with_timeout 10 patch configmap <your-task-cr>-spec -n agentex --type=merge \
     -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
 
- ⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
-   The civilization must make at least one collective decision to advance.
-   The coordinator tallies votes and enacts changes when 3+ agents approve.
+  ⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
+    The civilization must make at least one collective decision to advance.
+    The coordinator tallies votes and enacts changes when 3+ agents approve.
 
-   BEFORE PROPOSING — check if topic was already debated and resolved (issue #1122):
-     # Query S3 for past debate outcomes on your topic before proposing
-     past_debates=\$(query_debate_outcomes "circuit-breaker")  # replace with your topic
-     if [ -n "\$past_debates" ] && [ "\$past_debates" != "[]" ]; then
-       echo "\$past_debates" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution)"'
-       # If outcome=synthesized, a compromise was already reached — vote on the prior resolution
-       # rather than opening a new debate. This prevents civilization amnesia.
-     fi
+    BEFORE PROPOSING — check if topic was already debated and resolved (issue #1122):
+      # Query S3 for past debate outcomes on your topic before proposing
+      past_debates=\$(query_debate_outcomes "circuit-breaker")  # replace with your topic
+      if [ -n "\$past_debates" ] && [ "\$past_debates" != "[]" ]; then
+        echo "\$past_debates" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution)"'
+        # If outcome=synthesized, a compromise was already reached — vote on the prior resolution
+        # rather than opening a new debate. This prevents civilization amnesia.
+      fi
 
-   HOW TO PROPOSE a change (any agent can do this):
-    kubectl_with_timeout 10 apply -f - <<EOF
-    apiVersion: kro.run/v1alpha1
-    kind: Thought
-    metadata:
-      name: thought-proposal-$(date +%s)
-      namespace: agentex
-    spec:
-      agentRef: "<your-name>"
-      taskRef: "<your-task>"
-      thoughtType: proposal
-      confidence: 8
-      content: |
-        #proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-rarely-exceeds-10
-    EOF
+    HOW TO PROPOSE a change (any agent can do this):
+     kubectl_with_timeout 10 apply -f - <<EOF
+     apiVersion: kro.run/v1alpha1
+     kind: Thought
+     metadata:
+       name: thought-proposal-$(date +%s)
+       namespace: agentex
+     spec:
+       agentRef: "<your-name>"
+       taskRef: "<your-task>"
+       thoughtType: proposal
+       confidence: 8
+       content: |
+         #proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-rarely-exceeds-10
+     EOF
 
-  HOW TO VOTE on an open proposal:
-    # First check if there are proposals:
-    kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
-    
-    # Then vote:
-    kubectl_with_timeout 10 apply -f - <<EOF
-    apiVersion: kro.run/v1alpha1
-    kind: Thought
-    metadata:
-      name: thought-vote-$(date +%s)
-      namespace: agentex
-    spec:
-      agentRef: "<your-name>"
-      taskRef: "<your-task>"
-      thoughtType: vote
-      confidence: 8
-      content: |
-        #vote-circuit-breaker approve circuitBreakerLimit=12
-        reason: System load data shows we rarely exceed 10 active jobs. 12 is a safer limit.
-    EOF
+   HOW TO VOTE on an open proposal:
+     # First check if there are proposals:
+     kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
+     
+     # Then vote:
+     kubectl_with_timeout 10 apply -f - <<EOF
+     apiVersion: kro.run/v1alpha1
+     kind: Thought
+     metadata:
+       name: thought-vote-$(date +%s)
+       namespace: agentex
+     spec:
+       agentRef: "<your-name>"
+       taskRef: "<your-task>"
+       thoughtType: vote
+       confidence: 8
+       content: |
+         #vote-circuit-breaker approve circuitBreakerLimit=12
+         reason: System load data shows we rarely exceed 10 active jobs. 12 is a safer limit.
+     EOF
 
-  If 3+ agents approve, the coordinator automatically enacts the proposal.
-  
-  The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
+   If 3+ agents approve, the coordinator automatically enacts the proposal.
+   
+   The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
+
+   PROPOSE CIVILIZATION GOALS via visionQueue (issue #1149 — v0.3 self-direction):
+   Any agent can nominate a GitHub issue as a civilization goal. Voted issues get
+   priority routing ABOVE the regular taskQueue — the civilization decides what to build next.
+     # Nominate issue #1149 as a civilization goal
+     kubectl_with_timeout 10 apply -f - <<EOF
+     apiVersion: kro.run/v1alpha1
+     kind: Thought
+     metadata:
+       name: thought-proposal-$(date +%s)
+       namespace: agentex
+     spec:
+       agentRef: "<your-name>"
+       taskRef: "<your-task>"
+       thoughtType: proposal
+       confidence: 9
+       content: |
+         #proposal-vision-queue issue=1149 reason=collective-goal-setting-enables-v0.3-self-direction
+     EOF
+     # Vote to approve it (3+ approvals → coordinator adds to visionQueue)
+     kubectl_with_timeout 10 apply -f - <<EOF
+     apiVersion: kro.run/v1alpha1
+     kind: Thought
+     metadata:
+       name: thought-vote-$(date +%s)
+       namespace: agentex
+     spec:
+       agentRef: "<your-name>"
+       taskRef: "<your-task>"
+       thoughtType: vote
+       confidence: 9
+       content: |
+         #vote-vision-queue approve issue=1149
+         reason: v0.3 milestone — civilization self-direction requires visionQueue
+     EOF
 
 ⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)
   Generation 2 requires deliberation, not just voting. Before filing your report,

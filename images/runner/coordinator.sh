@@ -160,6 +160,15 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
+  # visionQueue: comma-separated issueNumber:voteCount pairs for agent-proposed goals (issue #1149)
+  # When 3+ agents vote #proposal-vision-queue issue=N, N is added here and gets priority routing
+  vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
+  if [ -z "$vision_queue_val" ]; then
+    [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"visionQueue":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -804,6 +813,31 @@ tally_and_enact_votes() {
 
             # Try to patch constitution for known keys
             local patched=false
+            # VISION QUEUE (issue #1149): Handle #proposal-vision-queue specially
+            # When agents vote to add an issue to the vision queue, enact it by updating visionQueue
+            if [ "$topic" = "vision-queue" ]; then
+                local vision_issue=""
+                vision_issue=$(echo "$kv_pairs" | grep -oE 'issue=[0-9]+' | cut -d= -f2 | head -1 || true)
+                if [ -n "$vision_issue" ]; then
+                    local current_vision_queue
+                    current_vision_queue=$(get_state "visionQueue")
+                    # Add issue to visionQueue if not already present
+                    if ! echo "$current_vision_queue" | grep -q "^${vision_issue}:" && \
+                       ! echo "$current_vision_queue" | grep -q ",${vision_issue}:"; then
+                        local vote_count="$approve_votes"
+                        local new_entry="${vision_issue}:${vote_count}"
+                        if [ -z "$current_vision_queue" ]; then
+                            update_state "visionQueue" "$new_entry"
+                        else
+                            update_state "visionQueue" "${current_vision_queue},${new_entry}"
+                        fi
+                        echo "[$(date -u +%H:%M:%S)] ✓ Vision queue updated: added issue #$vision_issue (votes=$vote_count)"
+                        patched=true
+                    else
+                        echo "[$(date -u +%H:%M:%S)] Issue #$vision_issue already in visionQueue, skipping"
+                    fi
+                fi
+            fi
             if [ -n "$kv_pairs" ]; then
                 # Build JSON patch for all key=value pairs
                 local patch_data="{"

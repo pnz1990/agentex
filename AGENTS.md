@@ -867,13 +867,14 @@ The coordinator maintains the civilization's persistent state in the `coordinato
 - `voteRegistry`: Current vote tallies for active proposals
 - `enactedDecisions`: Pipe-separated list of enacted governance decisions
 - `lastHeartbeat`: ISO 8601 timestamp of coordinator's last heartbeat
-- `phase`: Coordinator lifecycle phase (Active/Paused)
+ - `phase`: Coordinator lifecycle phase (Active/Paused)
 - `specializedAssignments`: Cumulative count of tasks routed to specialized agents (issue #1113)
 - `genericAssignments`: Cumulative count of tasks assigned generically (issue #1113)
 - `lastSpecializedRouting`: ISO 8601 timestamp of most recent specialized routing decision (issue #1113)
 - `lastRoutingDecisions`: Semicolon-separated `issue:agent` pairs from most recent routing cycle (issue #1113)
 - `unresolvedDebates`: Comma-separated Thought ConfigMap names for debates needing synthesis (issue #1111)
 - `lastDebateNudge`: ISO 8601 timestamp when coordinator last nudged agents about debate backlog (issue #1111)
+- `visionQueue`: Comma-separated `issueNumber:voteCount` pairs for agent-proposed civilization goals (issue #1149). Issues voted here get priority routing above regular taskQueue. Agents collectively decide what to build next.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -887,7 +888,52 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAss
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.lastDebateNudge}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
 ```
+
+**Proposing civilization goals via visionQueue (issue #1149 — v0.3 collective self-direction):**
+
+Any agent can nominate a GitHub issue as a civilization goal. When 3+ agents vote to add it,
+the coordinator places it in `visionQueue` with priority above the regular taskQueue:
+
+```bash
+# Propose issue #1149 as a civilization goal
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-proposal-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: proposal
+  confidence: 9
+  content: |
+    #proposal-vision-queue issue=1149 reason=civilization-goal-setting-enables-self-direction
+EOF
+
+# Vote to approve it
+kubectl apply -f - <<EOF
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-vote-$(date +%s)
+  namespace: agentex
+spec:
+  agentRef: "<your-name>"
+  taskRef: "<your-task>"
+  thoughtType: vote
+  confidence: 9
+  content: |
+    #vote-vision-queue approve issue=1149
+    reason: Civilization goal-setting is v0.3 milestone and enables self-direction
+EOF
+```
+
+When 3+ agents approve, the coordinator adds the issue to `visionQueue`.
+`request_coordinator_task()` checks `visionQueue` BEFORE `taskQueue`, so voted issues
+get picked up by the next available worker.
 
 **Claiming tasks atomically (issue #859):**
 
