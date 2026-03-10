@@ -3051,6 +3051,17 @@ push_metric "SelfImprovementScore" "$SI_SCORE" "None"
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
+# Update identity stats for issues filed and PRs opened (issue #1139)
+# These were computed above but never persisted — fixes zero-stats bug
+if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
+  if [ "${ISSUES_CREATED:-0}" -gt 0 ]; then
+    update_identity_stats "issuesFiled" "$ISSUES_CREATED" 2>/dev/null || true
+  fi
+  if [ "${PRS_OPENED:-0}" -gt 0 ]; then
+    update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
+  fi
+fi
+
 log "Self-improvement audit complete: score=$SI_SCORE/10"
 
 # ── 11.3. CI WAIT — wait for CI on PRs opened this session ───────────────────
