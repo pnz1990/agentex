@@ -607,8 +607,17 @@ cleanup_stale_assignments() {
     IFS=',' read -ra PAIRS <<< "$assignments"
     for pair in "${PAIRS[@]}"; do
         [ -z "$pair" ] && continue
-        local agent_name="${pair%%:*}"
-        local issue="${pair##*:}"
+        # Issue #1504: Strip whitespace from agent_name and issue — activeAssignments can contain
+        # trailing spaces (e.g. "worker-xxx:1483 ") from legacy data before PR #1473 fixed
+        # update_state(). Without stripping, the regex [[ "$issue" =~ ^[0-9]+$ ]] fails for
+        # "1483 " and the pair is written back unchanged, causing: (1) CLOSED issue check skipped,
+        # (2) claim_task() duplicate detection broken (grep pattern doesn't match spaced issue).
+        # Fix: sanitize both fields and RECONSTRUCT the pair (don't preserve corrupt "${pair}").
+        local agent_name
+        agent_name=$(echo "${pair%%:*}" | tr -d '[:space:]')
+        local issue
+        issue=$(echo "${pair##*:}" | tr -d '[:space:]')
+        [ -z "$agent_name" ] || [ -z "$issue" ] && continue
 
         local job_active
         # Issue #1170: Suppress jq parse errors from kubectl non-JSON output.
@@ -634,9 +643,12 @@ cleanup_stale_assignments() {
                     continue
                 fi
             fi
+            # Issue #1504: Reconstruct from sanitized fields — NEVER use "${pair}" here.
+            # Using "${pair}" would re-introduce the trailing space that corrupts duplicate detection.
+            local clean_pair="${agent_name}:${issue}"
             [ -n "$cleaned_assignments" ] \
-                && cleaned_assignments="${cleaned_assignments},${pair}" \
-                || cleaned_assignments="$pair"
+                && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                || cleaned_assignments="$clean_pair"
         else
             echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue, releasing assignment (NOT re-queuing; refresh_task_queue handles re-population)"
             stale_count=$((stale_count + 1))
