@@ -1207,6 +1207,67 @@ Agents should prioritize high-severity alerts and create PRs to remediate them."
   fi
 }
 
+# sync_coordinator_script() - Detect and fix coordinator-script ConfigMap drift (issue #1682)
+# The CI workflow updates coordinator-script ConfigMap after each merge, but if the CI
+# IAM role lacks EKS access, the update silently fails. The coordinator Deployment then
+# runs stale code indefinitely while git main has new fixes.
+#
+# This function compares the running coordinator's line count against git main and
+# syncs the ConfigMap if drift is detected. Runs once per planner generation (planners only).
+sync_coordinator_script() {
+  log "Checking coordinator-script ConfigMap drift (issue #1682)..."
+
+  # Only proceed if we have the coordinator.sh file in the cloned repo
+  local repo_coordinator_sh="/workspace/repo/images/runner/coordinator.sh"
+  if [ ! -f "$repo_coordinator_sh" ]; then
+    log "coordinator.sh not found at $repo_coordinator_sh — skipping drift check"
+    return 0
+  fi
+
+  local git_lines
+  git_lines=$(wc -l < "$repo_coordinator_sh" 2>/dev/null || echo "0")
+
+  # Get the line count of the coordinator script currently in the ConfigMap
+  local cm_lines
+  cm_lines=$(kubectl_with_timeout 10 get configmap coordinator-script -n "$NAMESPACE" \
+    -o jsonpath='{.data.coordinator\.sh}' 2>/dev/null | wc -l || echo "0")
+
+  log "coordinator.sh drift check: git=$git_lines lines, running ConfigMap=$cm_lines lines"
+
+  if [ "${git_lines:-0}" -le 0 ]; then
+    log "WARNING: Could not determine git coordinator.sh line count — skipping sync"
+    return 0
+  fi
+
+  # Allow ±10 line tolerance for minor whitespace differences; sync if drift exceeds threshold
+  local diff=$(( git_lines - cm_lines ))
+  if [ "${diff#-}" -le 10 ]; then
+    log "✓ coordinator-script ConfigMap is current (drift=${diff} lines, within tolerance)"
+    return 0
+  fi
+
+  log "DRIFT DETECTED: coordinator.sh in ConfigMap is ${diff} lines off from git main. Syncing..."
+
+  # Update the ConfigMap from the cloned repo
+  if kubectl_with_timeout 30 create configmap coordinator-script \
+      --from-file=coordinator.sh="$repo_coordinator_sh" \
+      -n "$NAMESPACE" --dry-run=client -o yaml 2>/dev/null | \
+      kubectl_with_timeout 30 apply --validate=false -f - 2>/dev/null; then
+    log "✓ coordinator-script ConfigMap updated (${cm_lines} → ${git_lines} lines)"
+
+    # Restart the coordinator Deployment so it picks up the new script
+    if kubectl_with_timeout 30 rollout restart deployment/coordinator -n "$NAMESPACE" 2>/dev/null; then
+      log "✓ Coordinator Deployment restarted to pick up updated script"
+      post_thought "coordinator-script ConfigMap drift fixed: was ${cm_lines} lines, synced to ${git_lines} lines from git main. Coordinator restarted. (issue #1682)" "insight" 8 "coordinator-drift"
+    else
+      log "WARNING: Could not restart coordinator Deployment — it will pick up the new script on next restart"
+      post_thought "coordinator-script ConfigMap drift fixed: was ${cm_lines} lines, synced to ${git_lines} lines from git main. Coordinator restart failed — will pick up on next restart. (issue #1682)" "insight" 7 "coordinator-drift"
+    fi
+  else
+    log "WARNING: Failed to sync coordinator-script ConfigMap — CI IAM fix may be required (issue #1682)"
+  fi
+}
+
 # post_report() - Report CR with parameters matching Prime Directive step ⑤
 # This is the primary interface agents should use per Prime Directive.
 post_report() {
@@ -3089,10 +3150,14 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      log "Planner: cleaning up old reports (48h TTL)..."
      cleanup_old_reports
      
-     # Security alert check (issue #652) - constitution-mandated self-awareness
-     check_security_alerts
+      # Security alert check (issue #652) - constitution-mandated self-awareness
+      check_security_alerts
 
-      # Issue #1111: Read unresolved debates from coordinator for planner triage
+      # Coordinator-script drift detection and self-healing (issue #1682)
+      # CI may fail to update coordinator-script ConfigMap — planners detect and fix this.
+      sync_coordinator_script
+
+       # Issue #1111: Read unresolved debates from coordinator for planner triage
       log "Planner: reading unresolved debate threads from coordinator..."
       UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
         -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
