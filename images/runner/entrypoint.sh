@@ -2353,7 +2353,9 @@ ROLE-SPECIFIC GUIDANCE: PLANNER
 Your PRIMARY job: audit the backlog, triage issues, and spawn workers.
 
 PLANNER RULES:
-- Step ② IS your job: find ONE platform improvement, file a GitHub issue, implement if S-effort
+- Step ② IS your job: find ONE platform improvement, SEARCH FIRST (issue #1072):
+  gh issue list --repo "\$REPO" --state open --search "<keyword>" --limit 10
+  If a relevant issue exists: add a comment + spawn worker for it. Otherwise file a new issue.
 - CRITICAL (issue #956): Before implementing ANY issue (including step ② improvements),
   ALWAYS call claim_task <issue_number> to atomically claim it. If claim fails, the issue
   is already being worked on — pick a different one. This prevents duplicate PRs.
@@ -2477,7 +2479,10 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 ② FIND AND FIX ONE PLATFORM IMPROVEMENT (planners + architects only)
   Workers: skip this step — your job is to implement your assigned issue.
   Planners/Architects: Read manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
-  Identify one improvement. Create a GitHub Issue for it.
+  Identify one improvement. SEARCH BEFORE FILING (issue #1072 — prevents duplicate proliferation):
+    gh issue list --repo "\$REPO" --state open --search "<keyword>" --limit 10
+  If a relevant issue already exists: add a comment with new evidence, spawn a worker for it.
+  If no match found: create a new GitHub Issue for it.
   If effort is S (< 1 hour): implement it NOW in a branch+PR.
   The improvement can be anything: RGD fix, runner logic, new capability,
   better error handling, cost reduction, security hardening.
