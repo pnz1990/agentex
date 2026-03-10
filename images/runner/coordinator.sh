@@ -3991,6 +3991,79 @@ find_best_agent_for_issue() {
     fi
 }
 
+# spawn_swarm_for_issue — Issue #1782: Coordinator-driven swarm spawning.
+# When an issue is labeled swarm-eligible or multi-domain, create a Swarm CR
+# instead of assigning it to a single worker. Removes the issue from the queue
+# and updates coordinator-state.activeSwarms.
+#
+# Usage: spawn_swarm_for_issue <issue_number> <issue_labels> <issue_title>
+# Returns: 0 if swarm was spawned (caller should skip single-worker assignment)
+#          1 if issue is not swarm-eligible (caller proceeds with normal routing)
+spawn_swarm_for_issue() {
+    local issue_number="$1"
+    local issue_labels="$2"
+    local issue_title="$3"
+
+    # Check if issue qualifies for swarm spawning based on labels
+    # Labels that trigger swarm: swarm-eligible, multi-domain
+    if ! echo "$issue_labels" | grep -qiE "swarm-eligible|multi-domain"; then
+        return 1  # Not swarm-eligible — caller proceeds with normal routing
+    fi
+
+    local swarm_name="swarm-issue-${issue_number}-$(date +%s)"
+    local swarm_goal="Collectively resolve GitHub issue #${issue_number}: ${issue_title}"
+
+    echo "[$(date -u +%H:%M:%S)] Issue #1782: Issue #$issue_number is swarm-eligible (labels: $issue_labels) — spawning Swarm CR"
+
+    # Create the Swarm CR via kro (swarm-graph RGD must be installed)
+    if ! kubectl apply -f - <<SWARMEOF 2>/dev/null; then
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+spec:
+  goal: "${swarm_goal}"
+  maxAgents: 3
+  issueRef: "${issue_number}"
+SWARMEOF
+        echo "[$(date -u +%H:%M:%S)] Issue #1782: WARNING: Failed to create Swarm CR ${swarm_name} for issue #$issue_number — falling back to single-worker"
+        return 1
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Issue #1782: Swarm CR ${swarm_name} created for issue #$issue_number"
+
+    # Track in coordinator-state.activeSwarms (pipe-separated swarm-name:goal:membercount entries)
+    # New swarm starts with 0 members — members join as their Jobs start.
+    local safe_goal_snippet
+    safe_goal_snippet=$(echo "$swarm_goal" | cut -c1-40 | tr ':|' '--')
+    local new_swarm_entry="${swarm_name}:${safe_goal_snippet}:0"
+    local current_swarms
+    current_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if [ -z "$current_swarms" ]; then
+        update_state "activeSwarms" "$new_swarm_entry"
+    else
+        update_state "activeSwarms" "${current_swarms}|${new_swarm_entry}"
+    fi
+
+    push_metric "SwarmSpawnedForIssue" 1 "Count" "IssueNumber=${issue_number}"
+    post_coordinator_thought "Issue #1782: Spawned Swarm CR ${swarm_name} for swarm-eligible issue #${issue_number}. Goal: ${swarm_goal}" "insight"
+
+    return 0  # Swarm was spawned — caller should skip single-worker assignment
+}
+
+# query_active_swarms_count — Issue #1782: Return count of currently active swarms.
+# Used internally; agents can use helpers.sh query_active_swarms() for full data.
+query_active_swarms_count() {
+    local active
+    active=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if [ -z "$active" ]; then
+        echo "0"
+        return 0
+    fi
+    echo "$active" | tr '|' '\n' | grep -c '.' 2>/dev/null || echo "0"
+}
+
 # Perform identity-based task routing cycle:
 # For each issue in the task queue that is NOT yet assigned, attempt to find
 # a specialized agent. Record routing decisions and emit metrics.
@@ -4076,18 +4149,40 @@ route_tasks_by_specialization() {
          # Count unassigned issues seen this cycle (issue #1675: needed for false-positive prevention)
          unassigned_count=$((unassigned_count + 1))
 
-        # Get issue labels for scoring — use cache first (issue #1430: rate-limit resilient)
-        local issue_labels=""
-        if [ -n "$labels_cache" ]; then
-            issue_labels=$(echo "$labels_cache" | tr '|' '\n' | grep "^${issue_num}:" | cut -d: -f2- | head -1 || echo "")
-        fi
-        # Fall back to GitHub API on cache miss
-        if [ -z "$issue_labels" ]; then
-            issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
-                --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
-        fi
+         # Get issue labels for scoring — use cache first (issue #1430: rate-limit resilient)
+         local issue_labels=""
+         if [ -n "$labels_cache" ]; then
+             issue_labels=$(echo "$labels_cache" | tr '|' '\n' | grep "^${issue_num}:" | cut -d: -f2- | head -1 || echo "")
+         fi
+         # Fall back to GitHub API on cache miss
+         if [ -z "$issue_labels" ]; then
+             issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+                 --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+         fi
 
-        # Find best specialized agent
+         # Issue #1782: Check if issue is swarm-eligible before single-worker assignment.
+         # Issues labeled swarm-eligible or multi-domain get a Swarm CR instead of a single worker.
+         if echo "$issue_labels" | grep -qiE "swarm-eligible|multi-domain"; then
+             local issue_title=""
+             issue_title=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
+                 --json title --jq '.title' 2>/dev/null || echo "issue-${issue_num}")
+             if spawn_swarm_for_issue "$issue_num" "$issue_labels" "$issue_title"; then
+                 echo "[$(date -u +%H:%M:%S)] Issue #1782: issue #$issue_num dispatched to swarm — skipping single-worker assignment"
+                 # Mark as assigned in local variable to prevent double-routing in this cycle
+                 local swarm_placeholder="swarm-issue-${issue_num}"
+                 if [ -z "$active_assignments" ]; then
+                     active_assignments="${swarm_placeholder}:${issue_num}"
+                 else
+                     active_assignments="${active_assignments},${swarm_placeholder}:${issue_num}"
+                 fi
+                 update_state "activeAssignments" "$active_assignments"
+                 specialized_count=$((specialized_count + 1))
+                 continue
+             fi
+             # spawn_swarm_for_issue returned 1 (failure) — fall through to single-worker routing
+         fi
+
+         # Find best specialized agent
         # Issue #1478: pass active_assignments to avoid N redundant get_state calls inside find_best_agent_for_issue
          local best_agent
          best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")

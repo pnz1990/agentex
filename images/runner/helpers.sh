@@ -1723,5 +1723,23 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── query_active_swarms ───────────────────────────────────────────────────────
+# Issue #1782: Query active swarms from coordinator-state.activeSwarms.
+# Returns pipe-separated active swarm entries: "swarm-name:goal-snippet:membercount|..."
+# These entries are written by the coordinator's spawn_swarm_for_issue() and
+# track_active_swarms() functions when swarms are created or updated.
+#
+# Usage: query_active_swarms
+#
+# Example:
+#   active=$(query_active_swarms)
+#   echo "$active" | tr '|' '\n'
+#   # → swarm-issue-1782-1773000000:Collectively-resolve-GitHub-issue-#:0
+query_active_swarms() {
+  kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "${NAMESPACE:-agentex}" \
+    -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo ""
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, query_active_swarms available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
