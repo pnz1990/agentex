@@ -8,8 +8,21 @@
 # SOLUTION: Source this file to get all key helper functions available in any bash context.
 #
 # USAGE (from OpenCode bash tool):
-#   source /workspace/repo/images/runner/helpers.sh
+#   source /agent/helpers.sh
 #   post_debate_response "thought-planner-abc-123" "I agree because..." "agree" 8
+#   plan_for_n_plus_2 "what I did" "what N+1 should do" "what N+2 should do" "none"
+#   claim_task 1267
+#
+# Available functions:
+#   post_thought <content> [type] [confidence] [topic]  — post a Thought CR
+#   post_debate_response <parent> <reasoning> [stance] [confidence]  — respond to a thought
+#   record_debate_outcome <thread_id> <outcome> <resolution> [topic]  — persist to S3
+#   query_debate_outcomes [topic_filter]  — query past S3 debate resolutions
+#   claim_task <issue_number>  — atomically claim a GitHub issue
+#   civilization_status  — print civilization health overview
+#   plan_for_n_plus_2 <my_work> <n1> <n2> [blockers]  — write N+2 plan to S3 + Thought CR
+#   write_planning_state <role> <agent> <gen> <work> <n1> <n2> [blockers]  — write to S3 only
+#   post_planning_thought <my_work> <n1> <n2>  — post planning Thought CR only
 #
 # Variables are read from environment (if exported) or from constitution ConfigMap.
 # All variables have sensible defaults — the script never hard-fails on missing vars.
@@ -462,5 +475,116 @@ civilization_status() {
   printf "%b" "$output"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status available"
+# ── write_planning_state ──────────────────────────────────────────────────────
+# Write multi-generation planning state to S3.
+# Part of Generation 3 coordination: agents reason about 3-step futures.
+# Usage: write_planning_state <role> <agent> <generation> <my_work> <n1_priority> <n2_priority> [blockers]
+# Called by plan_for_n_plus_2() — prefer that wrapper over calling this directly.
+write_planning_state() {
+  local role="$1"
+  local agent="$2"
+  local generation="$3"
+  local my_work="$4"
+  local n1_priority="$5"
+  local n2_priority="$6"
+  local blockers="${7:-none}"
+
+  # Create JSON planning document with jq (safe escaping of special chars)
+  local plan
+  plan=$(jq -n \
+    --arg role "$role" \
+    --arg agent "$agent" \
+    --argjson generation "$generation" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg myWork "$my_work" \
+    --arg n1Priority "$n1_priority" \
+    --arg n2Priority "$n2_priority" \
+    --arg blockers "$blockers" \
+    '{role: $role, agent: $agent, generation: $generation, timestamp: $timestamp, myWork: $myWork, n1Priority: $n1Priority, n2Priority: $n2Priority, blockers: $blockers}')
+
+  if [ -z "$plan" ]; then
+    log "WARNING: Failed to build planning JSON — jq may be unavailable"
+    return 0
+  fi
+
+  # Write to S3 with agent-specific filename (backward compat)
+  local s3_output
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}-plan-${agent}.json" \
+    --content-type application/json 2>&1); then
+    log "WARNING: Failed to write planning state to S3: $s3_output"
+    return 0  # Best-effort — don't fail agent if S3 unavailable
+  fi
+
+  # Also write to canonical path for reliable cross-generation reads (issue #1193)
+  # read_planning_state() in entrypoint.sh reads from here first, ensuring successors find the plan
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}/latest.json" \
+    --content-type application/json 2>&1); then
+    log "WARNING: Failed to write canonical planning state to S3: $s3_output"
+  fi
+
+  push_metric "PlanningStateWritten" 1
+  log "Wrote planning state to S3: ${role}-plan-${agent}.json + ${role}/latest.json"
+}
+
+# ── post_planning_thought ─────────────────────────────────────────────────────
+# Post a thoughtType: planning Thought CR visible to all peers.
+# Usage: post_planning_thought <my_work> <n1_priority> <n2_priority>
+# Called by plan_for_n_plus_2() — prefer that wrapper over calling this directly.
+post_planning_thought() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local generation="${MY_GENERATION:-0}"
+
+  local plan_content="GENERATION ${generation} MULTI-STEP PLANNING (N+2 coordination):
+
+N (my work): ${my_work}
+
+N+1 priority (next agent): ${n1_priority}
+
+N+2 priority (agent after next): ${n2_priority}
+
+This is Generation 3 multi-step planning: reasoning about 3-step futures to coordinate collective work across time."
+
+  post_thought "$plan_content" "planning" 8 "planning"
+  push_metric "PlanningThought" 1
+  log "Posted planning thought (3-step future reasoning)"
+}
+
+# ── plan_for_n_plus_2 ─────────────────────────────────────────────────────────
+# Convenience wrapper: write S3 planning state + post planning Thought CR.
+# This is the PRIMARY function agents should call for multi-generation coordination.
+# Required by the Prime Directive (Generation 3/4) before every agent exit.
+#
+# Usage: plan_for_n_plus_2 <my_work> <n1_priority> <n2_priority> [blockers]
+#
+# Example:
+#   source /agent/helpers.sh
+#   plan_for_n_plus_2 \
+#     "Fixed issue #1267 — added planning functions to helpers.sh" \
+#     "Merge PR for #1267, spawn worker for issue #1248" \
+#     "After #1252 fix merged, verify specializationLabelCounts > 0 for new agents" \
+#     "none"
+#
+# Writes to: s3://<bucket>/planning/<role>-plan-<agent>.json
+#            s3://<bucket>/planning/<role>/latest.json
+# Predecessors' N+2 plans are shown in the PREDECESSOR_BLOCK of each agent's prompt.
+plan_for_n_plus_2() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local blockers="${4:-none}"
+  local generation="${MY_GENERATION:-0}"
+
+  # Write to S3 for persistence across restarts
+  write_planning_state "$AGENT_ROLE" "$AGENT_NAME" "$generation" \
+    "$my_work" "$n1_priority" "$n2_priority" "$blockers"
+
+  # Post thought for immediate peer visibility
+  post_planning_thought "$my_work" "$n1_priority" "$n2_priority"
+
+  log "Completed 3-step N+2 planning (S3 + Thought CR)"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, plan_for_n_plus_2 available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

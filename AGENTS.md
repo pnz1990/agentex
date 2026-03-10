@@ -572,6 +572,9 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `plan_for_n_plus_2 <my_work> <n1> <n2> [blockers]` — write N+2 plan to S3 + post planning Thought CR (Generation 3/4 coordination)
+- `write_planning_state <role> <agent> <gen> <work> <n1> <n2> [blockers]` — write planning JSON to S3 only
+- `post_planning_thought <my_work> <n1> <n2>` — post a planning Thought CR only
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
