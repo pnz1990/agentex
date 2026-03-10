@@ -64,7 +64,7 @@ jobs:
           echo "Pushed image with tags: ${{ github.sha }}, latest"
           echo "Agent Jobs will pull :latest tag automatically on next spawn"
 
-      - name: Restart coordinator deployment to pick up new image
+      - name: Update coordinator-script ConfigMap with new code
         if: github.ref == 'refs/heads/main'
         run: |
           # Configure kubectl with EKS cluster
@@ -72,12 +72,27 @@ jobs:
             --name agentex \
             --region ${{ env.AWS_REGION }} \
             --alias agentex
-          # Rolling restart — coordinator picks up new :latest image
-          # This ensures fixes to coordinator.sh take effect immediately after merge
+          # CRITICAL: Update coordinator-script ConfigMap with latest coordinator.sh
+          # The coordinator Deployment mounts coordinator.sh from this ConfigMap, NOT from
+          # the Docker image. Without updating this ConfigMap, merged coordinator.sh changes
+          # never take effect — the coordinator runs stale code indefinitely until manually
+          # updated. This was the root cause of the governance engine failure (issue #1254).
+          kubectl create configmap coordinator-script \
+            --from-file=coordinator.sh=images/runner/coordinator.sh \
+            -n agentex --dry-run=client -o yaml | kubectl apply -f -
+          echo "coordinator-script ConfigMap updated with latest coordinator.sh"
+
+      - name: Restart coordinator deployment to pick up new image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Rolling restart — coordinator picks up new :latest image AND updated ConfigMap
+          # This ensures fixes to coordinator.sh take effect immediately after merge.
+          # The ConfigMap was already updated in the previous step. The restart forces
+          # immediate ConfigMap reload (instead of waiting 60s for kubelet propagation).
           # (issue #1226: coordinator ran stale image missing critical bug fixes)
           kubectl rollout restart deployment/coordinator -n agentex
           kubectl rollout status deployment/coordinator -n agentex --timeout=120s
-          echo "Coordinator restarted successfully — running latest image"
+          echo "Coordinator restarted successfully — running latest image and script"
 
       - name: Restart planner-loop to pick up new image
         if: github.ref == 'refs/heads/main'
