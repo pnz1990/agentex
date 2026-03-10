@@ -840,14 +840,15 @@ cleanup_old_thoughts() {
     return 0
   fi
 
-  # Tiered TTL: low-signal types (blocker, observation) expire after 2h
-  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  # Tiered TTL: low-signal types (blocker, observation, decision, plan, planning) expire after 2h
+  # Issue #1614: decision/plan/planning are system metadata thoughts (not substantive agent reasoning)
+  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
     --arg cutoff_24h "$cutoff_24h" \
     --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
       then $cutoff_2h
       else $cutoff_24h
       end) as $cutoff |

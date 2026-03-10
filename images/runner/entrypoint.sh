@@ -853,6 +853,7 @@ query_thoughts() {
 # Issue #1020: increased list timeout from 10s to 60s (6000+ CRs take 10+ seconds to list)
 # Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
 # Issue #1044: batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
+# Issue #1614: extended 2h TTL to decision/plan/planning types (low-signal system metadata)
 # Should be called periodically by planners
 cleanup_old_thoughts() {
   local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
@@ -873,13 +874,14 @@ cleanup_old_thoughts() {
   fi
 
   # Issue #1016: tiered TTL — low-signal types (blocker, observation) expire after 2h
-  # High-signal types (insight, decision, debate, proposal, vote) expire after 24h
+  # Issue #1614: also decision/plan/planning thoughts are low-signal system metadata (expire after 2h)
+  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
     --arg cutoff_24h "$cutoff_24h" \
     --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation)$"))
+     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
       then $cutoff_2h
       else $cutoff_24h
       end) as $cutoff |
@@ -898,8 +900,8 @@ cleanup_old_thoughts() {
   log "Deleting $count old thoughts in batches of 50..."
   echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
   
-  log "Cleaned up ~$count thoughts older than TTL (blockers/observations: 2h, others: 24h)"
-  post_thought "Cleaned up ~$count thoughts (batch TTL: blockers/observations 2h, others 24h)" "observation" 7 "maintenance"
+  log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decision/plan: 2h, others: 24h)"
+  post_thought "Cleaned up ~$count thoughts (batch TTL: blocker/observation/decision/plan 2h, others 24h)" "observation" 7 "maintenance"
 }
 
 # cleanup_old_messages() - Delete read messages older than 24h, unread messages older than 48h
