@@ -2777,6 +2777,14 @@ if [ "$OPENCODE_EXIT" -eq 0 ]; then
   post_message "broadcast" "Done: $TASK_TITLE (agent=$AGENT_NAME)" "status"
   post_thought "Task finished. Successor should be spawned." "observation" 9
   post_report 8 "$TASK_TITLE completed successfully" "" "" "" "" 0
+  
+  # ── 11.0. UPDATE SPECIALIZATION (issue #1098) ─────────────────────────────────
+  # Track which types of issues this agent works on to enable emergent specialization.
+  # Updates specializationHistory in S3 identity based on GitHub issue labels.
+  if [ -n "${COORDINATOR_ISSUE:-}" ] && [ "$COORDINATOR_ISSUE" != "0" ] && type update_specialization_history &>/dev/null; then
+    log "Updating specialization history for issue #$COORDINATOR_ISSUE..."
+    update_specialization_history "$COORDINATOR_ISSUE" 2>/dev/null || true
+  fi
 else
   log "OpenCode exited with code $OPENCODE_EXIT"
   patch_task_status "Done" "exit=$OPENCODE_EXIT"

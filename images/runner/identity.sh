@@ -155,6 +155,8 @@ save_identity() {
   "role": "$AGENT_ROLE",
   "generation": $generation,
   "claimedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "specialization": "none",
+  "specializationHistory": {},
   "stats": {
     "tasksCompleted": 0,
     "issuesFiled": 0,
@@ -246,6 +248,93 @@ get_identity_signature() {
   else
     echo "I am $AGENT_NAME"
   fi
+}
+
+#######################################
+# Update specialization history based on worked issue
+# Arguments:
+#   $1 - issue number
+# Updates specializationHistory in S3 identity with issue labels
+#######################################
+update_specialization_history() {
+  local issue_num="${1:-}"
+  
+  if [[ -z "$issue_num" ]]; then
+    echo "[identity] ERROR: update_specialization_history requires issue number"
+    return 1
+  fi
+  
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    # No S3 identity file, skip update
+    return 0
+  fi
+  
+  # Get issue labels from GitHub
+  local labels
+  labels=$(gh issue view "$issue_num" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  
+  if [[ -z "$labels" ]]; then
+    echo "[identity] No labels found for issue #$issue_num, skipping specialization update"
+    return 0
+  fi
+  
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity from S3 for specialization update"
+    return 0
+  fi
+  
+  # Update specializationHistory for each label
+  local updated_json="$identity_json"
+  for label in $(echo "$labels" | tr ',' ' '); do
+    updated_json=$(echo "$updated_json" | jq \
+      --arg label "$label" \
+      '.specializationHistory[$label] = (.specializationHistory[$label] // 0) + 1')
+  done
+  
+  # Calculate primary specialization (label with most work)
+  local primary_spec
+  primary_spec=$(echo "$updated_json" | jq -r '
+    .specializationHistory | 
+    to_entries | 
+    max_by(.value) | 
+    .key // "none"
+  ')
+  
+  # Update specialization field
+  updated_json=$(echo "$updated_json" | jq --arg spec "$primary_spec" '.specialization = $spec')
+  
+  # Save back to S3
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    echo "[identity] Updated specialization history for issue #$issue_num (labels: $labels)"
+    echo "[identity] Current specialization: $primary_spec"
+  else
+    echo "[identity] WARNING: Could not save updated specialization to S3"
+  fi
+}
+
+#######################################
+# Get agent specialization from S3 identity
+# Returns the specialization or "none" if not set
+#######################################
+get_specialization() {
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    echo "none"
+    return 0
+  fi
+  
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+  
+  if [[ -z "$identity_json" ]]; then
+    echo "none"
+    return 0
+  fi
+  
+  echo "$identity_json" | jq -r '.specialization // "none"'
 }
 
 #######################################
