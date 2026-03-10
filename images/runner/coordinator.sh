@@ -863,6 +863,16 @@ cleanup_stale_assignments() {
         local issue
         issue=$(echo "${pair##*:}" | tr -d '[:space:]')
 
+        # Issue #1669: Immediately release any assignment made by a planner.
+        # Planners spawn workers for issues — they should never hold implementation claims.
+        # Ghost planner assignments block workers from claiming the same issues.
+        # Detect planner agents by name prefix (planner-* naming convention).
+        if echo "$agent_name" | grep -q "^planner"; then
+            echo "[$(date -u +%H:%M:%S)] Ghost planner: $agent_name → issue #$issue claimed by planner, releasing immediately (planners should spawn workers, not claim)"
+            stale_count=$((stale_count + 1))
+            continue
+        fi
+
         local job_active
         # Issue #1170: Suppress jq parse errors from kubectl non-JSON output.
         # Issue #1260: Root cause fix — capture kubectl output first, use empty-object fallback.

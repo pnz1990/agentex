@@ -406,6 +406,15 @@ claim_task() {
   local issue="$1"
   [ -z "$issue" ] || [ "$issue" = "0" ] && return 1
 
+  # Issue #1669: Planners should spawn workers for issues, not claim them directly.
+  # Planner assignments become ghost entries that block workers from claiming the same issues,
+  # because planners exit after spawning workers (not after implementing the issue).
+  local calling_role="${AGENT_ROLE:-}"
+  if [ "$calling_role" = "planner" ]; then
+    log "Coordinator: planners should not claim issues — spawn a worker for issue #$issue instead (role=$calling_role)"
+    return 1
+  fi
+
   # Issue #1672: Check if an open PR already exists for this issue before claiming.
   # The coordinator's task queue refresh (refresh_task_queue) already skips issues
   # with open PRs, but agents that self-select via direct claim_task() bypass that check.
