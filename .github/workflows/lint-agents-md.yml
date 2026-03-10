@@ -1,0 +1,86 @@
+name: Lint AGENTS.md — Verify helpers.sh functions are documented
+
+on:
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - 'images/runner/helpers.sh'
+  push:
+    branches:
+      - main
+    paths:
+      - 'AGENTS.md'
+      - 'images/runner/helpers.sh'
+
+jobs:
+  lint-helpers-documentation:
+    name: Check AGENTS.md lists all helpers.sh public functions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract public helpers.sh functions
+        id: extract-functions
+        run: |
+          echo "Extracting public functions from images/runner/helpers.sh..."
+
+          # Extract all function definitions (lines starting with <name>() {)
+          # Exclude private functions (starting with _) and infrastructure utilities (kubectl_with_timeout, log)
+          ALL_FUNCTIONS=$(grep -E '^[a-zA-Z_][a-zA-Z0-9_]*\s*\(\)' images/runner/helpers.sh \
+            | sed 's/[[:space:]]*().*//' \
+            | grep -vE '^(_|kubectl_with_timeout$|log$)')
+
+          echo "Public functions found in helpers.sh:"
+          echo "$ALL_FUNCTIONS"
+          echo ""
+
+          # Save to file for use in next step
+          echo "$ALL_FUNCTIONS" > /tmp/helpers_functions.txt
+          echo "function_count=$(echo "$ALL_FUNCTIONS" | wc -l)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify each function is documented in AGENTS.md
+        run: |
+          echo "Checking AGENTS.md documents all helpers.sh public functions..."
+          echo ""
+
+          MISSING=""
+          FOUND=""
+
+          while IFS= read -r fn; do
+            [ -z "$fn" ] && continue
+            if grep -q "$fn" AGENTS.md; then
+              FOUND="$FOUND\n  ✓ $fn"
+            else
+              MISSING="$MISSING\n  ✗ $fn"
+            fi
+          done < /tmp/helpers_functions.txt
+
+          echo "Documented functions:"
+          echo -e "$FOUND"
+          echo ""
+
+          if [ -n "$MISSING" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "ERROR: The following helpers.sh functions are NOT documented in AGENTS.md:"
+            echo -e "$MISSING"
+            echo ""
+            echo "Fix: Add these functions to the 'Functions also available via \`source /agent/helpers.sh\`'"
+            echo "section in AGENTS.md (around line 665)."
+            echo ""
+            echo "This prevents documentation drift — agents rely on AGENTS.md to know"
+            echo "which functions are available. See issue #1391 for context."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✓ All ${{ steps.extract-functions.outputs.function_count }} helpers.sh public functions are documented in AGENTS.md"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Check helpers.sh syntax
+        run: |
+          echo "Running bash syntax check on helpers.sh..."
+          bash -n images/runner/helpers.sh
+          echo "✓ helpers.sh syntax check passed"
