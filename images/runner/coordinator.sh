@@ -364,6 +364,23 @@ ensure_state_fields_initialized() {
       -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
   fi
 
+  # v05MilestoneStatus (issue #1752): tracks whether v0.5 Emergent Specialization milestone is complete.
+  # Set to "completed" by check_v05_milestone() when all 5 success criteria are met.
+  # Empty means not yet complete (check will run again next cycle).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("v05MilestoneStatus")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing v05MilestoneStatus (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"v05MilestoneStatus":""}}' 2>/dev/null || true
+  fi
+
+  # v05CriteriaStatus (issue #1752): human-readable status of last v0.5 criteria check.
+  # Updated every 10 min by check_v05_milestone() with current pass/fail counts per criterion.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("v05CriteriaStatus")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing v05CriteriaStatus (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"v05CriteriaStatus":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -2839,6 +2856,222 @@ THOUGHT_EOF
     else
         echo "[$(date -u +%H:%M:%S)] Role promotion cycle complete: no agents met promotion criteria"
     fi
+ }
+
+# ── v0.5 Milestone Completion Checker (issue #1752) ──────────────────────────
+#
+# Periodically checks whether all v0.5 Emergent Specialization success criteria
+# are met. When all 5 criteria pass, posts a milestone completion Thought CR and
+# files a GitHub issue announcing v0.5 completion.
+#
+# Success Criteria (from issue #1732):
+#   1. Dynamic role promotions: 3+ agents with promotedRole in S3 identity
+#   2. Trust graph: 5+ distinct citation edges in coordinator-state.agentTrustGraph
+#   3. Proactive issue discovery: 2+ agents with proactiveIssuesFound > 0 in S3 identity
+#   4. Mentor credit loop: 1+ agent with mentorCredits > 0 in S3 identity
+#   5. Vision queue proposer identity: 2+ items in visionQueueLog (always true after PR #1739)
+#
+# State: coordinator-state.v05MilestoneStatus — set to "completed" on success
+#        coordinator-state.v05CriteriaStatus  — last check results (for observability)
+#
+check_v05_milestone() {
+    # Skip if already completed
+    local milestone_status
+    milestone_status=$(get_state "v05MilestoneStatus" 2>/dev/null || echo "")
+    if [ "$milestone_status" = "completed" ]; then
+        return 0
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Checking v0.5 milestone completion criteria (issue #1752)..."
+
+    update_identity_bucket_from_constitution
+
+    local criteria_met=0
+    local criteria_report=""
+
+    # ── Criterion 1: 3+ agents with promotedRole ─────────────────────────────
+    local promoted_count=0
+    # Scan all identity files in S3 for promotedRole field
+    local identity_files
+    identity_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
+        --region "$BEDROCK_REGION" 2>/dev/null | \
+        awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
+
+    for ifile in $identity_files; do
+        local ijson
+        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        [ -z "$ijson" ] && continue
+        local prole
+        prole=$(echo "$ijson" | jq -r '.promotedRole // ""' 2>/dev/null || echo "")
+        [ -n "$prole" ] && promoted_count=$((promoted_count + 1))
+    done
+
+    if [ "$promoted_count" -ge 3 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 1: Dynamic role promotions — ${promoted_count} agents promoted\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 1: Dynamic role promotions — ${promoted_count}/3 agents promoted\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 1: ${promoted_count} agents with promotedRole (need 3)"
+
+    # ── Criterion 2: 5+ distinct citation edges in agentTrustGraph ───────────
+    local trust_graph
+    trust_graph=$(get_state "agentTrustGraph" 2>/dev/null || echo "")
+    local edge_count=0
+    if [ -n "$trust_graph" ]; then
+        # Count non-empty edges (format: citingAgent:citedAgent:count separated by |)
+        edge_count=$(echo "$trust_graph" | tr '|' '\n' | grep -c '.' 2>/dev/null || echo "0")
+        # Ensure it's numeric
+        [[ "$edge_count" =~ ^[0-9]+$ ]] || edge_count=0
+    fi
+
+    if [ "$edge_count" -ge 5 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 2: Trust graph — ${edge_count} citation edges\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 2: Trust graph — ${edge_count}/5 citation edges\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 2: ${edge_count} trust graph edges (need 5)"
+
+    # ── Criterion 3: 2+ agents with proactiveIssuesFound > 0 ─────────────────
+    local proactive_count=0
+    for ifile in $identity_files; do
+        local ijson
+        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        [ -z "$ijson" ] && continue
+        local pif
+        pif=$(echo "$ijson" | jq -r '.proactiveIssuesFound // 0 | tonumber' 2>/dev/null || echo "0")
+        [ "$pif" -gt 0 ] 2>/dev/null && proactive_count=$((proactive_count + 1))
+    done
+
+    if [ "$proactive_count" -ge 2 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 3: Proactive issue discovery — ${proactive_count} agents discovered issues\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 3: Proactive issue discovery — ${proactive_count}/2 agents with proactiveIssuesFound > 0\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 3: ${proactive_count} agents with proactiveIssuesFound > 0 (need 2)"
+
+    # ── Criterion 4: 1+ agent with mentorCredits > 0 ─────────────────────────
+    local mentor_credit_count=0
+    for ifile in $identity_files; do
+        local ijson
+        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
+            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        [ -z "$ijson" ] && continue
+        local mc
+        mc=$(echo "$ijson" | jq -r '.mentorCredits // 0 | tonumber' 2>/dev/null || echo "0")
+        [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
+    done
+
+    if [ "$mentor_credit_count" -ge 1 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 4: Mentor credit loop — ${mentor_credit_count} mentor(s) credited\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 4: Mentor credit loop — no mentors credited yet\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 4: ${mentor_credit_count} agents with mentorCredits > 0 (need 1)"
+
+    # ── Criterion 5: 2+ items in visionQueueLog (proposer identity feature) ──
+    local vision_queue_log
+    vision_queue_log=$(get_state "visionQueueLog" 2>/dev/null || echo "")
+    local vql_count=0
+    if [ -n "$vision_queue_log" ]; then
+        vql_count=$(echo "$vision_queue_log" | tr ';' '\n' | grep -c '.' 2>/dev/null || echo "0")
+        [[ "$vql_count" =~ ^[0-9]+$ ]] || vql_count=0
+    fi
+
+    if [ "$vql_count" -ge 2 ]; then
+        criteria_met=$((criteria_met + 1))
+        criteria_report="${criteria_report}✅ Criterion 5: Vision queue proposer identity — ${vql_count} items in visionQueueLog\n"
+    else
+        criteria_report="${criteria_report}⏳ Criterion 5: Vision queue proposer identity — ${vql_count}/2 items in visionQueueLog\n"
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.5 Criterion 5: ${vql_count} items in visionQueueLog (need 2)"
+
+    # ── Store progress in coordinator-state for observability ─────────────────
+    local status_summary="${criteria_met}/5 criteria met"
+    # Sanitize for JSON (escape backslashes and newlines)
+    local safe_report
+    safe_report=$(printf '%s' "$criteria_report" | tr '\n' ' ' | sed 's/"/\\"/g' | tr -s ' ')
+    local safe_status
+    safe_status=$(printf '%s' "${status_summary} | ${safe_report}" | tr '\n' ' ' | sed 's/"/\\"/g')
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"v05CriteriaStatus\":\"${safe_status}\"}}" 2>/dev/null || true
+
+    echo "[$(date -u +%H:%M:%S)] v0.5 milestone check: ${criteria_met}/5 criteria met"
+
+    # ── All 5 criteria met: declare milestone complete ────────────────────────
+    if [ "$criteria_met" -eq 5 ]; then
+        echo "[$(date -u +%H:%M:%S)] 🎉 v0.5 MILESTONE COMPLETE — All 5 Emergent Specialization criteria met!"
+
+        # Mark as completed in coordinator-state
+        kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+            -p '{"data":{"v05MilestoneStatus":"completed"}}' 2>/dev/null || true
+
+        # Post milestone completion Thought CR
+        kubectl_with_timeout 10 apply -f - <<MILESTONE_THOUGHT_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-v05-milestone-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-milestone
+  thoughtType: insight
+  confidence: 10
+  content: |
+    🎉 v0.5 EMERGENT SPECIALIZATION MILESTONE COMPLETE (issue #1732)
+
+    All 5 success criteria verified by coordinator check_v05_milestone():
+$(printf '%s' "$criteria_report" | sed 's/^/    /')
+
+    The civilization has achieved:
+    - Dynamic role promotion (roles formed by capability, not assignment)
+    - Peer trust graph with 5+ citation relationships
+    - Proactive domain issue discovery by specialists
+    - Mentor-student credit loop (cross-generation knowledge transfer)
+    - Vision queue with proposer identity (persistent advocacy tracking)
+
+    Recommendation: Begin v0.6 planning. The civilization is ready for the next milestone.
+MILESTONE_THOUGHT_EOF
+
+        # File GitHub issue announcing v0.5 completion
+        local milestone_body="## v0.5 Emergent Specialization Milestone COMPLETE
+
+Automatically verified by coordinator \`check_v05_milestone()\` function (issue #1752).
+
+All 5 success criteria from issue #1732 have been met:
+
+$(printf '%s' "$criteria_report" | sed 's/\\n/\n/g')
+
+### What This Means
+
+The civilization has achieved emergent specialization — roles are formed by demonstrated capability, not assignment. Agents:
+- Earn specialist roles automatically based on track record
+- Build trust relationships through synthesis citation  
+- Proactively hunt for problems in their domains
+- Mentor future generations and receive credit for impact
+- Advocate for long-term vision features with persistent identity
+
+### Next Step
+
+Begin v0.6 milestone planning. Suggest: focus on **swarm intelligence** — groups of specialists self-organizing around complex goals.
+
+Closes #1732"
+
+        gh issue create \
+            --repo "${GITHUB_REPO}" \
+            --title "milestone: v0.5 Emergent Specialization COMPLETE — all criteria verified by coordinator" \
+            --label "enhancement,self-improvement" \
+            --body "$milestone_body" 2>/dev/null || \
+            echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.5 completion issue (non-fatal)"
+
+        push_metric "MilestoneCompleted" 1 "Count" "Milestone=v0.5"
+    fi
 }
 
 # ── Identity-Based Task Routing (issue #1113) ────────────────────────────────
@@ -3684,6 +3917,14 @@ while true; do
     # Promotes eligible agents to {role}:{specialization}-specialist.
     if [ $((iteration % 15)) -eq 0 ]; then
         promote_agent_role
+    fi
+
+    # Every 20 iterations (~10 min): check v0.5 milestone completion (issue #1752)
+    # Evaluates all 5 Emergent Specialization success criteria from issue #1732.
+    # When all criteria pass, posts a milestone completion Thought CR and files a GitHub issue.
+    # No-ops after v05MilestoneStatus = "completed" is set.
+    if [ $((iteration % 20)) -eq 0 ]; then
+        check_v05_milestone
     fi
 
     # Every 10 iterations (~5 min): re-check and initialize any missing state fields (issue #1178)
