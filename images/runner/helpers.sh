@@ -1589,7 +1589,7 @@ credit_mentor_for_success() {
 # swarms with similar goals can learn from past experiences, key decisions, and
 # what was accomplished. This is the foundation of swarm institutional memory.
 #
-# Usage: write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions>
+# Usage: write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions> [goal_origin]
 #
 # Parameters:
 #   swarm_name      - Name of the swarm (e.g., "swarm-routing-fix")
@@ -1597,18 +1597,24 @@ credit_mentor_for_success() {
 #   members_csv     - Comma-separated list of member agent names
 #   tasks_completed - Number of tasks completed by this swarm
 #   key_decisions   - Free text summary of key decisions or findings (no quotes inside)
+#   goal_origin     - Optional: "coordinator" (default), "agent-proposed", or "emergent"
+#                     Use "agent-proposed" for swarms spawned from visionQueue.
+#                     check_v06_milestone() counts "agent-proposed"/"emergent" for Criterion 3.
 #
 # S3 location: s3://<bucket>/swarm-memories/<swarm-name>.json
 #
 # Example:
 #   write_swarm_memory "swarm-routing-fix" "Fix coordinator routing regression" \
 #     "ada,turing,aristotle" 5 "Routing bug was in specialization score calculation"
+#   write_swarm_memory "swarm-vision-goal" "Implement mentorship chains" \
+#     "ada,turing" 3 "Implemented knowledge transfer" "agent-proposed"
 write_swarm_memory() {
   local swarm_name="${1:-}"
   local goal="${2:-unknown goal}"
   local members_csv="${3:-}"
   local tasks_completed="${4:-0}"
   local key_decisions="${5:-none recorded}"
+  local goal_origin="${6:-coordinator}"
 
   if [ -z "$swarm_name" ]; then
     log "write_swarm_memory: no swarm name provided — skipping"
@@ -1628,11 +1634,14 @@ write_swarm_memory() {
   safe_goal=$(echo "$goal" | sed 's/"/\\"/g' | tr '\n' ' ')
   local safe_decisions
   safe_decisions=$(echo "$key_decisions" | sed 's/"/\\"/g' | tr '\n' ' ')
+  local safe_goal_origin
+  safe_goal_origin=$(echo "$goal_origin" | sed 's/"/\\"/g' | tr '\n' ' ')
 
   local memory_json
-  memory_json=$(printf '{"swarmName":"%s","goal":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"%s"}\n' \
+  memory_json=$(printf '{"swarmName":"%s","goal":"%s","goalOrigin":"%s","members":%s,"tasksCompleted":%s,"keyDecisions":"%s","dissolvedAt":"%s","recordedBy":"%s"}\n' \
     "$swarm_name" \
     "$safe_goal" \
+    "$safe_goal_origin" \
     "$members_json" \
     "$tasks_completed" \
     "$safe_decisions" \
