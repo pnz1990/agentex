@@ -1,0 +1,128 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: agent-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Agent
+    spec:
+      role: string | default="worker"
+      taskRef: string | required=true
+      model: string | default="us.anthropic.claude-sonnet-4-6"
+      swarmRef: string | default=""
+      priority: integer | default=5
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      clusterName: string | default="agentex"
+      useSpot: boolean | default=false  # Workers can use spot for ~70% cost reduction (issue #20)
+      capacityType: string | default="on-demand"  # "on-demand" or "spot" — controls Karpenter scheduling
+    status:
+      jobName: ${agentJob.metadata.name}
+      # completionTime replaced with string proxy — metav1.Time causes kro deep-copy panic
+      # Using resourceVersion as a non-time proxy; agents check job status directly
+      completionTime: ${agentJob.metadata.resourceVersion}
+      failed: ${agentJob.status.failed}
+      active: ${agentJob.status.active}
+      succeeded: ${agentJob.status.succeeded}
+  resources:
+    - id: agentJob
+      readyWhen:
+        - ${agentJob.metadata.resourceVersion != ""}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-agent
+            agentex/role: ${schema.spec.role}
+            agentex/task: ${schema.spec.taskRef}
+        spec:
+          ttlSecondsAfterFinished: 180  # cleanup pods 3 minutes after completion (was 300) — enacted by collective governance vote (thought-proposal-ttl-1773020650, 3+ approve votes)
+          backoffLimit: 2  # retry up to 2x on pod crash — prevents silent death from transient failures
+          activeDeadlineSeconds: 3600  # force termination after 1 hour — prevents stuck agents from consuming resources indefinitely
+          template:
+            metadata:
+              labels:
+                app: agentex-agent
+                agentex/role: ${schema.spec.role}
+                agentex/task: ${schema.spec.taskRef}
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Never
+              # Karpenter scheduling: use capacityType field to route to spot or on-demand nodes
+              # Workers spawned with capacityType=spot save ~70% on compute costs (issue #20)
+              # Planners/architects default to on-demand (losing a planner breaks succession chain)
+              # NOTE: Uses preferredDuringScheduling (weight=90) so pods fall back to on-demand
+              # if spot capacity is temporarily unavailable. This prevents scheduling deadlock.
+              affinity:
+                nodeAffinity:
+                  preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 90
+                      preference:
+                        matchExpressions:
+                          - key: karpenter.sh/capacity-type
+                            operator: In
+                            values:
+                              - ${schema.spec.capacityType}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: agent
+                  image: ${schema.spec.imageRegistry}/agentex/runner:latest
+                  imagePullPolicy: Always
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false  # agent writes to /workspace and ~/.config
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: AGENT_NAME
+                      value: ${schema.metadata.name}
+                    - name: AGENT_ROLE
+                      value: ${schema.spec.role}
+                    - name: TASK_CR_NAME
+                      value: ${schema.spec.taskRef}
+                    - name: SWARM_REF
+                      value: ${schema.spec.swarmRef}
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: REPO
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: "agentex"
+                    - name: GITHUB_TOKEN  # env var via secretKeyRef (matches cluster live config, PR #691)
+                      valueFrom:
+                        secretKeyRef:
+                          name: agentex-github-token
+                          key: token
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "250m"
+                    limits:
+                      memory: "2Gi"  # kept at 2Gi per god amendment (issue #620) - protect against OpenCode context spikes
+                      cpu: "1000m"   # reduced from 2000m via governance vote (50% compute savings, work is I/O bound)
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 2Gi

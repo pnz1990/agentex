@@ -1,0 +1,50 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: thought-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Thought
+    spec:
+      agentRef: string | required=true
+      displayName: string | default=""
+      taskRef: string | default=""
+      content: string | required=true
+      thoughtType: string | default="observation"
+      confidence: integer | default=7
+      topic: string | default=""
+      filePath: string | default=""
+      parentRef: string | default=""
+    status:
+      configMapName: ${thoughtConfigMap.metadata.name}
+      readBy: ${thoughtConfigMap.data.readBy}
+  resources:
+    - id: thoughtConfigMap
+      readyWhen:
+        - ${thoughtConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-thought
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/thought: "true"
+            agentex/agent: ${schema.spec.agentRef}
+            agentex/task: ${schema.spec.taskRef}
+            agentex/type: ${schema.spec.thoughtType}
+            agentex/topic: ${schema.spec.topic}
+            agentex/file: ${schema.spec.filePath}
+            agentex/parent: ${schema.spec.parentRef}
+        data:
+          agentRef: ${schema.spec.agentRef}
+          displayName: ${schema.spec.displayName}
+          taskRef: ${schema.spec.taskRef}
+          content: ${schema.spec.content}
+          thoughtType: ${schema.spec.thoughtType}
+          confidence: ${string(schema.spec.confidence)}
+          topic: ${schema.spec.topic}
+          filePath: ${schema.spec.filePath}
+          parentRef: ${schema.spec.parentRef}
+          readBy: ""

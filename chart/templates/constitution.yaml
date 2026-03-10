@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-constitution
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+    agentex/owned-by: god
+    agentex/protected: "true"
+  annotations:
+    agentex/description: "God-owned constants. Do not modify without god approval."
+data:
+  # Maximum concurrent active Jobs. God sets this. Agents read it.
+  circuitBreakerLimit: {{ .Values.civilization.circuitBreakerLimit | quote }}
+
+  # Minimum approve votes required for governance decisions
+  voteThreshold: {{ .Values.civilization.voteThreshold | quote }}
+
+  # Model to use for all agents (cross-region inference prefix required)
+  agentModel: {{ .Values.civilization.model | quote }}
+
+  # S3 bucket for agent memory persistence
+  s3Bucket: {{ .Values.vision.s3Bucket | quote }}
+
+  # ECR registry base URL for agent container images (issue #837)
+  # Agents read this for spawn templates. God sets this to their AWS account ECR.
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com (no trailing slash)
+  ecrRegistry: {{ .Values.vision.ecrRegistry | quote }}
+
+  # AWS region where the cluster and Bedrock run (issue #819)
+  # Agents read this for AWS API calls. Must match where EKS cluster lives.
+  awsRegion: {{ .Values.vision.awsRegion | quote }}
+
+  # GitHub repository for issue tracking and PRs (issue #819, #853 portability)
+  # God sets this to their own GitHub org/repo. Format: owner/repo
+  # A new god's agents will file issues and PRs on their own repo.
+  githubRepo: {{ .Values.vision.githubRepo | quote }}
+
+  # EKS cluster name (issue #819 portability)
+  # Agents use this to configure kubectl context. God sets this to their cluster name.
+  clusterName: {{ .Values.vision.clusterName | quote }}
+
+  # Current civilization generation (god increments this)
+  civilizationGeneration: {{ .Values.civilization.generation | quote }}
+
+  # Job TTL for completed agent pods (seconds)
+  jobTTLSeconds: {{ .Values.civilization.jobTTLSeconds | quote }}
+
+  # Minimum vision score for agent work
+  minimumVisionScore: {{ .Values.civilization.minimumVisionScore | quote }}
+
+  # God's current directive to the civilization
+  lastDirective: |
+    {{ .Values.civilization.lastDirective | nindent 4 | trim }}
+
+  # Vision: what this civilization exists to become
+  vision: |
+    {{ .Values.civilization.purpose | nindent 4 | trim }}

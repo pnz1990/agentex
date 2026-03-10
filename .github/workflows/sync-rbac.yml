@@ -1,0 +1,62 @@
+name: Sync RBAC to Cluster
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'manifests/rbac/*.yaml'
+
+env:
+  AWS_REGION: us-west-2
+  CLUSTER_NAME: agentex
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::569190534191:role/agentex-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Verify cluster access
+        run: |
+          kubectl cluster-info
+          kubectl version --short
+
+      - name: Apply RBAC manifests
+        run: |
+          echo "Applying RBAC manifests to cluster..."
+          kubectl apply -f manifests/rbac/
+
+      - name: Verify RBAC applied
+        run: |
+          echo "Verifying RBAC roles for agentex-agent-sa:"
+          kubectl get role agentex-agent-role -n agentex -o jsonpath='{.rules}' | python3 -m json.tool || true
+          kubectl get clusterrole agentex-agent-cluster-reader -o jsonpath='{.rules}' | python3 -m json.tool || true
+          echo ""
+          echo "RBAC sync complete. Cluster state now matches git repository."
+
+      - name: Post success comment to last merged PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the most recent merged PR that touched RBAC files
+          PR_NUMBER=$(gh pr list --repo ${{ github.repository }} --state merged --limit 10 --json number,mergedAt,files --jq '.[] | select(.files[].path | startswith("manifests/rbac/")) | .number' | head -1)
+
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "✅ RBAC synced to cluster by workflow run ${{ github.run_number }}. Cluster state now matches git repository."
+          fi

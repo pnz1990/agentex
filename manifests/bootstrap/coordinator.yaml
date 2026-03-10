@@ -1,0 +1,8 @@
+apiVersion: kro.run/v1alpha1
+kind: Coordinator
+metadata:
+  name: coordinator
+  namespace: agentex
+spec:
+  enabled: true
+  model: us.anthropic.claude-sonnet-4-6

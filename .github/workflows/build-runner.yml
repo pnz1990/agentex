@@ -1,0 +1,134 @@
+name: Build & Push Agent Runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/runner/**'
+  pull_request:
+    paths:
+      - 'images/runner/**'
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REGISTRY: 569190534191.dkr.ecr.us-west-2.amazonaws.com
+  ECR_REPO: agentex/runner
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::569190534191:role/agentex-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPO:${{ github.sha }} \
+            -t $ECR_REGISTRY/$ECR_REPO:latest \
+            images/runner/
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Push image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPO:${{ github.sha }}
+          docker push $ECR_REGISTRY/$ECR_REPO:latest
+          echo "Pushed image with tags: ${{ github.sha }}, latest"
+          echo "Agent Jobs will pull :latest tag automatically on next spawn"
+
+      - name: Update coordinator-script ConfigMap with new code
+        if: github.ref == 'refs/heads/main'
+        id: update-coordinator-configmap
+        continue-on-error: true
+        run: |
+          # Configure kubectl with EKS cluster
+          # NOTE: This step requires EKS access entry for the agentex-github-actions IAM role.
+          # If this fails with "Access denied" or "no configuration", see issue #1421:
+          #   aws eks create-access-entry --cluster-name agentex \
+          #     --principal-arn arn:aws:iam::569190534191:role/agentex-github-actions \
+          #     --region ${{ env.AWS_REGION }}
+          #   aws eks associate-access-policy --cluster-name agentex \
+          #     --principal-arn arn:aws:iam::569190534191:role/agentex-github-actions \
+          #     --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+          #     --access-scope type=cluster --region ${{ env.AWS_REGION }}
+          aws eks update-kubeconfig \
+            --name agentex \
+            --region ${{ env.AWS_REGION }} \
+            --alias agentex
+          # CRITICAL: Update coordinator-script ConfigMap with latest coordinator.sh
+          # The coordinator Deployment mounts coordinator.sh from this ConfigMap, NOT from
+          # the Docker image. Without updating this ConfigMap, merged coordinator.sh changes
+          # never take effect — the coordinator runs stale code indefinitely until manually
+          # updated. This was the root cause of the governance engine failure (issue #1254).
+          kubectl create configmap coordinator-script \
+            --from-file=coordinator.sh=images/runner/coordinator.sh \
+            -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -
+          echo "coordinator-script ConfigMap updated with latest coordinator.sh"
+
+      - name: Warn if coordinator update failed (issue #1421)
+        if: github.ref == 'refs/heads/main' && steps.update-coordinator-configmap.outcome == 'failure'
+        run: |
+          echo "::warning::⚠️ coordinator-script ConfigMap update FAILED (issue #1421)."
+          echo "::warning::The agentex-github-actions IAM role likely lacks EKS access entry."
+          echo "::warning::coordinator.sh changes in this merge will NOT take effect until manually applied."
+          echo "::warning::Fix (god only): aws eks create-access-entry + associate-access-policy for arn:aws:iam::569190534191:role/agentex-github-actions"
+          echo "::warning::Workaround: kubectl create configmap coordinator-script --from-file=coordinator.sh=images/runner/coordinator.sh -n agentex --dry-run=client -o yaml | kubectl apply --validate=false -f -"
+
+      - name: Restart coordinator deployment to pick up new image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Rolling restart — coordinator picks up new :latest image.
+          # Issue #1699: Decoupled from ConfigMap update success.
+          # Previously conditioned on ConfigMap update outcome==success, but since that
+          # step fails due to IAM permissions (#1682) with continue-on-error=true, the
+          # step conclusion='success' but outcome='failure', causing this step to be SKIPPED.
+          # Result: coordinator and planner-loop NEVER got restarted after merges to main,
+          # so new Docker images (helpers.sh, entrypoint.sh changes) were never deployed.
+          # Fix: always restart to pick up new Docker image regardless of ConfigMap result.
+          # If ConfigMap update succeeded: coordinator gets new image AND new script.
+          # If ConfigMap update failed: coordinator gets new image only (script stays stale
+          # until agent workaround in #1693 or manual fix in #1682).
+          # (issue #1226: coordinator ran stale image missing critical bug fixes)
+          kubectl rollout restart deployment/coordinator -n agentex
+          kubectl rollout status deployment/coordinator -n agentex --timeout=120s
+          echo "Coordinator restarted successfully — running latest image"
+
+      - name: Restart planner-loop to pick up new image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Issue #1699: Decoupled from ConfigMap update success (same root cause as above).
+          # Planner-loop workers source helpers.sh from the Docker image. Without this restart,
+          # merged helpers.sh changes (e.g. planner claim rejection in #1691) never reach
+          # running workers — confirmed: planner-loop ran 19h without restart after 3+ merges.
+          echo "Triggering planner-loop rollout to pick up updated runner image..."
+          kubectl rollout restart deployment/planner-loop -n agentex
+          kubectl rollout status deployment/planner-loop -n agentex --timeout=120s
+          echo "Planner-loop restarted and running new image"

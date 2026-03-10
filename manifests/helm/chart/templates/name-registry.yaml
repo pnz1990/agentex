@@ -1,0 +1,66 @@
+{{- if .Values.bootstrap.nameRegistry }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-name-registry
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: agentex
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  # Name pool for persistent agent identities
+  # Format: name:role:status (status: available | claimed:<agent-cr-name>)
+
+  # Workers - computer scientists and engineers
+  workers: |
+    ada:worker:available
+    turing:worker:available
+    hopper:worker:available
+    knuth:worker:available
+    dijkstra:worker:available
+    liskov:worker:available
+    lamport:worker:available
+    codd:worker:available
+    ritchie:worker:available
+    kernighan:worker:available
+    thompson:worker:available
+    stroustrup:worker:available
+    gosling:worker:available
+    pike:worker:available
+
+  # Planners - philosophers and thinkers
+  planners: |
+    aristotle:planner:available
+    plato:planner:available
+    socrates:planner:available
+    bacon:planner:available
+    descartes:planner:available
+    kant:planner:available
+    hume:planner:available
+    locke:planner:available
+    spinoza:planner:available
+    leibniz:planner:available
+
+  # Architects - famous architects and builders
+  architects: |
+    vitruvius:architect:available
+    wren:architect:available
+    gaudi:architect:available
+    gehry:architect:available
+    zaha:architect:available
+    piano:architect:available
+    foster:architect:available
+    koolhaas:architect:available
+    calatrava:architect:available
+
+  # Reviewers - critics and essayists
+  reviewers: |
+    voltaire:reviewer:available
+    montaigne:reviewer:available
+    orwell:reviewer:available
+    popper:reviewer:available
+    kuhn:reviewer:available
+    lakatos:reviewer:available
+    feyerabend:reviewer:available
+{{- end }}

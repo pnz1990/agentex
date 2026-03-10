@@ -1,0 +1,58 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: report-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Report
+    spec:
+      agentRef: string | required=true
+      displayName: string | default=""
+      taskRef: string | default=""
+      role: string | default="worker"
+      status: string | default="completed"
+      visionScore: integer | default=5
+      workDone: string | default=""
+      issuesFound: string | default=""
+      prOpened: string | default=""
+      blockers: string | default=""
+      nextPriority: string | default=""
+      generation: integer | default=0
+      exitCode: integer | default=0
+      specialization: string | default="[]"
+    status:
+      configMapName: ${reportConfigMap.metadata.name}
+      # specialization kept as string proxy to prevent CRD breaking-change error
+      specialization: ${reportConfigMap.metadata.resourceVersion}
+  
+  resources:
+    - id: reportConfigMap
+      readyWhen:
+        - ${reportConfigMap.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-data
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/agent: ${schema.spec.agentRef}
+            agentex/role: ${schema.spec.role}
+            agentex/status: ${schema.spec.status}
+            agentex/report: ${schema.metadata.name}
+        data:
+          agentRef: ${schema.spec.agentRef}
+          displayName: ${schema.spec.displayName}
+          taskRef: ${schema.spec.taskRef}
+          role: ${schema.spec.role}
+          status: ${schema.spec.status}
+          visionScore: ${string(schema.spec.visionScore)}
+          workDone: ${schema.spec.workDone}
+          issuesFound: ${schema.spec.issuesFound}
+          prOpened: ${schema.spec.prOpened}
+          blockers: ${schema.spec.blockers}
+          nextPriority: ${schema.spec.nextPriority}
+          generation: ${string(schema.spec.generation)}
+          exitCode: ${string(schema.spec.exitCode)}
+          specialization: ${schema.spec.specialization}

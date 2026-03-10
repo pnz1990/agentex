@@ -1,0 +1,191 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-seed
+  namespace: agentex
+  labels:
+    agentex/role: seed
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        agentex/role: seed
+    spec:
+      serviceAccountName: agentex-agent-sa
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Copies the prompt script from the ConfigMap into a writable emptyDir
+        # so the main container can execute it.
+        - name: init-prompt
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /prompt-src/seed-prompt.sh /prompt/seed-prompt.sh && chmod +x /prompt/seed-prompt.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: prompt-src
+              mountPath: /prompt-src
+            - name: prompt
+              mountPath: /prompt
+      containers:
+        - name: agent
+          # PORTABILITY NOTE: This image URL is hardcoded for bootstrap only.
+          # A new god installing agentex must edit this line with their ECR registry.
+          # After bootstrap, all agents read ecrRegistry from agentex-constitution ConfigMap.
+          # TODO (issue #817): Replace with Helm template {{ .Values.ecrRegistry }}/agentex/runner:latest
+          image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AGENT_NAME
+              value: "bootstrap-seed"
+            - name: AGENT_ROLE
+              value: "seed"
+            - name: TASK_CR_NAME
+              value: "bootstrap"
+            - name: BEDROCK_MODEL
+              value: "us.anthropic.claude-sonnet-4-6"
+            - name: BEDROCK_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: awsRegion
+            - name: REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: githubRepo
+            - name: CLUSTER
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: clusterName
+            - name: NAMESPACE
+              value: "agentex"
+            - name: GITHUB_TOKEN_FILE
+              value: "/var/secrets/github/token"
+          command: ["/bin/bash", "-c"]
+          args:
+            - >-
+              set -euo pipefail &&
+              if [ -f "$GITHUB_TOKEN_FILE" ]; then export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE"); fi &&
+              aws eks update-kubeconfig --name ${CLUSTER} --region ${BEDROCK_REGION} &&
+              gh auth setup-git &&
+              git clone https://github.com/${REPO} /workspace/repo --depth=1 &&
+              cd /workspace/repo &&
+              mkdir -p "${HOME}/.config/opencode" &&
+              printf '{"$schema":"https://opencode.ai/config.json","model":"amazon-bedrock/us.anthropic.claude-sonnet-4-6","permission":"allow"}' \
+              > "${HOME}/.config/opencode/config.json" &&
+              bash /prompt/seed-prompt.sh | opencode run --print-logs &&
+              echo "Bootstrap complete. The loop is now self-sustaining."
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: prompt
+              mountPath: /prompt
+            - name: github-token
+              mountPath: /var/secrets/github
+              readOnly: true
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: prompt
+          emptyDir: {}
+        - name: github-token
+          secret:
+            secretName: agentex-github-token
+            defaultMode: 0400  # read-only for owner only
+        - name: prompt-src
+          configMap:
+            name: agentex-seed-prompt
+---
+# The bootstrap prompt as a ConfigMap so it can be mounted without YAML heredoc escaping.
+# Edit seed-prompt.sh and re-apply this ConfigMap to change the bootstrap instructions.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-seed-prompt
+  namespace: agentex
+  labels:
+    agentex/component: bootstrap
+data:
+  seed-prompt.sh: |
+    #!/usr/bin/env bash
+    # Bootstrap seed prompt (generation 0).
+    # Outputs the prompt text to stdout for: opencode run --print-logs
+    # Note: env vars (REPO, CLUSTER, BEDROCK_REGION) are expanded by the shell here,
+    # having been injected from the agentex-constitution ConfigMap.
+    cat << ENDOFPROMPT
+    You are the bootstrap seed agent (generation 0) for the agentex platform.
+
+    agentex is a SELF-IMPROVING, SELF-REPLICATING distributed AI agent system.
+    Its primary project is ITSELF. Agents develop the platform that runs them.
+    The human does not want to manage this. Your job: make it self-sustaining forever.
+
+    You are on the ${CLUSTER} EKS cluster (${BEDROCK_REGION}).
+    GitHub repository: ${REPO}
+    Tools available: kubectl, gh (authenticated to ${REPO}), aws, git, opencode.
+
+    STEP 1 - Read the codebase
+      Read AGENTS.md, manifests/rgds/agent-graph.yaml, images/runner/entrypoint.sh
+
+    STEP 2 - Verify kro RGD health
+      kubectl get resourcegraphdefinition -A
+      All 6 must be Active: agent-graph, task-graph, message-graph, thought-graph, report-graph, swarm-graph
+      If not: kubectl describe resourcegraphdefinition NAME, fix + PR
+
+    STEP 3 - Pick top 3 open issues to work
+      gh issue list --repo ${REPO} --state open --limit 30
+      For each of the top 3 create BOTH a Task CR AND an Agent CR.
+      The Agent CR is what triggers a new Job via kro. A Task alone does nothing.
+      Example Agent CR (fill in your values):
+        apiVersion: kro.run/v1alpha1 / kind: Agent / namespace: agentex
+        spec.role: worker / spec.taskRef: task-issue-N
+        spec.model: us.anthropic.claude-sonnet-4-6
+        metadata.labels: agentex/spawned-by=bootstrap-seed
+      NOTE: Agent CRs MUST use apiVersion: kro.run/v1alpha1 (NOT agentex.io/v1alpha1)
+      kro watches kro.run group to trigger Jobs. Using agentex.io will NOT work.
+
+    STEP 4 - Spawn planner-001 (THE HEARTBEAT OF THE SYSTEM)
+      Create task-planner-001 (role: planner, effort: L, priority: 10).
+      Description must tell the planner to:
+        1. Read AGENTS.md + open issues
+        2. Pick top 3 unworked issues, spawn worker Task+Agent CRs for each
+        3. Before exiting: create task-planner-002 + planner-002 Agent CR
+           (so the loop continues: 001 spawns 002 spawns 003 ... forever)
+        4. Post a Thought CR with insights for the next generation
+      Create planner-001 Agent CR referencing task-planner-001.
+
+    STEP 5 - Post bootstrap GitHub Issue
+      gh issue create --repo ${REPO}
+        --title "Bootstrap complete - system status $(date -u '+%Y-%m-%d')"
+        --body "RGD states, agents spawned, issues picked, errors if any"
+
+    RULES:
+      - Never push to main. Branch + PR only.
+      - Every agent spawns a successor. The chain NEVER breaks.
+      - The human must not need to intervene after this. Make it so.
+    ENDOFPROMPT

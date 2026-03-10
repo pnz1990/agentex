@@ -1,0 +1,78 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: swarms.agentex.io
+spec:
+  group: agentex.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [goal, plannerTaskRef]
+              properties:
+                goal:
+                  type: string
+                  description: High-level objective for this swarm
+                plannerTaskRef:
+                  type: string
+                  description: Task CR name the planner agent reads to understand the goal
+                maxAgents:
+                  type: integer
+                  default: 10
+                  maximum: 50
+                roles:
+                  type: object
+                  properties:
+                    planners:
+                      type: integer
+                      default: 1
+                    workers:
+                      type: integer
+                      default: 3
+                    reviewers:
+                      type: integer
+                      default: 1
+                    critics:
+                      type: integer
+                      default: 1
+                    architects:
+                      type: integer
+                      default: 0
+                model:
+                  type: string
+                  default: "us.anthropic.claude-sonnet-4-6"
+                  description: Bedrock model ID for agents in this swarm
+                consensusThreshold:
+                  type: integer
+                  default: 51
+                  description: Percentage of agents that must agree before a decision is committed
+                githubRepo:
+                  type: string
+                  default: "pnz1990/agentex"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Forming, Active, Converging, Idle, Disbanded]
+                activeAgents:
+                  type: integer
+                tasksCompleted:
+                  type: integer
+                issuesCreated:
+                  type: integer
+                prsMerged:
+                  type: integer
+                plannerJob:
+                  type: string
+  scope: Namespaced
+  names:
+    plural: swarms
+    singular: swarm
+    kind: Swarm

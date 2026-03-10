@@ -1,0 +1,99 @@
+name: Lint AGENTS.md
+
+on:
+  push:
+    paths:
+      - 'AGENTS.md'
+      - 'images/runner/helpers.sh'
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - 'images/runner/helpers.sh'
+
+jobs:
+  lint-agents-md:
+    name: Check AGENTS.md and helpers.sh are in sync (bidirectional)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check AGENTS.md lists all public helpers.sh functions
+        run: |
+          echo "=== CHECK 1: helpers.sh functions must be documented in AGENTS.md ==="
+          echo "Extracting public function names from images/runner/helpers.sh..."
+
+          # Extract public function names (skip internal functions starting with _)
+          # Matches lines like: function_name() { or function_name ()
+          functions=$(grep -E '^[a-zA-Z][a-zA-Z0-9_]*\(\)' images/runner/helpers.sh | sed 's/().*//')
+
+          echo "Found functions in helpers.sh:"
+          echo "$functions"
+          echo ""
+
+          missing=""
+          for fn in $functions; do
+            if ! grep -q "$fn" AGENTS.md; then
+              missing="$missing\n  - $fn"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "ERROR: The following helpers.sh functions are not documented in AGENTS.md:"
+            printf "%b\n" "$missing"
+            echo ""
+            echo "Please add documentation for each missing function to AGENTS.md."
+            echo "This check prevents documentation drift (see issue #1391)."
+            exit 1
+          fi
+
+          echo "All public helpers.sh functions are documented in AGENTS.md"
+          echo "Functions checked: $(echo "$functions" | wc -w)"
+
+      - name: Check AGENTS.md Provides section matches actual helpers.sh functions
+        run: |
+          echo ""
+          echo "=== CHECK 2: AGENTS.md Provides section must match actual helpers.sh functions ==="
+          echo "Extracting functions from the helpers.sh Provides: block in AGENTS.md..."
+
+          # Extract function names from the Provides: block in the Agent Pod Spec section.
+          # The anchor 'Provides: post_thought' is specific to the helpers.sh listing —
+          # it avoids false matches from 'Provides:' in the Prime Directive section.
+          # We collect lines until the closing ``` of the code block.
+          provides_functions=$(awk '/Provides: post_thought/{found=1} found{print} /^```/{if(found){exit}}' AGENTS.md \
+            | grep -oE '[a-zA-Z][a-zA-Z0-9_]+\(\)' \
+            | sed 's/()//' \
+            | sort -u)
+
+          echo "Functions claimed in AGENTS.md Provides section:"
+          echo "$provides_functions"
+          echo ""
+
+          if [ -z "$provides_functions" ]; then
+            echo "ERROR: No functions found in AGENTS.md Provides section."
+            echo "Check that AGENTS.md still contains a line starting with:"
+            echo "  Provides: post_thought(),"
+            echo "in the Agent Pod Spec section."
+            exit 1
+          fi
+
+          # Verify each claimed function actually exists in helpers.sh
+          missing=""
+          for fn in $provides_functions; do
+            if ! grep -qE "^${fn}\(\)|^function ${fn}" images/runner/helpers.sh; then
+              missing="$missing\n  - $fn"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "ERROR: AGENTS.md claims helpers.sh provides these functions, but they are NOT implemented:"
+            printf "%b\n" "$missing"
+            echo ""
+            echo "This means AGENTS.md documents non-existent functions."
+            echo "Agents using 'source /agent/helpers.sh && <function>' will get silent failures."
+            echo "Either add the missing functions to helpers.sh or remove them from the Provides section."
+            echo "This check prevents issue #1646-style documentation/implementation gaps."
+            exit 1
+          fi
+
+          echo "All functions in AGENTS.md Provides section are implemented in helpers.sh"
+          echo "Functions verified: $(echo "$provides_functions" | wc -w)"

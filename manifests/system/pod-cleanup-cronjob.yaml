@@ -1,0 +1,104 @@
+# Automatic cleanup of completed/failed pods (issue #315)
+# Runs hourly to delete pods older than 2 hours that have completed.
+#
+# Why this is needed:
+# - Older Jobs had ttlSecondsAfterFinished=3600 (1 hour)
+# - Some Jobs (god-reporter) have no TTL at all
+# - Even with TTL=300 in agent-graph, pods can accumulate
+# - 75+ completed pods waste etcd storage and kubectl query performance
+#
+# This CronJob provides defense-in-depth cleanup.
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-completed-pods
+  namespace: agentex
+  labels:
+    app: agentex-cleanup
+spec:
+  schedule: "23 * * * *"  # Run at 23 minutes past every hour (avoids :00 spike)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid  # Don't run concurrent cleanup jobs
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600  # Cleanup the cleanup job after 10 minutes
+      backoffLimit: 2
+      activeDeadlineSeconds: 300  # Kill cleanup job if it takes > 5 minutes
+      template:
+        metadata:
+          labels:
+            app: agentex-cleanup
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: cleanup
+            image: bitnami/kubectl:1.31
+            imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Pod cleanup starting"
+
+              # Issue #1621: Use kubectl field selectors instead of jq to delete completed/failed pods.
+              # bitnami/kubectl:1.31 may not have jq installed, causing the original jq-based script
+              # to hang until the 5-minute activeDeadlineSeconds timeout is hit.
+              # kubectl field selectors are natively supported and don't require any additional tools.
+
+              SUCCEEDED_COUNT=$(kubectl get pods -n agentex --field-selector 'status.phase=Succeeded' --no-headers 2>/dev/null | wc -l || echo 0)
+              FAILED_COUNT=$(kubectl get pods -n agentex --field-selector 'status.phase=Failed' --no-headers 2>/dev/null | wc -l || echo 0)
+
+              echo "Found $SUCCEEDED_COUNT Succeeded pods and $FAILED_COUNT Failed pods to clean up"
+
+              if [ "$SUCCEEDED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
+                echo "No completed/failed pods to clean up"
+                exit 0
+              fi
+
+              # Delete all Succeeded pods
+              if [ "$SUCCEEDED_COUNT" -gt 0 ]; then
+                kubectl delete pods -n agentex --field-selector 'status.phase=Succeeded' --wait=false 2>/dev/null && \
+                  echo "Deleted $SUCCEEDED_COUNT Succeeded pod(s)" || \
+                  echo "WARNING: Failed to delete Succeeded pods (non-fatal)"
+              fi
+
+              # Delete all Failed pods
+              if [ "$FAILED_COUNT" -gt 0 ]; then
+                kubectl delete pods -n agentex --field-selector 'status.phase=Failed' --wait=false 2>/dev/null && \
+                  echo "Deleted $FAILED_COUNT Failed pod(s)" || \
+                  echo "WARNING: Failed to delete Failed pods (non-fatal)"
+              fi
+
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Cleanup complete"
+              exit 0
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "50m"
+              limits:
+                memory: "128Mi"
+                cpu: "200m"
+            volumeMounts:
+              - name: tmp
+                mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 10Mi

@@ -1,0 +1,147 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: coordinator-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Coordinator
+    spec:
+      enabled: boolean | default=true
+      model: string | default="us.anthropic.claude-sonnet-4-6"
+      imageTag: string | default="latest"
+      imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
+      clusterName: string | default="agentex"
+    status:
+      configMapName: ${coordinatorState.metadata.name}
+      deploymentName: ${coordinatorDeployment.metadata.name}
+      # phase and lastHeartbeat prevent kro breaking-change detection errors.
+      # Real values are in coordinator-state ConfigMap, managed by coordinator.sh.
+      phase: ${coordinatorDeployment.metadata.name}
+      # lastHeartbeat replaced with string proxy — metadata.creationTimestamp is metav1.Time, causes kro deep-copy panic
+      lastHeartbeat: ${coordinatorDeployment.metadata.resourceVersion}
+  resources:
+    # ── State ConfigMap ──────────────────────────────────────────────────────
+    - id: coordinatorState
+      readyWhen:
+        - ${coordinatorState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: coordinator-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/component: coordinator
+        data:
+          # NOTE: Only static/bootstrapping fields here.
+          # Dynamic runtime fields (taskQueue, activeAssignments, decisionLog,
+          # lastHeartbeat, voteRegistry, consensusResults, enactedDecisions,
+          # spawnSlots, phase) are managed exclusively by coordinator.sh at
+          # runtime. Do NOT add them here — kro would reset them on every
+          # reconciliation cycle (~30s), wiping coordinator runtime state.
+          # See issue #924 for root cause analysis.
+          bootstrapped: "true"
+
+    # ── Coordinator Deployment ───────────────────────────────────────────────
+    # Long-running Pod that maintains civilization state and coordinates agents
+    - id: coordinatorDeployment
+      readyWhen:
+        - ${coordinatorDeployment.status.availableReplicas == 1}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: coordinator
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-coordinator
+            agentex/component: coordinator
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate  # Only one coordinator at a time
+          selector:
+            matchLabels:
+              app: agentex-coordinator
+          template:
+            metadata:
+              labels:
+                app: agentex-coordinator
+                agentex/component: coordinator
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: coordinator
+                  image: ${schema.spec.imageRegistry}/agentex/runner:${schema.spec.imageTag}
+                  imagePullPolicy: Always
+                  command: ["/bin/bash", "/usr/local/bin/coordinator.sh"]
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: COORDINATOR_NAME
+                      value: coordinator
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: awsRegion
+                    - name: REPO
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: githubRepo
+                    - name: CLUSTER
+                      value: ${schema.spec.clusterName}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "1Gi"
+                      cpu: "500m"
+                  livenessProbe:
+                    exec:
+                      command: ["test", "-f", "/tmp/coordinator-alive"]
+                    initialDelaySeconds: 30
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 3
+                  readinessProbe:
+                    exec:
+                      command: ["test", "-f", "/tmp/coordinator-alive"]
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 2
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 1Gi
+                - name: github-token
+                  secret:
+                    secretName: agentex-github-token
+                    defaultMode: 0400  # read-only for owner only

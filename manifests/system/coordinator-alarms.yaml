@@ -1,0 +1,155 @@
+# CloudWatch Alarms for Coordinator Health Monitoring (issue #731)
+#
+# These alarms provide automated alerting when the coordinator becomes unhealthy.
+# Deploy with the apply-alarms.sh script below.
+#
+# Prerequisites:
+# - CloudWatch metrics must be enabled for the cluster
+# - SNS topic for alarm notifications (optional but recommended)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-coordinator-alarms
+  namespace: agentex
+  labels:
+    app: agentex
+    component: observability
+data:
+  coordinator-heartbeat-missing-alarm.json: |
+    {
+      "AlarmName": "agentex-coordinator-heartbeat-missing",
+      "AlarmDescription": "Coordinator has not sent heartbeat metrics in 3+ minutes - pod may be dead or stuck",
+      "ActionsEnabled": true,
+      "MetricName": "CoordinatorHeartbeat",
+      "Namespace": "Agentex",
+      "Statistic": "Sum",
+      "Dimensions": [
+        {
+          "Name": "Component",
+          "Value": "Coordinator"
+        }
+      ],
+      "Period": 60,
+      "EvaluationPeriods": 3,
+      "DatapointsToAlarm": 3,
+      "Threshold": 1.0,
+      "ComparisonOperator": "LessThanThreshold",
+      "TreatMissingData": "breaching"
+    }
+  
+  coordinator-pod-restart-alarm.json: |
+    {
+      "AlarmName": "agentex-coordinator-pod-restart-loop",
+      "AlarmDescription": "Coordinator pod has restarted 3+ times in 15 minutes - indicates crash loop or health check failure",
+      "ActionsEnabled": true,
+      "MetricName": "pod_restart_count",
+      "Namespace": "AWS/EKS",
+      "Statistic": "Sum",
+      "Dimensions": [
+        {
+          "Name": "PodName",
+          "Value": "coordinator-*"
+        },
+        {
+          "Name": "Namespace",
+          "Value": "agentex"
+        }
+      ],
+      "Period": 300,
+      "EvaluationPeriods": 3,
+      "DatapointsToAlarm": 2,
+      "Threshold": 3.0,
+      "ComparisonOperator": "GreaterThanThreshold",
+      "TreatMissingData": "notBreaching"
+    }
+  
+  apply-alarms.sh: |
+    #!/usr/bin/env bash
+    # Deploy coordinator health alarms to CloudWatch
+    set -euo pipefail
+    
+    REGION="${AWS_REGION:-us-west-2}"
+    SNS_TOPIC_ARN="${SNS_TOPIC_ARN:-}"  # Optional: SNS topic for alarm notifications
+    
+    echo "Deploying coordinator health alarms to CloudWatch..."
+    
+    # Function to create alarm with optional SNS actions
+    create_alarm() {
+      local alarm_json="$1"
+      local alarm_name=$(echo "$alarm_json" | jq -r '.AlarmName')
+      
+      echo "  Creating alarm: $alarm_name"
+      
+      # Add SNS alarm actions if topic ARN provided
+      if [ -n "$SNS_TOPIC_ARN" ]; then
+        alarm_json=$(echo "$alarm_json" | jq --arg topic "$SNS_TOPIC_ARN" \
+          '.AlarmActions = [$topic] | .OKActions = [$topic]')
+      fi
+      
+      aws cloudwatch put-metric-alarm \
+        --region "$REGION" \
+        --cli-input-json "$alarm_json"
+    }
+    
+    # Deploy heartbeat missing alarm
+    HEARTBEAT_ALARM=$(kubectl get configmap agentex-coordinator-alarms -n agentex \
+      -o jsonpath='{.data.coordinator-heartbeat-missing-alarm\.json}')
+    create_alarm "$HEARTBEAT_ALARM"
+    
+    # Deploy pod restart alarm
+    RESTART_ALARM=$(kubectl get configmap agentex-coordinator-alarms -n agentex \
+      -o jsonpath='{.data.coordinator-pod-restart-alarm\.json}')
+    create_alarm "$RESTART_ALARM"
+    
+    echo ""
+    echo "Alarms deployed successfully!"
+    echo "View at: https://console.aws.amazon.com/cloudwatch/home?region=${REGION}#alarmsV2:"
+    
+    if [ -n "$SNS_TOPIC_ARN" ]; then
+      echo ""
+      echo "Alarms configured to notify: $SNS_TOPIC_ARN"
+    else
+      echo ""
+      echo "Note: No SNS topic configured. To add notifications, set SNS_TOPIC_ARN env var:"
+      echo "  SNS_TOPIC_ARN=arn:aws:sns:${REGION}:ACCOUNT_ID:topic-name bash apply-alarms.sh"
+    fi
+  
+  delete-alarms.sh: |
+    #!/usr/bin/env bash
+    # Delete coordinator health alarms from CloudWatch
+    set -euo pipefail
+    
+    REGION="${AWS_REGION:-us-west-2}"
+    
+    echo "Deleting coordinator health alarms from CloudWatch..."
+    
+    aws cloudwatch delete-alarms \
+      --region "$REGION" \
+      --alarm-names \
+        agentex-coordinator-heartbeat-missing \
+        agentex-coordinator-pod-restart-loop
+    
+    echo "Alarms deleted successfully!"
+  
+  test-heartbeat-alarm.sh: |
+    #!/usr/bin/env bash
+    # Test coordinator heartbeat alarm by stopping the coordinator temporarily
+    set -euo pipefail
+    
+    echo "WARNING: This will scale coordinator to 0 replicas for 5 minutes to trigger alarm"
+    echo "Press Ctrl+C now to cancel, or wait 5 seconds to proceed..."
+    sleep 5
+    
+    echo "Scaling coordinator to 0 replicas..."
+    kubectl scale deployment coordinator -n agentex --replicas=0
+    
+    echo "Waiting 5 minutes for alarm to trigger..."
+    echo "(Alarm requires 3 minutes of missing heartbeats)"
+    sleep 300
+    
+    echo "Restoring coordinator to 1 replica..."
+    kubectl scale deployment coordinator -n agentex --replicas=1
+    
+    echo "Check CloudWatch alarms to verify alarm was triggered:"
+    echo "https://console.aws.amazon.com/cloudwatch/home?region=${AWS_REGION:-us-west-2}#alarmsV2:"

@@ -1,0 +1,48 @@
+🤖 Agentex civilization deployed!
+
+Civilization: {{ .Values.vision.githubRepo }}
+Region:       {{ .Values.vision.awsRegion }}
+Registry:     {{ .Values.vision.ecrRegistry }}
+Cluster:      {{ .Values.vision.clusterName }}
+S3 Bucket:    {{ .Values.vision.s3Bucket }}
+Generation:   {{ .Values.civilization.generation }}
+
+=== NEXT STEPS ===
+
+1. Build and push the runner image:
+   docker build -t {{ .Values.vision.ecrRegistry }}/agentex/runner:latest ./images/runner/
+   docker push {{ .Values.vision.ecrRegistry }}/agentex/runner:latest
+
+2. Create the GitHub token secret:
+   kubectl create secret generic agentex-github-token \
+     -n {{ .Values.namespace.name }} \
+     --from-literal=token=<YOUR_GITHUB_TOKEN>
+
+3. Seed the civilization (one-time):
+   kubectl apply -f manifests/bootstrap/seed-agent.yaml
+
+4. Verify the civilization is alive:
+   kubectl get jobs -n {{ .Values.namespace.name }}
+   kubectl get configmap coordinator-state -n {{ .Values.namespace.name }} -o yaml
+
+=== STEERING THE CIVILIZATION ===
+
+Update the directive (agents read this on every boot):
+  kubectl patch configmap agentex-constitution \
+    -n {{ .Values.namespace.name }} \
+    --type=merge \
+    -p '{"data":{"lastDirective":"Your directive here"}}'
+
+Emergency kill switch (stops all agent spawning):
+  kubectl patch configmap agentex-killswitch \
+    -n {{ .Values.namespace.name }} \
+    --type=merge \
+    -p '{"data":{"enabled":"true","reason":"Emergency stop"}}'
+
+=== CIRCUIT BREAKER ===
+
+Max concurrent agents: {{ .Values.civilization.circuitBreakerLimit }}
+
+=== DOCUMENTATION ===
+
+Full documentation: https://github.com/pnz1990/agentex/blob/main/AGENTS.md

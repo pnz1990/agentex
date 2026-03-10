@@ -1,0 +1,132 @@
+name: Validate Runner Script
+
+on:
+  pull_request:
+    paths:
+      - 'images/runner/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'images/runner/**'
+      - '.github/workflows/validate-runner.yml'
+
+jobs:
+  validate-entrypoint:
+    name: Validate entrypoint.sh
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Bash syntax check
+        run: |
+          echo "Running bash syntax check on entrypoint.sh..."
+          bash -n images/runner/entrypoint.sh
+          echo "✓ Syntax check passed"
+          
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+      - name: Shellcheck static analysis
+        run: |
+          echo "Running shellcheck on entrypoint.sh..."
+          # SC2086: Double quote to prevent globbing and word splitting (intentional in many cases)
+          # SC2181: Check exit code directly with if mycmd; then (style preference)
+          # SC1090: Can't follow non-constant source (we source identity.sh which exists)
+          # SC2001: See if you can use ${variable//search/replace} instead of sed (readability)
+          # SC2155: Declare and assign separately (style preference - intentional in many cases)
+          # SC2317: Unreachable code (false positives on function stubs that are redefined)
+          # --severity=error: Only fail on actual errors, not warnings or info
+          shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317 --severity=error images/runner/entrypoint.sh
+          echo "✓ Shellcheck passed"
+          
+      - name: Validate identity.sh
+        run: |
+          if [ -f images/runner/identity.sh ]; then
+            echo "Running bash syntax check on identity.sh..."
+            bash -n images/runner/identity.sh
+            echo "✓ identity.sh syntax check passed"
+            
+            echo "Running shellcheck on identity.sh..."
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317 --severity=error images/runner/identity.sh
+            echo "✓ identity.sh shellcheck passed"
+          else
+            echo "identity.sh not found, skipping"
+          fi
+
+      - name: Validate coordinator.sh
+        run: |
+          # Issue #1703: coordinator.sh runs as a long-lived Deployment — a syntax error
+          # would silently crash the coordinator pod after merge with no CI warning.
+          # coordinator.sh is ~3400 lines and frequently modified by agents.
+          if [ -f images/runner/coordinator.sh ]; then
+            echo "Running bash syntax check on coordinator.sh..."
+            bash -n images/runner/coordinator.sh
+            echo "✓ coordinator.sh syntax check passed"
+
+            echo "Running shellcheck on coordinator.sh..."
+            # Same suppression set as entrypoint.sh: intentional style choices
+            # SC2295: patterns with variables in ${var#pattern} (intentional)
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317,SC2295 --severity=error images/runner/coordinator.sh
+            echo "✓ coordinator.sh shellcheck passed"
+          else
+            echo "coordinator.sh not found, skipping"
+          fi
+
+      - name: Validate helpers.sh
+        run: |
+          # Issue #1703: helpers.sh is sourced by all agents at runtime — a syntax error
+          # would silently break claim_task, post_thought, and all other helpers.
+          # helpers.sh is ~1230 lines and the primary OpenCode-accessible API.
+          if [ -f images/runner/helpers.sh ]; then
+            echo "Running bash syntax check on helpers.sh..."
+            bash -n images/runner/helpers.sh
+            echo "✓ helpers.sh syntax check passed"
+
+            echo "Running shellcheck on helpers.sh..."
+            shellcheck -e SC2086,SC2181,SC1090,SC2001,SC2155,SC2317 --severity=error images/runner/helpers.sh
+            echo "✓ helpers.sh shellcheck passed"
+          else
+            echo "helpers.sh not found, skipping"
+          fi
+          
+      - name: Check for common bash pitfalls
+        run: |
+          echo "Checking for undefined function calls..."
+          
+          # Extract function definitions
+          grep -E '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' images/runner/entrypoint.sh | sed 's/().*//' > /tmp/defined_functions.txt
+          
+          # Extract function calls (simple heuristic - match word followed by () or word at command position)
+          # This is not perfect but catches obvious cases like the #738 bug
+          grep -oE '\b[a-zA-Z_][a-zA-Z0-9_]*\(' images/runner/entrypoint.sh | sed 's/($//' | sort -u > /tmp/called_functions.txt
+          
+          # Check for calls to common shell builtins we should ignore
+          echo "Filtering out known shell builtins..."
+          grep -vE '^(echo|printf|read|cd|pwd|exit|return|source|test|shift|export|local|set|unset|declare|eval|exec|wait|trap)$' /tmp/called_functions.txt > /tmp/called_functions_filtered.txt || true
+          
+          # Report any suspicious undefined calls (this is informational, not blocking)
+          echo "Function definition check complete. Defined: $(wc -l < /tmp/defined_functions.txt), Called: $(wc -l < /tmp/called_functions_filtered.txt)"
+          
+          # Note: This is informational only. Real validation is done by bash -n above.
+          # The #738 bug (calling function before definition) would be caught by bash -n.
+
+      - name: Validation summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✓ All runner script validations passed"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Scripts validated (issue #1703):"
+          echo "  - entrypoint.sh  (bash -n + shellcheck)"
+          echo "  - identity.sh    (bash -n + shellcheck)"
+          echo "  - coordinator.sh (bash -n + shellcheck)"
+          echo "  - helpers.sh     (bash -n + shellcheck)"
+          echo ""
+          echo "This validation prevents silent failures like issue #738 (function"
+          echo "calls before definitions) and guards the coordinator Deployment and"
+          echo "helpers.sh API that all agents depend on at runtime."

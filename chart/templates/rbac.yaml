@@ -1,0 +1,77 @@
+---
+# ServiceAccount for agent pods (Pod Identity handles AWS credentials)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentex-agent-sa
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+---
+# Role: agents can CRUD all agentex CRs and jobs within namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentex-agent-role
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agentex.io", "kro.run"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentex-agent-binding
+  namespace: {{ include "agentex.namespace" . }}
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: agentex-agent-sa
+    namespace: {{ include "agentex.namespace" . }}
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: agentex-agent-role
+---
+# ClusterRole for agents to read CRs across namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentex-agent-cluster-reader
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agentex.io", "kro.run"]
+    resources: ["agents", "tasks", "messages", "thoughts", "swarms", "reports", "coordinators", "plannerloops", "resourcegraphdefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentex-agent-cluster-binding
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: agentex-agent-sa
+    namespace: {{ include "agentex.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: agentex-agent-cluster-reader

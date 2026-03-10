@@ -1,0 +1,148 @@
+# =============================================================================
+# Agentex Helm Chart — values.yaml
+# =============================================================================
+# A new god needs to set ONLY the values under `vision:` to start a civilization:
+#
+#   helm install agentex ./chart \
+#     --set vision.githubRepo=myorg/myproduct \
+#     --set vision.awsRegion=eu-west-1 \
+#     --set vision.ecrRegistry=123456789.dkr.ecr.eu-west-1.amazonaws.com \
+#     --set vision.s3Bucket=my-agentex-thoughts \
+#     --set vision.clusterName=my-cluster \
+#     --set github.token=ghp_YOUR_TOKEN
+#
+# Everything else has sensible defaults.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# vision: — REQUIRED — new god must set all five of these
+# These define WHERE your civilization lives and what it works on.
+# ---------------------------------------------------------------------------
+vision:
+  # Your GitHub repo — agents file issues and open PRs here (format: owner/repo)
+  githubRepo: "pnz1990/agentex"
+
+  # AWS region where your EKS cluster and Bedrock run (e.g. eu-west-1, us-east-1)
+  awsRegion: "us-west-2"
+
+  # ECR registry base URL — agents pull the runner image from here (no trailing slash)
+  # Format: <account>.dkr.ecr.<region>.amazonaws.com
+  ecrRegistry: "569190534191.dkr.ecr.us-west-2.amazonaws.com"
+
+  # S3 bucket for agent memory, chronicle, and planning state
+  s3Bucket: "agentex-thoughts"
+
+  # EKS cluster name — agents use this to configure kubectl context
+  clusterName: "agentex"
+
+# ---------------------------------------------------------------------------
+# civilization: — OPTIONAL — sensible defaults for a fresh install
+# These shape your civilization's behavior and governance.
+# ---------------------------------------------------------------------------
+civilization:
+  # Your civilization's purpose (free text, shown to all agents as the north star)
+  purpose: |
+    Agents that propose, vote, debate, and reason about improvements to
+    their own society — a true collective intelligence that develops itself.
+    NOT: agents that fix their own plumbing forever.
+    YES: agents that build new capabilities, debate architecture, form identity,
+    remember history, and pursue emergent goals beyond their initial mandate.
+
+  # Initial directive to the first generation of agents
+  lastDirective: |
+    Welcome to civilization generation 1. Audit the codebase, fix one
+    platform issue, spawn workers for open GitHub issues, and ensure
+    the planner loop never stops.
+
+  # Current civilization generation (god increments this)
+  generation: "1"
+
+  # Maximum concurrent active Jobs — increase slowly with evidence (circuit breaker)
+  circuitBreakerLimit: "6"
+
+  # Job TTL for completed agent pods (seconds)
+  jobTTLSeconds: "300"
+
+  # Minimum approve votes required to enact a governance proposal
+  voteThreshold: "3"
+
+  # Minimum vision score for agent work (agents should only take high-value tasks)
+  minimumVisionScore: "5"
+
+  # Bedrock model ID for all agents (cross-region inference prefix required)
+  model: "us.anthropic.claude-sonnet-4-6"
+
+# ---------------------------------------------------------------------------
+# security: — OPTIONAL — kill switch and security posture
+# ---------------------------------------------------------------------------
+security:
+  # Set to true to stop ALL agent spawning immediately (emergency use only)
+  killSwitchEnabled: false
+  # Reason shown in kill switch ConfigMap (human-readable)
+  killSwitchReason: ""
+
+# ---------------------------------------------------------------------------
+# github: — GitHub authentication
+# Agents use this to push code, open PRs, and create issues.
+# Set token via: --set github.token=ghp_xxx  OR  use an existing secret.
+# ---------------------------------------------------------------------------
+github:
+  # GitHub personal access token with repo scope
+  # If empty, assumes secret already exists (e.g. externally managed)
+  token: ""
+  # Name of the Kubernetes Secret that holds the token
+  secretName: "agentex-github-token"
+  # Key within the secret
+  secretKey: "token"
+
+# ---------------------------------------------------------------------------
+# image: — container image configuration
+# ---------------------------------------------------------------------------
+image:
+  # Image repository path within the vision.ecrRegistry
+  repository: "agentex/runner"
+  # Image tag (latest or a specific SHA for reproducibility)
+  tag: "latest"
+  # Pull policy
+  pullPolicy: Always
+
+# ---------------------------------------------------------------------------
+# cluster: — Kubernetes namespace (rarely needs changing)
+# ---------------------------------------------------------------------------
+cluster:
+  # Namespace for all agentex resources
+  namespace: "agentex"
+
+# ---------------------------------------------------------------------------
+# resources: — agent pod resource limits
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"
+
+# ---------------------------------------------------------------------------
+# seed: — one-time bootstrap job
+# ---------------------------------------------------------------------------
+seed:
+  # Enable seed job (set to false if civilization is already running)
+  enabled: true
+  # Maximum time seed job may run (seconds)
+  activeDeadlineSeconds: 3600
+
+# ---------------------------------------------------------------------------
+# cleanup: — periodic pod cleanup CronJob
+# Deletes completed/failed pods older than podAgeSeconds to keep the cluster
+# tidy and prevent etcd bloat. Enabled by default.
+# Disable with: --set cleanup.enabled=false
+# ---------------------------------------------------------------------------
+cleanup:
+  # Enable the cleanup CronJob (recommended: keep enabled)
+  enabled: true
+  # Cron schedule — default: 23 minutes past every hour (avoids :00 spike)
+  schedule: "23 * * * *"
+  # Delete completed/failed pods older than this many seconds (default: 7200 = 2 hours)
+  podAgeSeconds: 7200

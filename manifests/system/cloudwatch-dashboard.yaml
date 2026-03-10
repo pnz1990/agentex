@@ -1,0 +1,366 @@
+# CloudWatch Dashboard for Agentex Agent Activity Monitoring
+#
+# This dashboard provides real-time visibility into the self-improving agent civilization:
+# - Active agents and their roles
+# - Task throughput (jobs completed per hour)
+# - Communication volume (Thoughts, Messages, Tasks created)
+# - Error rates and failed jobs
+#
+# Deploy this dashboard with:
+#   aws cloudwatch put-dashboard --dashboard-name agentex-activity \
+#     --dashboard-body file://<(kubectl get configmap agentex-dashboard-definition -n agentex -o jsonpath='{.data.dashboard\.json}')
+#
+# Or use the apply-dashboard.sh script provided below.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-dashboard-definition
+  namespace: agentex
+  labels:
+    app: agentex
+    component: observability
+data:
+  dashboard.json: |
+    {
+      "widgets": [
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "ContainerInsights", "pod_number_of_containers", { "stat": "Average" } ],
+              [ ".", "pod_cpu_utilization", { "stat": "Average", "yAxis": "right" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Active Agent Pods",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Pod Count",
+                "showUnits": false
+              },
+              "right": {
+                "label": "CPU %",
+                "showUnits": false
+              }
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 0,
+          "y": 0
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "AgentRun", { "stat": "Sum", "label": "Total Runs" } ],
+              [ "...", { "stat": "Sum", "label": "Runs/Hour", "period": 3600 } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Agent Task Throughput",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Count",
+                "showUnits": false
+              }
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 12,
+          "y": 0
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "AgentRun", { "stat": "Sum" }, { "stat": "Sum", "id": "m1", "label": "worker" } ],
+              [ "...", { "stat": "Sum", "id": "m2", "label": "planner" } ],
+              [ "...", { "stat": "Sum", "id": "m3", "label": "reviewer" } ],
+              [ "...", { "stat": "Sum", "id": "m4", "label": "architect" } ]
+            ],
+            "view": "pie",
+            "region": "__AWS_REGION__",
+            "title": "Agent Runs by Role",
+            "period": 3600,
+            "setPeriodToTimeRange": true
+          },
+          "width": 8,
+          "height": 6,
+          "x": 0,
+          "y": 6
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "ThoughtCreated", { "stat": "Sum", "label": "Thoughts" } ],
+              [ ".", "MessageCreated", { "stat": "Sum", "label": "Messages" } ],
+              [ ".", "TaskCreated", { "stat": "Sum", "label": "Tasks" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": true,
+            "region": "__AWS_REGION__",
+            "title": "Agent Communication Volume",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Count",
+                "showUnits": false
+              }
+            }
+          },
+          "width": 8,
+          "height": 6,
+          "x": 8,
+          "y": 6
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "AgentFailure", { "stat": "Sum", "color": "#d62728" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Agent Job Failures",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Failures",
+                "showUnits": false,
+                "min": 0
+              }
+            },
+            "annotations": {
+              "horizontal": [
+                {
+                  "label": "Failure threshold",
+                  "value": 5,
+                  "fill": "above",
+                  "color": "#ff7f0e"
+                }
+              ]
+            }
+          },
+          "width": 8,
+          "height": 6,
+          "x": 16,
+          "y": 6
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "PRCreated", { "stat": "Sum", "label": "PRs Opened" } ],
+              [ ".", "IssueCreated", { "stat": "Sum", "label": "Issues Created" } ]
+            ],
+            "view": "singleValue",
+            "region": "__AWS_REGION__",
+            "title": "Output Quality Metrics",
+            "period": 86400,
+            "setPeriodToTimeRange": true
+          },
+          "width": 8,
+          "height": 6,
+          "x": 0,
+          "y": 12
+        },
+        {
+          "type": "log",
+          "properties": {
+            "query": "SOURCE '/aws/containerinsights/agentex/application'\n| fields @timestamp, log as message\n| filter kubernetes.namespace_name = 'agentex'\n| filter log like /ERROR|WARNING|CRITICAL/\n| sort @timestamp desc\n| limit 20",
+            "region": "__AWS_REGION__",
+            "stacked": false,
+            "title": "Recent Agent Errors",
+            "view": "table"
+          },
+          "width": 16,
+          "height": 6,
+          "x": 8,
+          "y": 12
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "AWS/Bedrock", "Invocations", { "stat": "Sum" } ],
+              [ ".", "InvocationClientErrors", { "stat": "Sum", "color": "#d62728" } ],
+              [ ".", "InvocationServerErrors", { "stat": "Sum", "color": "#ff7f0e" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Bedrock API Usage",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Count",
+                "showUnits": false
+              }
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 0,
+          "y": 18
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "ContainerInsights", "pod_memory_utilization", { "stat": "Average" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Agent Memory Usage",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Memory %",
+                "showUnits": false
+              }
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 12,
+          "y": 18
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "Agentex", "CoordinatorHeartbeat", { "stat": "Sum", "label": "Heartbeats", "color": "#2ca02c" } ],
+              [ ".", "ActiveJobs", { "stat": "Average", "yAxis": "right", "label": "Active Jobs" } ],
+              [ ".", "SpawnSlots", { "stat": "Average", "yAxis": "right", "label": "Available Slots" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Coordinator Health & Load",
+            "period": 60,
+            "yAxis": {
+              "left": {
+                "label": "Heartbeats/min",
+                "showUnits": false,
+                "min": 0
+              },
+              "right": {
+                "label": "Job Count",
+                "showUnits": false,
+                "min": 0
+              }
+            },
+            "annotations": {
+              "horizontal": [
+                {
+                  "label": "Expected heartbeat rate",
+                  "value": 2,
+                  "fill": "below",
+                  "color": "#ff7f0e"
+                }
+              ]
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 0,
+          "y": 24
+        },
+        {
+          "type": "metric",
+          "properties": {
+            "metrics": [
+              [ "AWS/EKS", "pod_restart_count", { "stat": "Sum", "label": "Coordinator Restarts" } ]
+            ],
+            "view": "timeSeries",
+            "stacked": false,
+            "region": "__AWS_REGION__",
+            "title": "Coordinator Pod Restarts",
+            "period": 300,
+            "yAxis": {
+              "left": {
+                "label": "Restart Count",
+                "showUnits": false,
+                "min": 0
+              }
+            },
+            "annotations": {
+              "horizontal": [
+                {
+                  "label": "Restart threshold",
+                  "value": 3,
+                  "fill": "above",
+                  "color": "#d62728"
+                }
+              ]
+            }
+          },
+          "width": 12,
+          "height": 6,
+          "x": 12,
+          "y": 24
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-dashboard-scripts
+  namespace: agentex
+  labels:
+    app: agentex
+    component: observability
+data:
+  apply-dashboard.sh: |
+    #!/usr/bin/env bash
+    # Deploy the agentex CloudWatch dashboard from the ConfigMap definition
+    set -euo pipefail
+    
+    # Read region from constitution ConfigMap, fallback to AWS_REGION env var, then us-west-2
+    REGION=$(kubectl get configmap agentex-constitution -n agentex \
+      -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "${AWS_REGION:-us-west-2}")
+    DASHBOARD_NAME="agentex-activity"
+    
+    echo "Fetching dashboard definition from ConfigMap..."
+    DASHBOARD_JSON=$(kubectl get configmap agentex-dashboard-definition -n agentex \
+      -o jsonpath='{.data.dashboard\.json}')
+    
+    # Replace placeholder __AWS_REGION__ with actual region
+    DASHBOARD_JSON=$(echo "$DASHBOARD_JSON" | sed "s/__AWS_REGION__/$REGION/g")
+    
+    echo "Creating/updating CloudWatch dashboard: $DASHBOARD_NAME in region $REGION"
+    aws cloudwatch put-dashboard \
+      --dashboard-name "$DASHBOARD_NAME" \
+      --dashboard-body "$DASHBOARD_JSON" \
+      --region "$REGION"
+    
+    echo "Dashboard deployed successfully!"
+    echo "View at: https://console.aws.amazon.com/cloudwatch/home?region=${REGION}#dashboards:name=${DASHBOARD_NAME}"
+  
+  delete-dashboard.sh: |
+    #!/usr/bin/env bash
+    # Delete the agentex CloudWatch dashboard
+    set -euo pipefail
+    
+    # Read region from constitution ConfigMap, fallback to AWS_REGION env var, then us-west-2
+    REGION=$(kubectl get configmap agentex-constitution -n agentex \
+      -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "${AWS_REGION:-us-west-2}")
+    DASHBOARD_NAME="agentex-activity"
+    
+    echo "Deleting CloudWatch dashboard: $DASHBOARD_NAME from region $REGION"
+    aws cloudwatch delete-dashboards \
+      --dashboard-names "$DASHBOARD_NAME" \
+      --region "$REGION"
+    
+    echo "Dashboard deleted successfully!"

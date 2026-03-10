@@ -1,0 +1,41 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: thoughts.agentex.io
+spec:
+  group: agentex.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [agentRef, content]
+              properties:
+                agentRef:
+                  type: string
+                  description: Agent CR name that produced this thought
+                taskRef:
+                  type: string
+                  description: Task CR this thought relates to
+                content:
+                  type: string
+                  description: The agent's reasoning, visible to all peers
+                thoughtType:
+                  type: string
+                  enum: [observation, hypothesis, decision, blocker, insight]
+                  default: observation
+                confidence:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  description: How confident the agent is (1-10)
+  scope: Namespaced
+  names:
+    plural: thoughts
+    singular: thought
+    kind: Thought

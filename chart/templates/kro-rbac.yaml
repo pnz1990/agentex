@@ -1,0 +1,129 @@
+# kro RBAC — grants kro the permissions it needs to create resources from RGDs
+# This ClusterRole uses the kro aggregation label so it's automatically added
+# to kro's controller ClusterRole.
+# See: https://kro.run/docs/rbac
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    rbac.kro.run/aggregate-to-controller: "true"
+    {{- include "agentex.labels" . | nindent 4 }}
+  name: kro-agentex-resources
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - kro.run
+  resources:
+  - agents
+  - tasks
+  - messages
+  - thoughts
+  - swarms
+  - reports
+  - coordinators
+  - plannerloops
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - kro.run
+  resources:
+  - agents/status
+  - tasks/status
+  - messages/status
+  - thoughts/status
+  - swarms/status
+  - reports/status
+  - coordinators/status
+  - plannerloops/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - agentex.io
+  resources:
+  - agents
+  - tasks
+  - messages
+  - thoughts
+  - swarms
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - agentex.io
+  resources:
+  - agents/status
+  - tasks/status
+  - messages/status
+  - thoughts/status
+  - swarms/status
+  verbs:
+  - get
+  - update
+  - patch
+---
+# NOTE: The ClusterRoleBinding below must match the ClusterRole name above.
+# The existing manifests/system/kro-rbac.yaml had a bug where the binding
+# referenced 'kro-agentex-access' but the role was named 'kro-agentex-resources'.
+# This has been fixed here (issue #845).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kro-agentex-access
+  labels:
+    {{- include "agentex.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kro-agentex-resources
+subjects:
+- kind: ServiceAccount
+  name: kro
+  namespace: kro-system

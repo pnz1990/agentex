@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentex-killswitch
+  namespace: agentex
+data:
+  enabled: "false"
+  reason: ""
+  # To activate emergency kill switch during proliferation:
+  # kubectl patch configmap agentex-killswitch -n agentex \
+  #   --type=merge -p '{"data":{"enabled":"true","reason":"Emergency stop due to agent proliferation"}}'
+  #
+  # To deactivate after fix deployed:
+  # kubectl patch configmap agentex-killswitch -n agentex \
+  #   --type=merge -p '{"data":{"enabled":"false","reason":""}}'

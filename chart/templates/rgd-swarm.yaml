@@ -1,0 +1,135 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: swarm-graph
+  namespace: {{ include "agentex.namespace" . }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Swarm
+    spec:
+      goal: string | required=true
+      plannerTaskRef: string | required=true
+      maxAgents: integer | default=10
+      planners: integer | default=1
+      workers: integer | default=3
+      reviewers: integer | default=1
+      consensusThreshold: integer | default=51
+      githubRepo: string | default={{ .Values.vision.githubRepo | quote }}
+      model: string | default={{ .Values.civilization.model | quote }}
+    status:
+      configMapName: ${swarmState.metadata.name}
+      phase: ${swarmState.data.phase}
+      plannerJob: ${plannerAgent.metadata.name}
+  resources:
+    - id: swarmState
+      readyWhen:
+        - ${swarmState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            agentex/swarm: ${schema.metadata.name}
+        data:
+          goal: ${schema.spec.goal}
+          phase: "Forming"
+          maxAgents: ${string(schema.spec.maxAgents)}
+          planners: ${string(schema.spec.planners)}
+          workers: ${string(schema.spec.workers)}
+          reviewers: ${string(schema.spec.reviewers)}
+          consensusThreshold: ${string(schema.spec.consensusThreshold)}
+          githubRepo: ${schema.spec.githubRepo}
+          activeAgents: "0"
+          tasksCompleted: "0"
+          issuesCreated: "0"
+          prsMerged: "0"
+          lastActivityTimestamp: ""
+          memberAgents: ""
+
+    - id: plannerAgent
+      readyWhen:
+        - ${plannerAgent.status.completionTime != null}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}-planner
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-agent
+            agentex/role: planner
+            agentex/swarm: ${schema.metadata.name}
+        spec:
+          ttlSecondsAfterFinished: {{ .Values.civilization.jobTTLSeconds }}
+          backoffLimit: 0
+          activeDeadlineSeconds: 3600
+          template:
+            metadata:
+              labels:
+                app: agentex-agent
+                agentex/role: planner
+                agentex/swarm: ${schema.metadata.name}
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: agent
+                  image: {{ include "agentex.image" . }}
+                  imagePullPolicy: {{ .Values.image.pullPolicy }}
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: AGENT_NAME
+                      value: ${schema.metadata.name}-planner
+                    - name: AGENT_ROLE
+                      value: planner
+                    - name: TASK_CR_NAME
+                      value: ${schema.spec.plannerTaskRef}
+                    - name: SWARM_REF
+                      value: ${schema.metadata.name}
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      value: {{ .Values.vision.awsRegion | quote }}
+                    - name: REPO
+                      value: {{ .Values.vision.githubRepo | quote }}
+                    - name: CLUSTER
+                      value: {{ .Values.vision.clusterName | quote }}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  resources:
+                    requests:
+                      memory: {{ .Values.resources.requests.memory | quote }}
+                      cpu: {{ .Values.resources.requests.cpu | quote }}
+                    limits:
+                      memory: {{ .Values.resources.limits.memory | quote }}
+                      cpu: {{ .Values.resources.limits.cpu | quote }}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 2Gi
+                - name: github-token
+                  secret:
+                    secretName: {{ .Values.github.secretName }}
+                    defaultMode: 0400

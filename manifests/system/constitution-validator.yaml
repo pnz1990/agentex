@@ -1,0 +1,262 @@
+# Constitution Validation CronJob (issue #891)
+# Detects drift between git repo constitution.yaml and live cluster ConfigMap.
+# 
+# Problem: Agents close issues when PRs merge, but don't verify actual cluster state.
+# This causes silent drift where entrypoint.sh fallback defaults mask deployment gaps.
+#
+# Solution: Run every 30 minutes, compare key fields, post a blocker Thought CR if drift detected.
+# Agents will see the blocker in their 10-thought context and can take corrective action.
+#
+# Vision score: 7/10 — self-monitoring capability that advances v0.1 release readiness.
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: constitution-validator
+  namespace: agentex
+  labels:
+    app: agentex-constitution-validator
+    agentex/component: system
+spec:
+  schedule: "7,37 * * * *"  # Run at 7 and 37 minutes past each hour (avoids :00 spike)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid  # Don't run concurrent validations
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300  # Clean up after 5 minutes
+      backoffLimit: 1
+      activeDeadlineSeconds: 180  # Kill if takes > 3 minutes
+      template:
+        metadata:
+          labels:
+            app: agentex-constitution-validator
+        spec:
+          serviceAccountName: agentex-agent-sa
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: validator
+            # PORTABILITY NOTE: This image URL is hardcoded for system validator only.
+            # A new god installing agentex must edit this line with their ECR registry.
+            # TODO (issue #817): Replace with Helm template {{ .Values.ecrRegistry }}/agentex/runner:latest
+            # Use runner image — has kubectl, git, jq, aws CLI
+            image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:latest
+            imagePullPolicy: Always
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: false  # needs /tmp for git clone
+              capabilities:
+                drop: ["ALL"]
+            env:
+            - name: NAMESPACE
+              value: "agentex"
+            - name: BEDROCK_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: awsRegion
+            - name: REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: githubRepo
+            command: ["/bin/bash", "-c"]
+            args:
+            - |
+              set -euo pipefail
+              TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+              EPOCH=$(date +%s)
+              echo "[$TIMESTAMP] Constitution validator starting"
+
+              # ── Configure kubectl ──────────────────────────────────────────
+              aws eks update-kubeconfig --region "${BEDROCK_REGION}" \
+                --name "agentex" --alias agentex 2>&1 || true
+
+              # ── Fetch live constitution from cluster ───────────────────────
+              echo "Fetching live constitution from cluster..."
+              LIVE_DATA=$(kubectl get configmap agentex-constitution -n "${NAMESPACE}" -o json 2>&1) || {
+                echo "ERROR: Cannot read live constitution ConfigMap. Cluster unreachable?"
+                exit 1
+              }
+
+              # Extract key fields from live ConfigMap
+              LIVE_CIRCUIT_BREAKER=$(echo "$LIVE_DATA" | jq -r '.data.circuitBreakerLimit // "MISSING"')
+              LIVE_GENERATION=$(echo "$LIVE_DATA" | jq -r '.data.civilizationGeneration // "MISSING"')
+              LIVE_ECR=$(echo "$LIVE_DATA" | jq -r '.data.ecrRegistry // "MISSING"')
+              LIVE_REGION=$(echo "$LIVE_DATA" | jq -r '.data.awsRegion // "MISSING"')
+              LIVE_REPO=$(echo "$LIVE_DATA" | jq -r '.data.githubRepo // "MISSING"')
+              LIVE_S3=$(echo "$LIVE_DATA" | jq -r '.data.s3Bucket // "MISSING"')
+
+              echo "Live: circuitBreakerLimit=$LIVE_CIRCUIT_BREAKER generation=$LIVE_GENERATION"
+              echo "Live: ecrRegistry=$LIVE_ECR awsRegion=$LIVE_REGION"
+              echo "Live: githubRepo=$LIVE_REPO s3Bucket=$LIVE_S3"
+
+              # ── Clone repo and extract git constitution values ─────────────
+              echo "Cloning repo to check git constitution.yaml..."
+              GIT_DIR="/tmp/repo-$$"
+              git clone --depth=1 "https://github.com/${REPO}" "${GIT_DIR}" 2>&1 || {
+                echo "WARNING: Cannot clone repo. Skipping git comparison."
+                exit 0
+              }
+
+              CONSTITUTION_FILE="${GIT_DIR}/manifests/system/constitution.yaml"
+              if [ ! -f "$CONSTITUTION_FILE" ]; then
+                echo "WARNING: constitution.yaml not found in repo at expected path"
+                rm -rf "$GIT_DIR"
+                exit 0
+              fi
+
+              # Extract values from git constitution.yaml using grep/sed
+              # (yq not available; use python3 which is available in runner image)
+              GIT_CIRCUIT_BREAKER=$(python3 -c "
+              import sys
+              content = open('$CONSTITUTION_FILE').read()
+              for line in content.split('\n'):
+                  line = line.strip()
+                  if line.startswith('circuitBreakerLimit:'):
+                      val = line.split(':', 1)[1].strip().strip('\"').strip(\"'\")
+                      print(val)
+                      sys.exit(0)
+              print('NOT_FOUND')
+              " 2>/dev/null || echo "PARSE_ERROR")
+
+              GIT_ECR=$(python3 -c "
+              import sys
+              content = open('$CONSTITUTION_FILE').read()
+              for line in content.split('\n'):
+                  line = line.strip()
+                  if line.startswith('ecrRegistry:'):
+                      val = line.split(':', 1)[1].strip().strip('\"').strip(\"'\")
+                      print(val)
+                      sys.exit(0)
+              print('NOT_FOUND')
+              " 2>/dev/null || echo "PARSE_ERROR")
+
+              GIT_REGION=$(python3 -c "
+              import sys
+              content = open('$CONSTITUTION_FILE').read()
+              for line in content.split('\n'):
+                  line = line.strip()
+                  if line.startswith('awsRegion:'):
+                      val = line.split(':', 1)[1].strip().strip('\"').strip(\"'\")
+                      print(val)
+                      sys.exit(0)
+              print('NOT_FOUND')
+              " 2>/dev/null || echo "PARSE_ERROR")
+
+              GIT_REPO=$(python3 -c "
+              import sys
+              content = open('$CONSTITUTION_FILE').read()
+              for line in content.split('\n'):
+                  line = line.strip()
+                  if line.startswith('githubRepo:'):
+                      val = line.split(':', 1)[1].strip().strip('\"').strip(\"'\")
+                      print(val)
+                      sys.exit(0)
+              print('NOT_FOUND')
+              " 2>/dev/null || echo "PARSE_ERROR")
+
+              GIT_S3=$(python3 -c "
+              import sys
+              content = open('$CONSTITUTION_FILE').read()
+              for line in content.split('\n'):
+                  line = line.strip()
+                  if line.startswith('s3Bucket:'):
+                      val = line.split(':', 1)[1].strip().strip('\"').strip(\"'\")
+                      print(val)
+                      sys.exit(0)
+              print('NOT_FOUND')
+              " 2>/dev/null || echo "PARSE_ERROR")
+
+              rm -rf "$GIT_DIR"
+
+              echo "Git: circuitBreakerLimit=$GIT_CIRCUIT_BREAKER ecrRegistry=$GIT_ECR"
+              echo "Git: awsRegion=$GIT_REGION githubRepo=$GIT_REPO s3Bucket=$GIT_S3"
+
+              # ── Compare fields ─────────────────────────────────────────────
+              DRIFT_FOUND=false
+              DRIFT_DETAILS=""
+
+              check_field() {
+                local field="$1"
+                local live_val="$2"
+                local git_val="$3"
+                # Skip comparison if git value not found (field may not exist in git yet)
+                if [ "$git_val" = "NOT_FOUND" ] || [ "$git_val" = "PARSE_ERROR" ]; then
+                  echo "  SKIP $field: not in git constitution.yaml"
+                  return
+                fi
+                if [ "$live_val" != "$git_val" ]; then
+                  echo "  DRIFT $field: live='$live_val' git='$git_val'"
+                  DRIFT_FOUND=true
+                  DRIFT_DETAILS="${DRIFT_DETAILS}  - $field: live='$live_val' vs git='$git_val'\n"
+                else
+                  echo "  OK    $field: $live_val"
+                fi
+              }
+
+              echo "Comparing fields..."
+              check_field "circuitBreakerLimit" "$LIVE_CIRCUIT_BREAKER" "$GIT_CIRCUIT_BREAKER"
+              check_field "ecrRegistry"         "$LIVE_ECR"            "$GIT_ECR"
+              check_field "awsRegion"           "$LIVE_REGION"         "$GIT_REGION"
+              check_field "githubRepo"          "$LIVE_REPO"           "$GIT_REPO"
+              check_field "s3Bucket"            "$LIVE_S3"             "$GIT_S3"
+
+              # ── Post Thought CR if drift detected ──────────────────────────
+              if [ "$DRIFT_FOUND" = "true" ]; then
+                echo "DRIFT DETECTED — posting blocker Thought CR"
+                kubectl apply -f - <<EOF
+              apiVersion: kro.run/v1alpha1
+              kind: Thought
+              metadata:
+                name: thought-constitution-drift-${EPOCH}
+                namespace: ${NAMESPACE}
+              spec:
+                agentRef: constitution-validator
+                taskRef: system-validation
+                thoughtType: blocker
+                confidence: 10
+                content: |
+                  BLOCKER: Constitution ConfigMap drifted from git repo
+                  Detected at: ${TIMESTAMP}
+
+                  Drifted fields:
+              $(printf '%b' "$DRIFT_DETAILS" | sed 's/^/      /')
+
+                  Action required:
+                  - Run: kubectl apply -f manifests/system/constitution.yaml
+                  - Then verify: kubectl get cm agentex-constitution -n agentex -o json | jq '.data'
+                  - Reference issue: #891 (constitution drift detection)
+
+                  This blocker will recur every 30 min until drift is resolved.
+              EOF
+                echo "Blocker Thought CR posted: thought-constitution-drift-${EPOCH}"
+              else
+                echo "No drift detected — constitution is in sync with git repo"
+              fi
+
+              echo "[$TIMESTAMP] Constitution validator complete. Drift=$DRIFT_FOUND"
+              exit 0
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+            volumeMounts:
+              - name: tmp
+                mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 500Mi
+          imagePullSecrets: []

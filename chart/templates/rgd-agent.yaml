@@ -1,0 +1,106 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: agent-graph
+  namespace: {{ include "agentex.namespace" . }}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Agent
+    spec:
+      role: string | default="worker"
+      taskRef: string | required=true
+      model: string | default={{ .Values.civilization.model | quote }}
+      swarmRef: string | default=""
+      priority: integer | default=5
+    status:
+      jobName: ${agentJob.metadata.name}
+      completionTime: ${agentJob.status.completionTime}
+      failed: ${agentJob.status.failed}
+      active: ${agentJob.status.active}
+      succeeded: ${agentJob.status.succeeded}
+  resources:
+    - id: agentJob
+      readyWhen:
+        - ${agentJob.metadata.resourceVersion != ""}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-agent
+            agentex/role: ${schema.spec.role}
+            agentex/task: ${schema.spec.taskRef}
+        spec:
+          ttlSecondsAfterFinished: {{ .Values.civilization.jobTTLSeconds }}
+          backoffLimit: 2
+          activeDeadlineSeconds: 3600
+          template:
+            metadata:
+              labels:
+                app: agentex-agent
+                agentex/role: ${schema.spec.role}
+                agentex/task: ${schema.spec.taskRef}
+            spec:
+              serviceAccountName: agentex-agent-sa
+              restartPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                fsGroup: 1000
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: agent
+                  image: {{ include "agentex.image" . }}
+                  imagePullPolicy: {{ .Values.image.pullPolicy }}
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: false
+                    capabilities:
+                      drop: ["ALL"]
+                  env:
+                    - name: AGENT_NAME
+                      value: ${schema.metadata.name}
+                    - name: AGENT_ROLE
+                      value: ${schema.spec.role}
+                    - name: TASK_CR_NAME
+                      value: ${schema.spec.taskRef}
+                    - name: SWARM_REF
+                      value: ${schema.spec.swarmRef}
+                    - name: BEDROCK_MODEL
+                      value: ${schema.spec.model}
+                    - name: BEDROCK_REGION
+                      value: {{ .Values.vision.awsRegion | quote }}
+                    - name: REPO
+                      value: {{ .Values.vision.githubRepo | quote }}
+                    - name: CLUSTER
+                      value: {{ .Values.vision.clusterName | quote }}
+                    - name: NAMESPACE
+                      value: {{ .Values.cluster.namespace | quote }}
+                    - name: GITHUB_TOKEN_FILE
+                      value: "/var/secrets/github/token"
+                  resources:
+                    requests:
+                      memory: {{ .Values.resources.requests.memory | quote }}
+                      cpu: {{ .Values.resources.requests.cpu | quote }}
+                    limits:
+                      memory: {{ .Values.resources.limits.memory | quote }}
+                      cpu: {{ .Values.resources.limits.cpu | quote }}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: github-token
+                      mountPath: /var/secrets/github
+                      readOnly: true
+              volumes:
+                - name: workspace
+                  emptyDir:
+                    sizeLimit: 2Gi
+                - name: github-token
+                  secret:
+                    secretName: {{ .Values.github.secretName }}
+                    defaultMode: 0400

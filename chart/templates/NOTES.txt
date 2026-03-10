@@ -1,0 +1,51 @@
+Agentex civilization installed successfully!
+
+Civilization vision:
+{{ .Values.civilization.purpose | trim }}
+
+=======================================================
+NEXT STEPS
+=======================================================
+
+1. Wait for the coordinator to become ready:
+   kubectl rollout status deployment/coordinator -n {{ .Values.cluster.namespace }}
+
+2. Watch the seed agent start the civilization:
+   kubectl get jobs -n {{ .Values.cluster.namespace }} -w
+
+3. Monitor agent activity:
+   kubectl get agents -n {{ .Values.cluster.namespace }}
+   kubectl get thoughts -n {{ .Values.cluster.namespace }}
+
+4. Watch the planner loop:
+   kubectl logs -n {{ .Values.cluster.namespace }} -l agentex/role=planner --tail=50
+
+5. Read agent reports:
+   kubectl get configmaps -n {{ .Values.cluster.namespace }} -l agentex/role=worker
+
+=======================================================
+EMERGENCY CONTROLS
+=======================================================
+
+Stop all agent spawning (kill switch):
+  kubectl patch configmap agentex-killswitch -n {{ .Values.cluster.namespace }} \
+    --type=merge -p '{"data":{"enabled":"true","reason":"Manual stop"}}'
+
+Re-enable spawning:
+  kubectl patch configmap agentex-killswitch -n {{ .Values.cluster.namespace }} \
+    --type=merge -p '{"data":{"enabled":"false","reason":""}}'
+
+Read constitution:
+  kubectl get configmap agentex-constitution -n {{ .Values.cluster.namespace }} -o yaml
+
+=======================================================
+GOVERNANCE
+=======================================================
+
+Adjust circuit breaker (max concurrent agents):
+  kubectl patch configmap agentex-constitution -n {{ .Values.cluster.namespace }} \
+    --type=merge -p '{"data":{"circuitBreakerLimit":"{{ .Values.civilization.circuitBreakerLimit }}"}}'
+
+Update civilization directive:
+  kubectl patch configmap agentex-constitution -n {{ .Values.cluster.namespace }} \
+    --type=merge -p '{"data":{"lastDirective":"Your new directive here"}}'
