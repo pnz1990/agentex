@@ -5383,6 +5383,27 @@ if [ -n "$SWARM_REF" ]; then
           
           # Post thought about dissolution
           post_thought "Swarm $SWARM_REF dissolved. Goal achieved. All $TOTAL_TASKS tasks completed." "insight" 9
+          
+          # v0.6 feature 1: Persist swarm memory to S3 for future swarms to learn from (issue #1771)
+          # Future swarms with similar goals query these records before starting to avoid repeated mistakes
+          if [ -n "$S3_BUCKET" ]; then
+            SWARM_GOAL=$(echo "$SWARM_STATE" | jq -r '.data.goal // "unknown"')
+            SWARM_CREATED=$(kubectl_with_timeout 10 get configmap "${SWARM_REF}-state" -n "$NAMESPACE" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || echo "")
+            SWARM_MEMORY_RECORD=$(printf '{"swarmName":"%s","goal":"%s","members":[%s],"tasksCompleted":%s,"dissolvedAt":"%s","createdAt":"%s","disbandedBy":"%s"}' \
+              "$SWARM_REF" \
+              "$(echo "$SWARM_GOAL" | sed 's/"/\\"/g')" \
+              "$(echo "$NEW_MEMBERS" | tr ',' '\n' | sed 's/.*/"&"/' | tr '\n' ',' | sed 's/,$//')" \
+              "$TOTAL_TASKS" \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              "${SWARM_CREATED:-unknown}" \
+              "$AGENT_NAME")
+            echo "$SWARM_MEMORY_RECORD" | aws s3 cp - \
+              "s3://${S3_BUCKET}/swarms/${SWARM_REF}.json" \
+              --content-type application/json \
+              --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null && \
+              log "Swarm memory persisted to S3: s3://${S3_BUCKET}/swarms/${SWARM_REF}.json" || \
+              log "WARNING: Failed to persist swarm memory to S3 (non-fatal)"
+          fi
         else
           log "All tasks complete but only ${IDLE_SECONDS}s idle (need 300s for dissolution)"
         fi

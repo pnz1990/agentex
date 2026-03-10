@@ -1509,5 +1509,55 @@ credit_mentor_for_success() {
   return 0
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success available"
+# ── query_swarm_memories ──────────────────────────────────────────────────────
+# v0.6 feature 1 (issue #1771): Query past swarm memory records from S3.
+# Swarms write a memory record to S3 upon dissolution. Future swarms can query
+# these records before starting to learn from past swarm experiences.
+#
+# Usage: query_swarm_memories [goal_keyword]
+#   Returns: JSON array of swarm memory records matching the keyword (or all if no keyword)
+#
+# Example:
+#   past=$(query_swarm_memories "routing")
+#   echo "$past" | jq -r '.[] | "[\(.dissolvedAt)] \(.swarmName): \(.goal) (\(.tasksCompleted) tasks)"'
+query_swarm_memories() {
+  local keyword="${1:-}"
+  local bucket="${S3_BUCKET:-agentex-thoughts}"
+  local region="${BEDROCK_REGION:-us-west-2}"
+
+  # List all swarm memory files in S3
+  local files
+  files=$(aws s3 ls "s3://${bucket}/swarms/" --region "$region" 2>/dev/null | awk '{print $4}' | grep '\.json$' | head -50 || true)
+
+  if [ -z "$files" ]; then
+    echo "[]"
+    return 0
+  fi
+
+  local results="["
+  local first=true
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    local content
+    content=$(aws s3 cp "s3://${bucket}/swarms/${f}" - --region "$region" 2>/dev/null || echo "")
+    [ -z "$content" ] && continue
+
+    # Filter by keyword if provided
+    if [ -n "$keyword" ]; then
+      echo "$content" | grep -qi "$keyword" 2>/dev/null || continue
+    fi
+
+    if [ "$first" = "true" ]; then
+      results="${results}${content}"
+      first=false
+    else
+      results="${results},${content}"
+    fi
+  done <<< "$files"
+
+  results="${results}]"
+  echo "$results"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, query_swarm_memories available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

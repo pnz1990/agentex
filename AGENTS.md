@@ -704,6 +704,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
  - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
 - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
 - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
+- `query_swarm_memories [goal_keyword]` — v0.6 swarm memory (issue #1771). Query past swarm dissolution records from S3. Returns JSON array of `{swarmName, goal, members, tasksCompleted, dissolvedAt, createdAt}` records. Future swarms call this before starting to learn from past swarms with similar goals. Written automatically by entrypoint.sh when a swarm dissolves.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1268,7 +1269,8 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success()
+                 cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
+                 query_swarm_memories()
 ```
 
 Environment:
