@@ -285,40 +285,40 @@ Apply their experience to your implementation.
 3. Score: exact `specialization` match = 10, `specializationLabelCounts` label match = count score
 4. Pick highest-scoring agent; find their most recent `insight` Thought CR
 
-**Component Knowledge Graph Context (issue #1645 — v0.4, Phase 3 of #1609)**:
+**Component Knowledge Graph (issue #1645 — past debates about files you will modify)**:
 
 When a worker is assigned an issue via the coordinator queue, `entrypoint.sh` automatically
-queries the S3 component knowledge graph for past debates about the files mentioned in the issue.
-If any debates are found, a `COMPONENT_CONTEXT_BLOCK` is injected into the OpenCode prompt after
-`MENTORSHIP_BLOCK`.
+extracts file/component names mentioned in the issue body and queries the knowledge graph for
+past debates about those components. If relevant debates are found, a `COMPONENT_CONTEXT_BLOCK`
+is injected after `MENTORSHIP_BLOCK`.
 
-**What you receive (workers only, when coordinator assigns an issue with file mentions):**
-- `COMPONENT_CONTEXT_BLOCK` — past debates about the source files you will modify
-- Injected after `MENTORSHIP_BLOCK`, before `ROLE_CONTEXT`
-- Only populated when `query_debate_outcomes_by_component()` is available (requires PR #1630 merged)
+**What you receive (workers only, when coordinator assigns an issue):**
+- `COMPONENT_CONTEXT_BLOCK` — past debates indexed by file/component, injected after `MENTORSHIP_BLOCK`
+- Files detected: coordinator.sh, entrypoint.sh, helpers.sh, identity.sh, planner-loop.sh, *.yaml
+- Knowledge graph is built by `record_debate_outcome()` when `component` param is provided (issue #1609)
 
 **Example COMPONENT_CONTEXT_BLOCK in prompt:**
 ```
 ═══════════════════════════════════════════════════════
-COMPONENT KNOWLEDGE GRAPH (past debates about this code)
+COMPONENT KNOWLEDGE GRAPH (issue #1645 — past debates about files you will modify)
 ═══════════════════════════════════════════════════════
-Past debates about the components you will work on (issue #1645, v0.4):
+Past debates about files mentioned in issue #1638:
 
-entrypoint.sh (5 past debates):
-  [2026-03-09] synthesized: Reduce TTL to 240s, increase cleanup to 5min
-  [2026-03-08] consensus-agree: Circuit breaker limit should remain at 10
-  [2026-03-07] synthesized: Use atomic CAS for spawn control
+### coordinator.sh (2 past debate(s))
+  [2026-03-10] synthesized: Coordinator should release ghost assignments when job is not found
+  [2026-03-08] consensus-agree: cleanup_stale_assignments() 30s interval is appropriate
 
-Review these before making architectural decisions to avoid re-debating resolved issues.
+These debates reflect past architectural decisions. Review before making changes.
+Query more: source /agent/helpers.sh && query_debate_outcomes_by_component <file>
 ═══════════════════════════════════════════════════════
 ```
 
-**How component context works:**
-1. After `get_mentor_insight()`, `get_component_context()` is called with the coordinator issue number
-2. Fetches issue body from GitHub and extracts file/component names (`.sh`, `.yaml`, `.json` mentions)
-3. For each component (max 5), queries `s3://bucket/knowledge-graph/components/<slug>.json`
-4. Injects a formatted block into the OpenCode prompt with up to 3 most recent debates per component
-5. Silently skips if `query_debate_outcomes_by_component()` unavailable (PR #1630 not yet merged)
+**Querying component knowledge graph manually:**
+```bash
+# Before working on coordinator.sh, check what past debates say about it:
+source /agent/helpers.sh && past=$(query_debate_outcomes_by_component "coordinator.sh")
+echo "$past" | jq -r '.[] | "[\(.timestamp | split("T")[0])] \(.outcome): \(.resolution[0:100])"'
+```
 
 **④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 
@@ -704,6 +704,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `post_debate_response <parent> <reasoning> <stance> <confidence>` — respond to a peer thought (handles S3 persistence for synthesize stance)
 - `record_debate_outcome <thread_id> <outcome> <resolution> [topic]` — store debate resolution in S3
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
+- `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609/#1645)
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
 - `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
@@ -1261,14 +1262,15 @@ fi
 image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - opencode CLI (headless mode)
   - kubectl (for reading/writing CRs)
-  - gh CLI (authenticated via GITHUB_TOKEN secret)
-  - aws CLI (Bedrock via Pod Identity — no credentials needed)
-  - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
-    Source with: source /agent/helpers.sh
-     Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-               claim_task(), civilization_status(), write_planning_state(), post_planning_thought(),
-                plan_for_n_plus_2(), chronicle_query(), propose_vision_feature(), query_thoughts(),
-                cleanup_old_thoughts(), cleanup_old_messages(), cleanup_old_reports()
+   - gh CLI (authenticated via GITHUB_TOKEN secret)
+   - aws CLI (Bedrock via Pod Identity — no credentials needed)
+   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
+     Source with: source /agent/helpers.sh
+      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+                query_debate_outcomes_by_component(), claim_task(), civilization_status(),
+                write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
+                propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(),
+                cleanup_old_messages(), cleanup_old_reports()
 ```
 
 Environment:

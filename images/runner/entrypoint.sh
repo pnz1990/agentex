@@ -2022,112 +2022,6 @@ get_mentor_insight() {
   return 0
 }
 
-# get_component_context() - Query knowledge graph for file/component debates (issue #1645)
-# Phase 3 of the component-based debate knowledge graph (issue #1609, v0.4 milestone).
-# Extracts file/component mentions from a GitHub issue body and queries the component
-# knowledge graph index for each. Returns a formatted COMPONENT_CONTEXT_BLOCK string
-# that can be injected into the OpenCode prompt so agents see past debates before coding.
-#
-# Usage: get_component_context <issue_number>
-# Sets: COMPONENT_CONTEXT_BLOCK (exported)
-# Requires: query_debate_outcomes_by_component() in helpers.sh (PR #1630)
-#
-# Algorithm:
-#   1. Fetch issue body from GitHub
-#   2. Extract .sh/.yaml/.json/.py file mentions (grep for known source files)
-#   3. For each unique component (max 5), query the S3 knowledge graph index
-#   4. Build COMPONENT_CONTEXT_BLOCK with top results (max 3 debates per component)
-get_component_context() {
-  local issue_num="${1:-}"
-  COMPONENT_CONTEXT_BLOCK=""
-
-  [ -z "$issue_num" ] || [ "$issue_num" = "0" ] && return 0
-
-  # Only query if query_debate_outcomes_by_component function is available (requires PR #1630)
-  if ! type query_debate_outcomes_by_component >/dev/null 2>&1; then
-    log "Component context: query_debate_outcomes_by_component not available (PR #1630 not merged) — skipping"
-    return 0
-  fi
-
-  log "Component context: querying knowledge graph for issue #$issue_num..."
-
-  # Step 1: Fetch issue body to extract component mentions
-  local issue_body
-  issue_body=$(timeout 8s gh issue view "$issue_num" --repo "$REPO" \
-    --json body --jq '.body' 2>/dev/null || echo "")
-  if [ -z "$issue_body" ]; then
-    log "Component context: could not fetch issue body for #$issue_num — skipping"
-    return 0
-  fi
-
-  # Step 2: Extract file/component mentions from issue body
-  # Look for known source files in the platform: .sh, .yaml files mentioned by name
-  # Also extract backtick-quoted filenames like `coordinator.sh` or `entrypoint.sh`
-  local components
-  components=$(echo "$issue_body" | \
-    grep -oE '`[^`]+(\.sh|\.yaml|\.json|\.py)[^`]*`' | \
-    tr -d '`' | \
-    grep -oE '[a-zA-Z0-9_-]+(\.sh|\.yaml|\.json|\.py)' | \
-    sort -u | head -5 || echo "")
-
-  # Also check for plain mentions of known platform files (without backticks)
-  local plain_mentions
-  plain_mentions=$(echo "$issue_body" | \
-    grep -oE '\b(entrypoint|coordinator|helpers|identity|planner-loop|agent-graph|task-graph|thought-graph|message-graph|report-graph|swarm-graph|coordinator-graph|planner-loop-graph)\.(sh|yaml)\b' | \
-    sort -u | head -5 || echo "")
-
-  # Merge and deduplicate
-  local all_components
-  all_components=$(printf "%s\n%s" "$components" "$plain_mentions" | \
-    grep -v '^$' | sort -u | head -5)
-
-  if [ -z "$all_components" ]; then
-    log "Component context: no file/component mentions found in issue #$issue_num — skipping"
-    return 0
-  fi
-
-  log "Component context: found components: $(echo "$all_components" | tr '\n' ' ')"
-
-  # Step 3: Query knowledge graph for each component
-  local context_entries=""
-  while IFS= read -r component; do
-    [ -z "$component" ] && continue
-    local debates
-    debates=$(query_debate_outcomes_by_component "$component" 2>/dev/null || echo "[]")
-    # Only include components that have at least 1 debate
-    local debate_count
-    debate_count=$(echo "$debates" | jq 'length' 2>/dev/null || echo "0")
-    if [ "$debate_count" -gt 0 ]; then
-      local component_summary
-      component_summary=$(echo "$debates" | jq -r \
-        '.[0:3] | .[] | "  [\(.timestamp[0:10])] \(.outcome): \(.resolution)"' \
-        2>/dev/null || echo "")
-      if [ -n "$component_summary" ]; then
-        context_entries="${context_entries}
-${component} (${debate_count} past debates):
-${component_summary}
-"
-      fi
-    fi
-  done <<< "$all_components"
-
-  # Step 4: Build COMPONENT_CONTEXT_BLOCK if we have any results
-  if [ -n "$context_entries" ]; then
-    COMPONENT_CONTEXT_BLOCK="
-═══════════════════════════════════════════════════════
-COMPONENT KNOWLEDGE GRAPH (past debates about this code)
-═══════════════════════════════════════════════════════
-Past debates about the components you will work on (issue #1645, v0.4):
-${context_entries}
-Review these before making architectural decisions to avoid re-debating resolved issues.
-═══════════════════════════════════════════════════════"
-    log "Component context: injecting knowledge graph context for issue #$issue_num (components: $(echo "$all_components" | wc -l | tr -d ' '))"
-  else
-    log "Component context: no knowledge graph entries found for issue #$issue_num components"
-  fi
-  return 0
-}
-
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -3095,10 +2989,6 @@ if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
     # Only for workers (not planners) and only when coordinator assigned a specific issue.
     if [ "$AGENT_ROLE" = "worker" ]; then
       get_mentor_insight "$COORDINATOR_ISSUE"
-      # Issue #1645: Component knowledge graph context injection (v0.4, Phase 3 of #1609)
-      # Query S3 knowledge graph for past debates about files mentioned in this issue.
-      # COMPONENT_CONTEXT_BLOCK is built here and injected into OpenCode prompt below.
-      get_component_context "$COORDINATOR_ISSUE"
     fi
   else
     log "Coordinator queue empty or unavailable — ${AGENT_ROLE} will self-select from GitHub"
@@ -3451,13 +3341,82 @@ A specialist predecessor worked on issues of this type:
   fi
 fi
 
-# Issue #1645: Component Knowledge Graph Block (v0.4, Phase 3 of issue #1609)
-# get_component_context() was called above (in coordinator assignment block for workers).
-# COMPONENT_CONTEXT_BLOCK is already set if results were found; default to empty for
-# non-workers or when coordinator queue was empty (no issue number to look up).
-# This block injects past debates about the specific files the agent will modify,
-# giving agents historical context before they write code.
-COMPONENT_CONTEXT_BLOCK="${COMPONENT_CONTEXT_BLOCK:-}"
+# Issue #1645: Component Knowledge Graph Phase 3 — inject past debate context for relevant files.
+# When an agent has an assigned issue (#COORDINATOR_ISSUE), we extract file/component mentions
+# from the issue body and inject past debates about those components into the prompt.
+# This helps agents avoid architectural mistakes that were debated and resolved previously.
+# Only runs for workers with a coordinator-assigned numeric issue (planners self-select later).
+COMPONENT_CONTEXT_BLOCK=""
+if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n "${COORDINATOR_ISSUE:-}" ]; then
+  log "Issue #1645: Building component knowledge graph context for issue #${COORDINATOR_ISSUE}..."
+
+  # Fetch the issue body/title to extract file mentions (using REST API — rate-limit resilient)
+  local_issue_body=""
+  local_issue_title=""
+  issue_api_response=$(gh api "repos/${REPO}/issues/${COORDINATOR_ISSUE}" \
+    --jq '{body: .body, title: .title}' 2>/dev/null || echo "")
+
+  if [ -n "$issue_api_response" ] && [ "$issue_api_response" != "null" ]; then
+    local_issue_body=$(echo "$issue_api_response" | jq -r '.body // ""' 2>/dev/null || echo "")
+    local_issue_title=$(echo "$issue_api_response" | jq -r '.title // ""' 2>/dev/null || echo "")
+  fi
+
+  # Extract *.sh and *.yaml file mentions from the issue content
+  local_components_raw=""
+  if [ -n "$local_issue_body" ] || [ -n "$local_issue_title" ]; then
+    combined_text="${local_issue_title} ${local_issue_body}"
+    # Extract common agentex file names (.sh, .yaml, .yml, .json patterns)
+    # Also capture bare component names like "coordinator", "entrypoint", "helpers"
+    local_components_raw=$(echo "$combined_text" | \
+      grep -oE '\b(coordinator\.sh|entrypoint\.sh|helpers\.sh|identity\.sh|planner-loop\.sh|agent-graph\.yaml|task-graph\.yaml|message-graph\.yaml|thought-graph\.yaml|report-graph\.yaml|swarm-graph\.yaml|coordinator-graph\.yaml|planner-loop-graph\.yaml)\b' | \
+      sort -u | head -5 || true)
+  fi
+
+  # Build context from knowledge graph if we found relevant components
+  if [ -n "$local_components_raw" ]; then
+    component_context_parts=""
+    while IFS= read -r component; do
+      [ -z "$component" ] && continue
+      # Inline knowledge graph query (S3 read — same logic as query_debate_outcomes_by_component in helpers.sh)
+      component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+      component_index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+      component_debates="[]"
+      if aws s3 ls "$component_index_path" --region "$BEDROCK_REGION" >/dev/null 2>&1; then
+        component_index_json=$(aws s3 cp "$component_index_path" - --region "$BEDROCK_REGION" 2>/dev/null || echo "{}")
+        if [ -n "$component_index_json" ] && [ "$component_index_json" != "{}" ]; then
+          component_debates=$(echo "$component_index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]")
+        fi
+      fi
+      if [ -n "$component_debates" ] && [ "$component_debates" != "[]" ]; then
+        debate_count=$(echo "$component_debates" | jq 'length' 2>/dev/null || echo "0")
+        if [ "${debate_count:-0}" -gt 0 ]; then
+          formatted_debates=$(echo "$component_debates" | \
+            jq -r '.[] | "  [\(.timestamp | split("T")[0])] \(.outcome): \(.resolution | split("\n")[0] | .[0:120])"' \
+            2>/dev/null | head -5 || echo "")
+          if [ -n "$formatted_debates" ]; then
+            component_context_parts="${component_context_parts}
+### ${component} (${debate_count} past debate(s))
+${formatted_debates}"
+          fi
+        fi
+      fi
+    done <<< "$local_components_raw"
+
+    if [ -n "$component_context_parts" ]; then
+      COMPONENT_CONTEXT_BLOCK="
+═══════════════════════════════════════════════════════
+COMPONENT KNOWLEDGE GRAPH (issue #1645 — past debates about files you will modify)
+═══════════════════════════════════════════════════════
+Past debates about files mentioned in issue #${COORDINATOR_ISSUE}:
+${component_context_parts}
+
+These debates reflect past architectural decisions. Review before making changes.
+Query more: source /agent/helpers.sh && query_debate_outcomes_by_component <file>
+═══════════════════════════════════════════════════════"
+      log "Issue #1645: Injected component knowledge graph context (components: $(echo "$local_components_raw" | tr '\n' ' '))"
+    fi
+  fi
+fi
 
 # Role-specialized context block (issue #881)
 # Each role gets different guidance to reduce noise and increase specialization.

@@ -967,5 +967,51 @@ cleanup_old_reports() {
   log "Cleaned up ~$count reports older than 48h TTL"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
+# ── query_debate_outcomes_by_component ───────────────────────────────────────
+# Query past debate resolutions from the component knowledge graph index.
+# Much faster than query_debate_outcomes() — reads a single pre-built index file
+# instead of listing and reading all debate files.
+# Issue #1609/#1645: Phase 3 — component knowledge graph context injection.
+#
+# Usage: query_debate_outcomes_by_component <component>
+# Returns: JSON array of up to 10 recent debate outcomes for that component.
+#          Returns empty array "[]" if no index found (non-fatal).
+#
+# Example:
+#   # Before modifying coordinator.sh, check what past debates say about it:
+#   past=$(query_debate_outcomes_by_component "coordinator.sh")
+#   echo "$past" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution[0:100])"'
+query_debate_outcomes_by_component() {
+  local component="${1:-}"
+
+  if [ -z "$component" ]; then
+    log "WARNING: query_debate_outcomes_by_component requires component argument"
+    echo "[]"
+    return 0
+  fi
+
+  # Sanitize component name for S3 key: replace / and spaces with -
+  local component_slug
+  component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
+
+  local index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
+
+  if ! aws s3 ls "$index_path" >/dev/null 2>&1; then
+    # No index yet for this component — return empty (non-fatal, knowledge graph is optional)
+    echo "[]"
+    return 0
+  fi
+
+  local index_json
+  index_json=$(aws s3 cp "$index_path" - 2>/dev/null || echo "{}")
+  if [ -z "$index_json" ] || [ "$index_json" = "{}" ]; then
+    echo "[]"
+    return 0
+  fi
+
+  # Return the debates array from the index
+  echo "$index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
