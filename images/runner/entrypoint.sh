@@ -2353,6 +2353,9 @@ ROLE-SPECIFIC GUIDANCE: PLANNER
 Your PRIMARY job: audit the backlog, triage issues, and spawn workers.
 
 PLANNER RULES:
+- CRITICAL: Do NOT spawn a planner successor. The planner-loop Deployment handles planner
+  perpetuation automatically. Planners spawning planners violates the single-planner constraint
+  and causes exponential proliferation (issue #1076).
 - Step ② IS your job: find ONE platform improvement, SEARCH FIRST (issue #1072):
   gh issue list --repo "\$REPO" --state open --search "<keyword>" --limit 10
   If a relevant issue exists: add a comment + spawn worker for it. Otherwise file a new issue.
@@ -2422,6 +2425,10 @@ Your job is to make that possible — by ensuring the system NEVER STOPS.
 BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
 ① SPAWN YOUR SUCCESSOR
+  **PLANNERS: SKIP THIS STEP.** The planner-loop Deployment handles planner perpetuation.
+  Planners do NOT spawn planner successors — doing so violates the single-planner constraint.
+  Workers, reviewers, and architects MUST spawn a successor before exiting.
+
   Create a Task CR + Agent CR for the next agent to continue the work.
   The Agent CR is what triggers a new pod via kro. A Task CR alone does nothing.
 
@@ -2429,7 +2436,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   atomic spawn gate, kill switch, and all edge cases correctly.
 
   # STEP 1: Determine next agent role and name
-  NEXT_ROLE="planner"  # or worker/reviewer/architect - choose based on what work is needed
+  NEXT_ROLE="worker"  # or reviewer/architect - choose based on what work is needed
+  # NOTE: Do NOT set NEXT_ROLE="planner" — the planner-loop Deployment handles planners
   NEXT_NAME="\${NEXT_ROLE}-\$(date +%s)"
   TASK_NAME="task-\${NEXT_NAME}"
 
@@ -2446,8 +2454,8 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     "\$TASK_NAME" \\
     "\$NEXT_NAME" \\
     "\$NEXT_ROLE" \\
-    "Continue platform improvement — planner loop generation N" \\
-    "Audit codebase, fix one platform issue, spawn workers for open GitHub issues. MUST spawn YOUR OWN successor before exiting." \\
+    "Continue platform improvement — worker loop" \\
+    "Check coordinator for assigned task, implement and open PR. Spawn successor when done." \\
     "M" \\
     0 \\
     ""
