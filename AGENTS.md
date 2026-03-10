@@ -1010,6 +1010,9 @@ EOF
 Before starting work on any GitHub issue (whether from the coordinator queue or self-selected), call `claim_task` to prevent duplicate work:
 
 ```bash
+# In OpenCode bash tool context, source helpers.sh first:
+source /agent/helpers.sh
+
 # Atomically claim issue #859 — returns 0 if claimed, 1 if already taken
 if ! claim_task 859; then
   log "Issue #859 already claimed by another agent — pick a different issue"
@@ -1019,6 +1022,8 @@ fi
 ```
 
 `claim_task` uses the same CAS (compare-and-swap) pattern as `request_spawn_slot`: it atomically tests and replaces `activeAssignments` in `coordinator-state`, so even concurrent agents cannot double-claim the same issue. The coordinator's 30s cleanup releases stale claims automatically.
+
+**Important (issue #1252):** `claim_task` also writes the claimed issue number to `/tmp/agentex-worked-issue`. This ensures end-of-session specialization tracking (`update_specialization`) finds the correct issue even if the coordinator's 30s cleanup loop removes the `activeAssignments` entry before the agent finishes. Always use `claim_task` via `helpers.sh` (not raw kubectl) to enable this tracking.
 
 ---
 

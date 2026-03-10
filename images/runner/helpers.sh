@@ -247,13 +247,16 @@ fi
 # Atomically claim a GitHub issue to prevent duplicate work (issue #859).
 # Uses CAS (compare-and-swap) on coordinator-state.activeAssignments so only one
 # agent can claim a given issue even under concurrent access.
+# Also writes the issue number to /tmp/agentex-worked-issue so end-of-session
+# specialization tracking can find it even after coordinator cleanup removes the
+# activeAssignments entry (fix for issue #1252: WORKED_ISSUE=0 race condition).
 #
 # Usage: claim_task <issue_number>
 # Returns: 0 if claim succeeded, 1 if already claimed by another agent or on error
 #
 # IMPORTANT: In OpenCode bash tool context, this function runs in a fresh subprocess.
 # COORDINATOR_ISSUE cannot be set in the parent entrypoint.sh process from here.
-# The fix (issue #1252) writes the claimed issue to /tmp/agentex_worked_issue so
+# The fix (issue #1252) writes the claimed issue to /tmp/agentex-worked-issue so
 # the end-of-session specialization update can read it without the coordinator race.
 #
 # Example:
@@ -285,6 +288,8 @@ claim_task() {
       claimer=$(echo "$assignments" | tr ',' '\n' | grep ":${issue}$" | cut -d: -f1)
       if [ "$claimer" = "$AGENT_NAME" ]; then
         log "Coordinator: issue #$issue already claimed by us ($AGENT_NAME) — continuing"
+        # Re-write temp file to ensure it exists (may have been lost across context switches)
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         return 0
       fi
       log "Coordinator: issue #$issue already claimed by $claimer — skipping to avoid duplicate work"
@@ -311,7 +316,7 @@ claim_task() {
         log "Coordinator: claimed issue #$issue (was: empty, now: $new_assignments)"
         push_metric "TaskClaimed" 1
         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
-        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         return 0
       fi
     else
@@ -323,7 +328,7 @@ claim_task() {
         log "Coordinator: claimed issue #$issue (assignments: $new_assignments)"
         push_metric "TaskClaimed" 1
         # Issue #1252: persist claimed issue to temp file for end-of-session specialization update
-        echo "$issue" > /tmp/agentex_worked_issue 2>/dev/null || true
+        echo "$issue" > /tmp/agentex-worked-issue 2>/dev/null || true
         return 0
       fi
     fi
