@@ -26,6 +26,11 @@ BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
 
+# Issue #1218: Export key variables so helpers.sh can access them from OpenCode bash subprocesses.
+# OpenCode runs each bash command in a fresh subprocess — only exported vars flow through.
+# These are re-exported after constitution reads update them (see below).
+export AGENT_NAME AGENT_ROLE TASK_CR_NAME NAMESPACE SWARM_REF
+
 log() { 
   local gen_suffix=""
   [ -n "${MY_GENERATION:-}" ] && gen_suffix="/gen-${MY_GENERATION}"
@@ -115,6 +120,10 @@ fi
 if [[ "$CLUSTER" == "agentex" ]]; then
   log "WARNING: Using default cluster name — new god should set 'clusterName' in constitution"
 fi
+
+# Issue #1218: Re-export constitution-derived variables for helpers.sh accessibility.
+# These must be exported AFTER constitution reads so helpers.sh gets the final values.
+export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT
 
 ts() { date +%s; }
 
@@ -435,6 +444,9 @@ else
   log "WARNING: /agent/identity.sh not found, identity system disabled"
   AGENT_DISPLAY_NAME="$AGENT_NAME"
 fi
+
+# Issue #1218: Export AGENT_DISPLAY_NAME so helpers.sh can access it from OpenCode bash subprocesses.
+export AGENT_DISPLAY_NAME
 
 # ── 2. Helper functions ───────────────────────────────────────────────────────
 # get_my_generation() - Read agent's generation from Agent CR label
@@ -2970,9 +2982,15 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   
   The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
 
-⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)
+ ⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)
   Generation 2 requires deliberation, not just voting. Before filing your report,
   you MUST attempt to engage in debate.
+
+  **IMPORTANT (issue #1218):** Helper functions like post_debate_response() are NOT
+  available directly in OpenCode bash commands — they run in fresh subprocesses.
+  To use them, source the helpers script first:
+    source /agent/helpers.sh && post_debate_response "thought-<name>" "..." "agree" 8
+  OR use the equivalent raw kubectl apply + aws s3 cp sequence.
 
   # Step 1: Read recent peer thoughts with debatable claims
   kubectl get configmaps -n agentex -l agentex/thought -o json | \
@@ -3016,12 +3034,14 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
     aws s3 cp - "s3://${S3_BUCKET}/debates/${THREAD_ID}.json" --content-type application/json 2>/dev/null && \
     echo "Debate outcome recorded to S3: ${THREAD_ID}" || echo "WARNING: S3 write failed"
 
+  # ALTERNATIVE: If /agent/helpers.sh is available (issue #1218), you can use the wrapper:
+  #   source /agent/helpers.sh && post_debate_response "thought-<agent>-<timestamp>" "..." "disagree" 8
+  # The wrapper handles both the kubectl apply and S3 write in one call.
+
   **Why both steps are required for synthesis:**
   - kubectl apply: creates the Thought CR visible to peers in-cluster
   - S3 write: persists the debate outcome so query_debate_outcomes returns data
   - Without the S3 write, query_debate_outcomes() always returns [] and civilization amnesia prevention fails
-  - NOTE: post_debate_response() shell function handles both steps, but is NOT available in OpenCode
-    bash tool context. Use the two-step approach above instead.
 
   **Why this is REQUIRED:**
   - Constitution: "disagree=0 — ZERO genuine debates. This is the core failure."
