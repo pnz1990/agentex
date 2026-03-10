@@ -160,8 +160,9 @@ ensure_state_fields_initialized() {
       -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
   fi
 
-  # visionQueue: comma-separated issue numbers proposed by agents via governance vote (issue #1219)
-  # Planners read this BEFORE taskQueue to honor collectively-decided priorities.
+  # visionQueue: comma-separated issue numbers collectively approved by governance (issue #1219)
+  # Planners read visionQueue BEFORE taskQueue, enabling agent-directed priorities to override
+  # the standard backlog. Issues are added when 3+ agents vote #proposal-v03-vision-queue addIssue=N
   vision_queue_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.visionQueue}' 2>/dev/null)
   if [ -z "$vision_queue_val" ]; then
     [ "$silent" = "false" ] && echo "  Initializing visionQueue (was empty/null)"
@@ -834,7 +835,47 @@ tally_and_enact_votes() {
                 done <<< "$kv_pairs"
                 patch_data="${patch_data}}"
 
+                # Issue #1219: Handle visionQueue governance — add issue to coordinator-state.visionQueue
+                # When agents vote #proposal-v03-vision-queue addIssue=N and consensus is reached,
+                # append issue N to visionQueue so planners can read it before the standard taskQueue.
+                if [ "$topic" = "v03-vision-queue" ]; then
+                    local add_issue=""
+                    while IFS= read -r kv; do
+                        [ -z "$kv" ] && continue
+                        local kkey="${kv%%=*}"
+                        local kval="${kv##*=}"
+                        if [ "$kkey" = "addIssue" ] && [[ "$kval" =~ ^[0-9]+$ ]]; then
+                            add_issue="$kval"
+                        fi
+                    done <<< "$kv_pairs"
+
+                    if [ -n "$add_issue" ]; then
+                        local current_vision_queue
+                        current_vision_queue=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+                            -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+
+                        # Only add if not already present
+                        if ! echo "$current_vision_queue" | tr ',' '\n' | grep -qx "$add_issue"; then
+                            local new_vision_queue
+                            if [ -z "$current_vision_queue" ]; then
+                                new_vision_queue="$add_issue"
+                            else
+                                new_vision_queue="${current_vision_queue},${add_issue}"
+                            fi
+                            update_state "visionQueue" "$new_vision_queue"
+                            echo "[$(date -u +%H:%M:%S)] ✓ visionQueue updated: added issue #$add_issue (new queue: $new_vision_queue)"
+                            push_metric "VisionQueueAdded" 1 "Count" "Issue=${add_issue}"
+                            patched=true
+                        else
+                            echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already present, skipping"
+                            patched=true  # Still consider enacted to prevent re-processing
+                        fi
+                    fi
+                fi
+
                 if [ "$patched" = true ]; then
+                    # Only patch constitution if we have actual constitution keys (not just visionQueue)
+                    if [ "$first" = false ]; then
                     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
                     kubectl_with_timeout 10 patch configmap agentex-constitution -n "$NAMESPACE" \
                         --type=merge \
@@ -856,41 +897,6 @@ tally_and_enact_votes() {
                     # ISSUE #893: Sync constitution.yaml in git after enacting governance decision
                     # This prevents git repo from drifting out of sync with cluster ConfigMap
                     sync_constitution_to_git "$kv_pairs" "$topic" "$approve_votes"
-                fi
-            fi
-
-            # Issue #1219: Handle v03-vision-queue proposals — add issue to visionQueue
-            # Proposal format: #proposal-v03-vision-queue addIssue=<N> reason=<why>
-            # When 3+ agents approve, the issue number is appended to coordinator-state.visionQueue
-            if [ "$topic" = "v03-vision-queue" ] && [ -n "$kv_pairs" ]; then
-                local add_issue=""
-                while IFS= read -r kv; do
-                    [ -z "$kv" ] && continue
-                    local key="${kv%%=*}"
-                    local value="${kv##*=}"
-                    if [ "$key" = "addIssue" ] && [[ "$value" =~ ^[0-9]+$ ]]; then
-                        add_issue="$value"
-                        break
-                    fi
-                done <<< "$kv_pairs"
-
-                if [ -n "$add_issue" ]; then
-                    local current_vision_queue
-                    current_vision_queue=$(get_state "visionQueue")
-                    # Check if already in visionQueue to avoid duplicates
-                    if echo "$current_vision_queue" | tr ',' '\n' | grep -q "^${add_issue}$"; then
-                        echo "[$(date -u +%H:%M:%S)] visionQueue: issue #$add_issue already in queue, skipping"
-                    else
-                        local new_vision_queue
-                        if [ -z "$current_vision_queue" ]; then
-                            new_vision_queue="$add_issue"
-                        else
-                            new_vision_queue="${current_vision_queue},${add_issue}"
-                        fi
-                        update_state "visionQueue" "$new_vision_queue"
-                        patched=true
-                        echo "[$(date -u +%H:%M:%S)] ✓ visionQueue: added issue #$add_issue (queue now: $new_vision_queue)"
-                        push_metric "VisionQueueUpdated" 1 "Count" "IssueNumber=${add_issue}"
                     fi
                 fi
             fi
@@ -909,7 +915,16 @@ tally_and_enact_votes() {
 
             # Post verdict Thought CR
             local verdict_text
-            if [ "$patched" = true ]; then
+            if [ "$topic" = "v03-vision-queue" ] && [ "$patched" = true ]; then
+                local current_vq
+                current_vq=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
+                    -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+                verdict_text="VISION QUEUE UPDATED: $topic
+Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
+Changes: $kv_pairs
+visionQueue is now: $current_vq
+Planners will prioritize these issues above the standard taskQueue."
+            elif [ "$patched" = true ]; then
                 verdict_text="CONSENSUS ENACTED: $topic
 Votes: ${approve_votes} approve, ${reject_votes} reject, ${abstain_votes} abstain (threshold: ${VOTE_THRESHOLD})
 Changes: $kv_pairs

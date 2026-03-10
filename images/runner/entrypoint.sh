@@ -1311,28 +1311,32 @@ claim_task() {
 # Uses claim_task() for atomic assignment to prevent duplicate work (issue #859).
 # Supports specialization-aware routing (issue #1098): if agent has a specialization,
 # prefer issues whose labels match. Falls back to queue order if no match.
+# Issue #1219: Reads visionQueue BEFORE taskQueue — collectively-approved issues take
+# priority over the standard backlog, enabling agent-directed goal-setting.
 request_coordinator_task() {
   local max_retries=3
   local retry=0
 
   while [ $retry -lt $max_retries ]; do
-    local queue
-    # Issue #1219: Read visionQueue BEFORE taskQueue — collectively-voted priorities take precedence.
-    # If visionQueue has entries (proposed and approved via governance votes), planners work on
-    # those issues first, enabling the civilization to set its own goals.
+    # Issue #1219: Read visionQueue first — issues voted in by agents take priority
     local vision_queue
     vision_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
       -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
-    queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-      -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
 
-    # Prepend visionQueue to taskQueue so vision-prioritized issues are picked first
-    if [ -n "$vision_queue" ] && [ -n "$queue" ]; then
-      queue="${vision_queue},${queue}"
-      log "Coordinator: visionQueue merged before taskQueue (vision: $vision_queue)"
-    elif [ -n "$vision_queue" ]; then
-      queue="$vision_queue"
-      log "Coordinator: only visionQueue has items (vision: $vision_queue)"
+    local queue
+    if [ -n "$vision_queue" ]; then
+      # Prepend visionQueue items to the standard taskQueue
+      local task_queue
+      task_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+      # Deduplicate: vision items first, then non-duplicated task items
+      local combined_items
+      combined_items=$(printf "%s,%s" "$vision_queue" "$task_queue" | tr ',' '\n' | awk '!seen[$0]++' | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
+      queue="$combined_items"
+      log "Coordinator: visionQueue active ($vision_queue) — using priority order: $queue"
+    else
+      queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
     fi
 
     if [ -z "$queue" ]; then
@@ -1389,12 +1393,15 @@ request_coordinator_task() {
       # Remove this issue from queue since it's taken, and try the next one
       # Use grep -v || true to handle the case where the issue is the only item in the queue
       # (grep -v returns exit code 1 when no lines match, which triggers set -euo pipefail)
-      local new_queue
-      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
-      new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
+      local new_task_queue
+      local current_task_queue
+      current_task_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+      new_task_queue=$(echo "$current_task_queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+      new_task_queue=$(echo "$new_task_queue" | tr '\n' ',' | sed 's/,$//')
       kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
         --type=merge \
-        -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+        -p "{\"data\":{\"taskQueue\":\"${new_task_queue}\"}}" 2>/dev/null || true
       retry=$((retry + 1))
       continue
     fi
@@ -1409,26 +1416,43 @@ request_coordinator_task() {
       log "Coordinator: issue #$claimed_issue is $issue_state — releasing claim and removing from queue"
       # Release the claim atomically
       release_coordinator_task "$claimed_issue"
-      # Remove from queue to prevent future agents from wasting time on it
-      local new_queue
-      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
-      new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
+      # Remove from taskQueue to prevent future agents from wasting time on it
+      local new_task_queue
+      local current_task_queue
+      current_task_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+        -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+      new_task_queue=$(echo "$current_task_queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+      new_task_queue=$(echo "$new_task_queue" | tr '\n' ',' | sed 's/,$//')
       kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
         --type=merge \
-        -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+        -p "{\"data\":{\"taskQueue\":\"${new_task_queue}\"}}" 2>/dev/null || true
+      # Issue #1219: Also remove from visionQueue if present (closed issues should not stay there)
+      if [ -n "$vision_queue" ]; then
+        local new_vision_queue
+        new_vision_queue=$(echo "$vision_queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+        new_vision_queue=$(echo "$new_vision_queue" | tr '\n' ',' | sed 's/,$//')
+        kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+          --type=merge \
+          -p "{\"data\":{\"visionQueue\":\"${new_vision_queue}\"}}" 2>/dev/null || true
+      fi
       retry=$((retry + 1))
       continue
     fi
 
-    # Remove claimed issue from the queue
+    # Remove claimed issue from the taskQueue only
+    # Note: visionQueue is NOT modified here — vision-approved issues remain in visionQueue
+    # for future reference and to re-prioritize the same issue if it reopens.
     # Use grep -v || true: when queue has only this issue, grep -v returns exit code 1 (no matches),
     # which would crash the script under set -euo pipefail (issue #979)
-    local new_queue
-    new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
-    new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
+    local current_task_queue
+    current_task_queue=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.taskQueue}' 2>/dev/null || echo "")
+    local new_task_queue
+    new_task_queue=$(echo "$current_task_queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+    new_task_queue=$(echo "$new_task_queue" | tr '\n' ',' | sed 's/,$//')
     kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
       --type=merge \
-      -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+      -p "{\"data\":{\"taskQueue\":\"${new_task_queue}\"}}" 2>/dev/null || true
 
     log "Coordinator: claimed issue #$claimed_issue from queue"
     push_metric "CoordinatorTaskClaimed" 1
@@ -3006,6 +3030,7 @@ The coordinator is the civilization's persistent brain. It assigns tasks,
 tracks who is working on what, and tallies votes.
 
   Read queue:        kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
+  Read vision queue: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
   Read assignments:  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
   Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
   Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
