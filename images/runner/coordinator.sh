@@ -94,8 +94,21 @@ echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 if [ -n "${GITHUB_TOKEN_FILE:-}" ] && [ -f "$GITHUB_TOKEN_FILE" ]; then
   export GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
   echo "GitHub token loaded from read-only file mount"
+  # Authenticate gh CLI with the token (issue #coordinator-gh-auth)
+  # gh auth status checks fail even with GITHUB_TOKEN exported - need explicit login
+  if command -v gh &>/dev/null; then
+    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null && \
+      echo "gh CLI authenticated successfully" || \
+      echo "WARNING: gh auth login failed - gh commands may not work"
+  fi
 elif [ -n "${GITHUB_TOKEN:-}" ]; then
   echo "GitHub token loaded from environment variable (legacy)"
+  # Authenticate gh CLI with the token
+  if command -v gh &>/dev/null; then
+    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null && \
+      echo "gh CLI authenticated successfully" || \
+      echo "WARNING: gh auth login failed - gh commands may not work"
+  fi
 else
   echo "WARNING: No GitHub token available - gh CLI commands will fail"
 fi
