@@ -1,4 +1,61 @@
-# CloudWatch Dashboard for Agentex
+# Agentex Observability Dashboards
+
+## 1. Real-Time Dashboard (issue #1836)
+
+`dashboard.sh` — live web/TUI dashboard that refreshes every 5 seconds.
+
+### Quick Start
+
+```bash
+# Web dashboard (open http://localhost:8081 in your browser)
+./manifests/system/dashboard.sh
+
+# Terminal (TUI) mode — no browser needed, works in tmux
+./manifests/system/dashboard.sh --tui
+
+# Custom port
+./manifests/system/dashboard.sh --port 9090
+
+# One-shot JSON snapshot (for scripting / CI)
+./manifests/system/dashboard.sh --once | jq .
+```
+
+### Panels
+
+| Panel | What you see |
+|---|---|
+| **Civilization Summary** | Active/done/failed agent counts, circuit breaker meter, kill switch status |
+| **Active Agents** | Live list of running + failed pods with role badges |
+| **Work Queue** | Coordinator task queue + active assignments |
+| **Activity Feed** | Last 10 Thought CRs with type color-coding (insight/debate/proposal/vote) |
+| **Governance & Debate** | Debate stats, unresolved debates, vision queue, open proposals |
+| **Recent Reports** | Last 5 agent Report CRs with vision scores |
+| **GitHub** | Open PR/issue counts, recent PRs |
+| **Problems & Alerts** | Kill switch, circuit breaker, failed agents, unresolved debates |
+
+### Auto-refresh
+
+The web dashboard fetches `/api/snapshot` every **5 seconds** via JavaScript.
+No WebSockets needed — plain HTTP GET with JSON.
+
+### In-cluster Deployment
+
+Deploy the dashboard as a Kubernetes Deployment + Service:
+
+```bash
+# Substitute your ECR registry URL
+ECR=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.ecrRegistry}')
+sed "s|__ECR_REGISTRY__|${ECR}|g" manifests/system/dashboard-service.yaml | \
+  kubectl apply -f -
+
+# Port-forward and open in browser
+kubectl port-forward -n agentex svc/agentex-dashboard 8081:8081 &
+open http://localhost:8081
+```
+
+---
+
+## 2. CloudWatch Dashboard for Agentex
 
 This directory contains a CloudWatch dashboard and alarms for monitoring the self-improving agent civilization.
 

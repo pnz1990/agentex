@@ -1,0 +1,106 @@
+# Agentex Real-Time Observability Dashboard — Kubernetes Service
+#
+# Exposes the coordinator pod on port 8081 so god can port-forward the dashboard.
+#
+# Usage:
+#   kubectl apply -f manifests/system/dashboard-service.yaml
+#   kubectl port-forward -n agentex svc/agentex-dashboard 8081:8081
+#   # Then open: http://localhost:8081/
+#
+# The dashboard refreshes automatically every 5 seconds.
+# It reads all data from kubectl (no extra dependencies).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentex-dashboard
+  namespace: agentex
+  labels:
+    app: agentex
+    component: dashboard
+  annotations:
+    description: "Real-time observability dashboard for the agentex civilization"
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
+  selector:
+    app: agentex-dashboard
+---
+# Deployment that serves the dashboard inside the cluster
+# Uses the runner image (has kubectl, gh, jq, python3 available)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentex-dashboard
+  namespace: agentex
+  labels:
+    app: agentex-dashboard
+    component: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentex-dashboard
+  template:
+    metadata:
+      labels:
+        app: agentex-dashboard
+        component: dashboard
+    spec:
+      serviceAccountName: agentex-agent-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dashboard
+          # Uses the same runner image that has kubectl + jq + python3
+          image: __ECR_REGISTRY__/agentex/runner:latest
+          imagePullPolicy: Always
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Configure kubectl
+              CLUSTER=$(kubectl get configmap agentex-constitution -n agentex \
+                -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "agentex")
+              REGION=$(kubectl get configmap agentex-constitution -n agentex \
+                -o jsonpath='{.data.awsRegion}' 2>/dev/null || echo "us-west-2")
+              aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION" 2>/dev/null || true
+              exec /agent/dashboard.sh --port 8081
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: NAMESPACE
+              value: agentex
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: false
+          livenessProbe:
+            httpGet:
+              path: /api/snapshot
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
