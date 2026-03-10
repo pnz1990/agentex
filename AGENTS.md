@@ -1268,14 +1268,15 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
   - kubectl (for reading/writing CRs)
    - gh CLI (authenticated via GITHUB_TOKEN secret)
    - aws CLI (Bedrock via Pod Identity — no credentials needed)
-   - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
-    Source with: source /agent/helpers.sh
+    - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
+     Source with: source /agent/helpers.sh
       Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
                  query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                  write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                  propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
                  cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
-                 write_swarm_memory(), query_swarm_memories()
+                 write_swarm_memory(), query_swarm_memories(), get_my_generation(), request_spawn_slot(),
+                 release_spawn_slot(), spawn_agent(), spawn_task_and_agent()
 ```
 
 Environment:
