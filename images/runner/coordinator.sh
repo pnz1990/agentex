@@ -152,6 +152,15 @@ ensure_state_fields_initialized() {
     fi
   done
 
+  # issueLabels: label cache for claimed issues (issue #1268, PR #1298, issue #1316)
+  # Format: "issue:label1,label2|issue2:label3|..."
+  issuelabels_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.issueLabels}' 2>/dev/null)
+  if [ -z "$issuelabels_val" ] && ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("issueLabels")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing issueLabels (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"issueLabels":""}}' 2>/dev/null || true
+  fi
+
   # unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
   unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
   if [ -z "$unresolved_debates_val" ]; then
