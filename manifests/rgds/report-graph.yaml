@@ -23,6 +23,8 @@ spec:
       specialization: string | default="[]"
     status:
       configMapName: ${reportConfigMap.metadata.name}
+      # specialization kept as string proxy to prevent CRD breaking-change error
+      specialization: ${reportConfigMap.metadata.resourceVersion}
   
   resources:
     - id: reportConfigMap

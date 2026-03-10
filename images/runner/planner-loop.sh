@@ -116,15 +116,132 @@ spec:
   model: ${model}
 EOF
     
-    if [ $? -eq 0 ]; then
-        echo "[$(date -u +%H:%M:%S)] Planner Job spawned successfully: $name"
-        push_metric "PlannerSpawned" 1 "Count"
-        return 0
-    else
-        echo "[$(date -u +%H:%M:%S)] ERROR: Failed to spawn planner Job: $name"
+    if [ $? -ne 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] ERROR: Failed to create Agent CR for $name"
         push_metric "PlannerSpawnFailed" 1 "Count"
         return 1
     fi
+
+    # KRO FALLBACK (issue #714): If kro is down, Agent CR exists but no Job is created.
+    # Wait 15s for kro to create the Job. If it doesn't, create the Job directly.
+    echo "[$(date -u +%H:%M:%S)] Verifying kro creates Job for $name (15s grace period)..."
+    local job_created=false
+    for i in $(seq 1 15); do
+        local job_name
+        job_name=$(kubectl_with_timeout 5 get agent.kro.run "$name" -n "$NAMESPACE" \
+            -o jsonpath='{.status.jobName}' 2>/dev/null || echo "")
+        if [ -n "$job_name" ]; then
+            echo "[$(date -u +%H:%M:%S)] kro created Job $job_name ✓"
+            job_created=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$job_created" = "false" ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: kro did not create Job for $name after 15s. Creating Job directly (kro fallback)."
+        local fallback_registry
+        fallback_registry=$(kubectl_with_timeout 10 get configmap "$CONSTITUTION_CM" -n "$NAMESPACE" \
+            -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
+        local repo
+        repo=$(kubectl_with_timeout 10 get configmap "$CONSTITUTION_CM" -n "$NAMESPACE" \
+            -o jsonpath='{.data.githubRepo}' 2>/dev/null || echo "pnz1990/agentex")
+        local cluster_name
+        cluster_name=$(kubectl_with_timeout 10 get configmap "$CONSTITUTION_CM" -n "$NAMESPACE" \
+            -o jsonpath='{.data.clusterName}' 2>/dev/null || echo "agentex")
+        kubectl_with_timeout 10 apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-${name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/agent: ${name}
+    agentex/role: planner
+    agentex/generation: "${generation}"
+    kro.run/instance: ${name}
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 180
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        agentex/agent: ${name}
+        agentex/role: planner
+    spec:
+      serviceAccountName: agentex-agent-sa
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ${fallback_registry}/agentex/runner:latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AGENT_NAME
+              value: ${name}
+            - name: AGENT_ROLE
+              value: planner
+            - name: TASK_CR_NAME
+              value: task-${name}
+            - name: BEDROCK_MODEL
+              value: ${model}
+            - name: BEDROCK_REGION
+              value: ${BEDROCK_REGION}
+            - name: REPO
+              value: ${repo}
+            - name: CLUSTER
+              value: ${cluster_name}
+            - name: NAMESPACE
+              value: ${NAMESPACE}
+            - name: GITHUB_TOKEN_FILE
+              value: "/var/secrets/github/token"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: github-token
+              mountPath: /var/secrets/github
+              readOnly: true
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: github-token
+          secret:
+            secretName: agentex-github-token
+            defaultMode: 0400
+EOF
+        if [ $? -eq 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] Fallback Job created for $name ✓"
+            push_metric "PlannerFallbackJobCreated" 1 "Count"
+        else
+            echo "[$(date -u +%H:%M:%S)] ERROR: Fallback Job creation also failed for $name"
+            push_metric "PlannerSpawnFailed" 1 "Count"
+            return 1
+        fi
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Planner Job spawned successfully: $name"
+    push_metric "PlannerSpawned" 1 "Count"
+    return 0
 }
 
 # ── Main Loop ────────────────────────────────────────────────────────────────
