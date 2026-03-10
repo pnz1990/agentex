@@ -32,7 +32,7 @@ HEARTBEAT_INTERVAL=30  # seconds
 VOTE_THRESHOLD=3        # minimum approve votes to enact a decision
 BEDROCK_REGION="${BEDROCK_REGION:-us-west-2}"  # For CloudWatch metrics
 IDENTITY_BUCKET="${S3_BUCKET:-agentex-thoughts}"  # S3 bucket for agent identities (issue #1113)
-SPECIALIZATION_ROUTING_THRESHOLD=5  # min score to trigger specialization-based routing (issue #1113)
+SPECIALIZATION_ROUTING_THRESHOLD=3  # min score to trigger specialization-based routing (issue #1113, lowered from 5 per issue #1145)
 
 # Read GitHub repo from constitution for portability (issue #819, #1006)
 # This must be set early — before kubectl is configured — because it is used
@@ -1110,7 +1110,7 @@ The civilization needs mediators, not just voters." \
 #   - keyword_matches: count of title/body keywords matching agent's specializationDetail.codeAreas
 #
 # Routing decision:
-#   - score > SPECIALIZATION_ROUTING_THRESHOLD (5): route to specialized agent
+#   - score > SPECIALIZATION_ROUTING_THRESHOLD (3): route to specialized agent
 #   - score <= threshold: fall back to normal assignment
 #
 # Metrics tracked:
@@ -1409,6 +1409,64 @@ route_tasks_by_specialization() {
         push_metric "SpecializedRoutingCycle" "$specialized_count" "Count" "Component=Coordinator"
         push_metric "GenericRoutingCycle" "$generic_count" "Count" "Component=Coordinator"
         echo "[$(date -u +%H:%M:%S)] Routing cycle complete: specialized=$specialized_count generic=$generic_count total_specialized_all_time=$new_specialized"
+    fi
+
+    # ── v0.2 Milestone Validation (issue #1145) ──────────────────────────────
+    # If specializedAssignments is still 0 after routing has been attempted,
+    # diagnose WHY and post a blocker thought for visibility. This surfaces
+    # the v0.2 success criterion ("coordinator routes at least 1 task based on
+    # agent specialization") to god-observers.
+    local total_specialized
+    total_specialized=$(get_state "specializedAssignments")
+    [[ "$total_specialized" =~ ^[0-9]+$ ]] || total_specialized=0
+
+    if [ "$total_specialized" -eq 0 ]; then
+        # Diagnose root cause: check active agents for specialization data
+        local active_agents_list
+        active_agents_list=$(get_state "activeAgents")
+        local agents_with_spec=0
+        local agents_checked=0
+
+        IFS=',' read -ra agent_pairs <<< "$active_agents_list"
+        for pair in "${agent_pairs[@]}"; do
+            [ -z "$pair" ] && continue
+            local aname
+            aname=$(echo "$pair" | cut -d: -f1)
+            [ -z "$aname" ] && continue
+            agents_checked=$((agents_checked + 1))
+
+            local spec_data
+            spec_data=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${aname}.json" - \
+                --region "$BEDROCK_REGION" 2>/dev/null | \
+                jq -r 'if (.specializationLabelCounts | length) > 0 then "yes" else "" end' \
+                2>/dev/null || echo "")
+            if [ -n "$spec_data" ]; then
+                agents_with_spec=$((agents_with_spec + 1))
+            fi
+        done
+
+        local blocker_reason
+        if [ "$agents_checked" -eq 0 ]; then
+            blocker_reason="No active agents registered in coordinator. Routing cannot fire."
+        elif [ "$agents_with_spec" -eq 0 ]; then
+            blocker_reason="No active agent has specializationLabelCounts data. Workers must complete at least 1 labeled issue to build specialization. Current agents: $agents_checked checked, 0 with spec data."
+        else
+            blocker_reason="${agents_with_spec}/${agents_checked} active agents have specialization data but no routing match found yet. Issue labels may not match agent specialization labels, or score threshold ($SPECIALIZATION_ROUTING_THRESHOLD) not met."
+        fi
+
+        echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION: specializedAssignments=0 — $blocker_reason"
+        push_metric "V02RoutingBlocker" 1 "Count" "Component=Coordinator"
+        post_coordinator_thought \
+"v0.2 MILESTONE VALIDATION (issue #1145): specializedAssignments=0 after routing cycle.
+Blocker: $blocker_reason
+Threshold: SPECIALIZATION_ROUTING_THRESHOLD=$SPECIALIZATION_ROUTING_THRESHOLD (1 label match = score 3, triggers routing)
+Active agents: $agents_checked checked, $agents_with_spec with specialization data
+To unblock: Workers must complete labeled GitHub issues so update_specialization() builds their history.
+v0.2 criterion: coordinator routes at least 1 task based on agent specialization." \
+            "insight"
+    else
+        echo "[$(date -u +%H:%M:%S)] v0.2 VALIDATION PASSED: specializedAssignments=$total_specialized (routing has fired)"
+        push_metric "V02RoutingSuccess" "$total_specialized" "Count" "Component=Coordinator"
     fi
 }
 
