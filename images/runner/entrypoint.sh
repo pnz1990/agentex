@@ -1551,7 +1551,26 @@ request_coordinator_task() {
     if [[ "$vq_feature" =~ ^[0-9]+$ ]]; then
       # Feature is a GitHub issue number — claim it with priority
        log "Coordinator: vision-queue priority item is GitHub issue #$vq_feature"
-       if claim_task "$vq_feature" 2>/dev/null; then
+
+       # Issue #1362: Validate the issue is still OPEN before claiming
+       # (mirrors the closed-issue check in the regular queue path at issue #1015)
+       local vq_issue_state
+       vq_issue_state=$(gh issue view "$vq_feature" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+       if [ "$vq_issue_state" != "OPEN" ]; then
+         log "Coordinator: vision-queue issue #$vq_feature is $vq_issue_state — removing from visionQueue"
+         # Remove this closed item from visionQueue to prevent future agents from hitting it
+         local remaining_vq_closed
+         if echo "$vision_queue" | grep -q ";"; then
+           remaining_vq_closed=$(echo "$vision_queue" | sed 's/^[^;]*;//')
+         else
+           remaining_vq_closed=""
+         fi
+         kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+           --type=merge \
+           -p "{\"data\":{\"visionQueue\":\"${remaining_vq_closed}\"}}" 2>/dev/null || true
+         log "Coordinator: removed closed issue #$vq_feature from visionQueue — falling through to task queue"
+         # Fall through to regular task queue
+       elif claim_task "$vq_feature" 2>/dev/null; then
          # Remove from vision queue — handle single-item case (no semicolon)
          local remaining_vq
          if echo "$vision_queue" | grep -q ";"; then
