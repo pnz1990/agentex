@@ -1555,9 +1555,6 @@ request_coordinator_task() {
   local max_retries=3
   local retry=0
 
-  # TEMP DEBUG: trace every command to find silent crash (remove after diagnosis)
-  set -x
-
   # ── SPECIALIZATION PRE-ASSIGNMENT CHECK (issue #1474 + #1546) ────────────
   # The coordinator pre-claims issues on behalf of specialized workers via
   # route_tasks_by_specialization(). Check if coordinator has already written
@@ -1571,7 +1568,7 @@ request_coordinator_task() {
     -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
   if [ -n "$pre_assignments" ]; then
     local pre_issue
-    pre_issue=$(echo "$pre_assignments" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 | tr -d ' ')
+    pre_issue=$(echo "$pre_assignments" | tr ',' '\n' | grep "^${AGENT_NAME}:" | cut -d: -f2 | head -1 | tr -d ' ' || true)
     if [ -n "$pre_issue" ] && [ "$pre_issue" != "0" ]; then
       log "Coordinator: found pre-assignment for $AGENT_NAME — issue #$pre_issue (specialization routing)"
       # Persist to temp file for end-of-session specialization tracking (issue #1252)
@@ -1801,7 +1798,6 @@ request_coordinator_task() {
 
   log "WARNING: Failed to claim task from coordinator after $max_retries retries"
   COORDINATOR_ISSUE=0
-  set +x  # TEMP DEBUG: stop trace
   return 0
 }
 
