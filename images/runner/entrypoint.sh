@@ -1555,6 +1555,9 @@ request_coordinator_task() {
   local max_retries=3
   local retry=0
 
+  # TEMP DEBUG: trace every command to find silent crash (remove after diagnosis)
+  set -x
+
   # ── SPECIALIZATION PRE-ASSIGNMENT CHECK (issue #1474 + #1546) ────────────
   # The coordinator pre-claims issues on behalf of specialized workers via
   # route_tasks_by_specialization(). Check if coordinator has already written
@@ -1798,6 +1801,7 @@ request_coordinator_task() {
 
   log "WARNING: Failed to claim task from coordinator after $max_retries retries"
   COORDINATOR_ISSUE=0
+  set +x  # TEMP DEBUG: stop trace
   return 0
 }
 
