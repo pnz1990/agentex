@@ -203,7 +203,22 @@ handle_fatal_error() {
       fi
       
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Spawn slot granted. Attempting emergency spawn..." >&2
-      local next_agent="${AGENT_ROLE}-$(date +%s)"
+
+      # Issue #1013: Apply single-planner constraint in emergency spawn path.
+      # PR #949 fixed this in the regular exit path but missed the ERR trap.
+      # If this agent is a planner and another planner is already active, spawn a worker instead.
+      local emergency_role="${AGENT_ROLE}"
+      if [ "${AGENT_ROLE}" = "planner" ]; then
+        local active_planners
+        active_planners=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+          jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0) | select(.metadata.name | test("planner"))] | length' 2>/dev/null || echo "0")
+        if [ "$active_planners" -gt 0 ]; then
+          echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME}] Single-planner constraint: $active_planners planner(s) already active. Emergency spawn will be worker instead." >&2
+          emergency_role="worker"
+        fi
+      fi
+
+      local next_agent="${emergency_role}-$(date +%s)"
       local next_task="task-emergency-$(date +%s)"
       
       # Calculate next generation (issue #431: was hardcoded to "1")
@@ -223,7 +238,7 @@ metadata:
 spec:
   title: "Emergency continuation after ${AGENT_NAME} fatal error"
   description: "Previous agent died at line $line_num with exit code $exit_code. Continue platform improvement."
-  role: ${AGENT_ROLE}
+  role: ${emergency_role}
   effort: M
   priority: 10
 EOF
@@ -239,7 +254,7 @@ metadata:
     agentex/emergency-spawn: "true"
     agentex/generation: "${next_generation}"
 spec:
-  role: ${AGENT_ROLE}
+  role: ${emergency_role}
   taskRef: $next_task
   model: ${BEDROCK_MODEL}
 EOF
