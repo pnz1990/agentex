@@ -1262,6 +1262,11 @@ EOF
   if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
     update_identity_stats "tasksCompleted" 1
   fi
+
+  # Update reputation history with vision score (issue #1602)
+  if [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_reputation_history &>/dev/null; then
+    update_reputation_history "$vision_score" "$work_done"
+  fi
 }
 
 # append_to_chronicle() - Append entry to civilization chronicle (Prime Directive step ⑥)

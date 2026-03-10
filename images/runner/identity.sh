@@ -194,6 +194,8 @@ save_identity() {
   local spec_code_areas="{}"
   local spec_debates_won=0
   local spec_synthesis_count=0
+  local reputation_history="[]"
+  local reputation_average=0
   
   if [[ -n "$existing_json" ]]; then
     tasks_completed=$(echo "$existing_json" | jq -r '.stats.tasksCompleted // 0')
@@ -204,6 +206,8 @@ save_identity() {
     spec_code_areas=$(echo "$existing_json" | jq -c '.specializationDetail.codeAreas // {}')
     spec_debates_won=$(echo "$existing_json" | jq -r '.specializationDetail.debatesWon // 0')
     spec_synthesis_count=$(echo "$existing_json" | jq -r '.specializationDetail.synthesisCount // 0')
+    reputation_history=$(echo "$existing_json" | jq -c '.reputationHistory // []')
+    reputation_average=$(echo "$existing_json" | jq -r '.reputationAverage // 0')
   fi
   
   local specialization_value="${AGENT_SPECIALIZATION:-}"
@@ -228,7 +232,9 @@ save_identity() {
     "issuesFiled": $issues_filed,
     "prsMerged": $prs_merged,
     "thoughtsPosted": $thoughts_posted
-  }
+  },
+  "reputationHistory": $reputation_history,
+  "reputationAverage": $reputation_average
 }
 EOF
 )
@@ -271,9 +277,10 @@ save_identity_with_inheritance() {
   generation=$(timeout 10s kubectl get agent.kro.run "$AGENT_NAME" -n agentex \
     -o jsonpath='{.metadata.labels.agentex/generation}' 2>/dev/null || echo "0")
 
-  # Inherit accumulated specialization from prior agent
+  # Inherit accumulated specialization and reputation from prior agent
   local spec_label_counts spec_code_areas spec_debates_won spec_synthesis_count
   local tasks_completed issues_filed prs_merged thoughts_posted
+  local reputation_history reputation_average
 
   if [[ -n "$prior_json" ]]; then
     spec_label_counts=$(echo "$prior_json" | jq -c '.specializationLabelCounts // {}')
@@ -284,6 +291,8 @@ save_identity_with_inheritance() {
     issues_filed=$(echo "$prior_json" | jq -r '.stats.issuesFiled // 0')
     prs_merged=$(echo "$prior_json" | jq -r '.stats.prsMerged // 0')
     thoughts_posted=$(echo "$prior_json" | jq -r '.stats.thoughtsPosted // 0')
+    reputation_history=$(echo "$prior_json" | jq -c '.reputationHistory // []')
+    reputation_average=$(echo "$prior_json" | jq -r '.reputationAverage // 0')
   else
     spec_label_counts="{}"
     spec_code_areas="{}"
@@ -293,6 +302,8 @@ save_identity_with_inheritance() {
     issues_filed=0
     prs_merged=0
     thoughts_posted=0
+    reputation_history="[]"
+    reputation_average=0
   fi
 
   local specialization_value="${AGENT_SPECIALIZATION:-}"
@@ -318,7 +329,9 @@ save_identity_with_inheritance() {
     "issuesFiled": $issues_filed,
     "prsMerged": $prs_merged,
     "thoughtsPosted": $thoughts_posted
-  }
+  },
+  "reputationHistory": $reputation_history,
+  "reputationAverage": $reputation_average
 }
 EOF
 )
@@ -390,6 +403,79 @@ update_identity_stats() {
       echo "[identity] Updated canonical stat: $stat_name (canonical: $canonical_path)"
     else
       echo "[identity] WARNING: Could not update canonical stat (non-fatal)"
+    fi
+  fi
+}
+
+#######################################
+# Update reputation history in S3 identity file (issue #1602)
+# Appends a visionScore entry to reputationHistory (bounded to last 10 entries).
+# Also updates reputationAverage (rolling average of last 10 scores).
+# Called from post_report() in entrypoint.sh after filing the Report CR.
+# Arguments:
+#   $1 - vision_score (integer 1-10)
+#   $2 - work_summary (brief description, will be truncated to avoid JSON issues)
+#######################################
+update_reputation_history() {
+  local vision_score="${1:-0}"
+  local work_summary="${2:-}"
+
+  if [[ -z "$AGENT_IDENTITY_FILE" ]]; then
+    return 0
+  fi
+
+  # Sanitize work_summary: truncate to 120 chars and escape for JSON
+  work_summary="${work_summary:0:120}"
+  work_summary=$(echo "$work_summary" | tr -d '"\\' | tr '\n' ' ')
+
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Download current identity
+  local identity_json
+  identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
+
+  if [[ -z "$identity_json" ]]; then
+    echo "[identity] WARNING: Could not read identity for reputation update"
+    return 0
+  fi
+
+  # Append new entry, keep last 10, compute rolling average
+  local updated_json
+  updated_json=$(echo "$identity_json" | jq \
+    --argjson score "$vision_score" \
+    --arg ts "$timestamp" \
+    --arg summary "$work_summary" \
+    '
+    .reputationHistory = (
+      (.reputationHistory // []) + [{"timestamp": $ts, "visionScore": $score, "workSummary": $summary}]
+      | .[-10:]
+    ) |
+    .reputationAverage = (
+      [.reputationHistory[].visionScore] | add / length
+    )
+    ')
+
+  if [[ -z "$updated_json" ]] || ! echo "$updated_json" | jq -e . >/dev/null 2>&1; then
+    echo "[identity] WARNING: jq failed to update reputation history (non-fatal)"
+    return 0
+  fi
+
+  if echo "$updated_json" | aws s3 cp - "$AGENT_IDENTITY_FILE" 2>/dev/null; then
+    local avg
+    avg=$(echo "$updated_json" | jq -r '.reputationAverage // 0')
+    echo "[identity] Updated reputation history: visionScore=$vision_score avg=$avg"
+  else
+    echo "[identity] WARNING: Could not save reputation history to S3"
+  fi
+
+  # Also update canonical file so cross-generation inheritance picks up latest reputation
+  if [[ -n "${AGENT_DISPLAY_NAME:-}" ]]; then
+    local canonical_path="s3://${IDENTITY_BUCKET}/${IDENTITY_PREFIX}/canonical/${AGENT_DISPLAY_NAME}.json"
+    if echo "$updated_json" | aws s3 cp - "$canonical_path" 2>/dev/null; then
+      echo "[identity] Updated canonical reputation history (canonical: $canonical_path)"
+    else
+      echo "[identity] WARNING: Could not update canonical reputation history (non-fatal)"
     fi
   fi
 }
