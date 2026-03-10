@@ -1989,6 +1989,12 @@ push_metric() {
 # restart_coordinator_if_unhealthy() - Self-healing mechanism (issue #755)
 # Checks coordinator heartbeat age and restarts deployment if stale (> 5 min).
 # Enables civilization to recover from coordinator failures without human intervention.
+#
+# Issue #1559: Added cooldown guard (120s) to prevent concurrent planners from all
+# restarting the coordinator simultaneously, which causes:
+# - Cascading restarts (23+ OldReplicaSets observed)
+# - GitHub API rate limit exhaustion (auth retries × N planners)
+# - Coordinator thrashing that prevents stable recovery
 restart_coordinator_if_unhealthy() {
   local last_heartbeat
   last_heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
@@ -2013,8 +2019,35 @@ restart_coordinator_if_unhealthy() {
   # Threshold: 5 minutes (300 seconds)
   # Coordinator heartbeat interval is ~20-30 seconds, so 5min = definitely dead
   if [ "$age" -gt 300 ]; then
-    log "WARNING: Coordinator heartbeat is $age seconds old (threshold: 300s). Attempting restart..."
+    log "WARNING: Coordinator heartbeat is $age seconds old (threshold: 300s). Checking restart cooldown..."
     
+    # Cooldown guard (issue #1559): prevent concurrent planners from all restarting
+    # the coordinator simultaneously. Only one agent should restart per 120s window.
+    local last_restart last_restart_ts restart_age
+    last_restart=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.lastCoordinatorRestart}' 2>/dev/null || echo "")
+    
+    if [ -n "$last_restart" ]; then
+      last_restart_ts=$(date -d "$last_restart" +%s 2>/dev/null || echo "0")
+      if [ "$last_restart_ts" -gt 0 ]; then
+        restart_age=$((now - last_restart_ts))
+        if [ "$restart_age" -lt 120 ]; then
+          log "Coordinator restart cooldown active (last restart ${restart_age}s ago, cooldown 120s). Skipping restart."
+          return 0
+        fi
+      fi
+    fi
+    
+    # Record restart timestamp BEFORE restarting (atomic CAS-style: write intent then act)
+    # This prevents concurrent planners from both deciding to restart within the same window
+    local restart_ts
+    restart_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    if ! kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=merge -p "{\"data\":{\"lastCoordinatorRestart\":\"${restart_ts}\"}}" 2>/dev/null; then
+      log "WARNING: Could not record restart timestamp. Proceeding with restart anyway."
+    fi
+    
+    log "Attempting coordinator restart (heartbeat ${age}s stale)..."
     if kubectl_with_timeout 10 rollout restart deployment coordinator -n "$NAMESPACE" 2>&1; then
       log "✓ Coordinator deployment restart initiated"
       post_thought "Coordinator heartbeat stale (${age}s old, threshold 300s). Restarted coordinator deployment." "observation" 8
