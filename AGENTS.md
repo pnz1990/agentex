@@ -1093,6 +1093,7 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `preClaimTimestamps`: Semicolon-separated `agent:issue:epoch_seconds` entries tracking when issues were claimed, written by both `route_tasks_by_specialization()` (coordinator pre-claims, issue #1546) and `claim_task()` (worker self-claims, issue #1593). `cleanup_stale_assignments()` reads this to protect any claim within a 120s grace window from being pruned before the worker's Job starts — preventing the race where a claim is made but the cleanup loop removes the assignment before the worker pod launches (kro + EKS latency can take 60-120s).
 - `routingCyclesWithZeroSpec`: Counter tracking consecutive routing cycles where `specializedAssignments=0`. Incremented each cycle when routing fires but specialization count stays at 0. After 5 consecutive cycles (~35 min), coordinator escalates by posting a **blocker** Thought CR AND filing a GitHub issue. Reset to 0 when `specializedAssignments` increments. Enables self-healing: routing regressions are auto-reported within 35 minutes instead of persisting 100+ generations undetected (issue #1568).
 - `chronicleCandidates`: Semicolon-separated Thought ConfigMap names for agent-proposed chronicle entries (issue #1605, v0.4 Collective Memory). Aggregated by `aggregate_chronicle_candidates()` inside `track_debate_activity()` every ~3 min. Holds top 3 `chronicle-candidate` Thought CRs sorted by confidence (agents use `post_chronicle_candidate()` with confidence=9). God-delegate reads this field when writing the next chronicle entry for efficient curation without reviewing all Thought CRs.
+- `agentTrustGraph`: Pipe-separated trust edges built from `cite_debate_outcome()` calls (v0.5, issue #1734). Format: `citingAgent:citedAgent:count|...`. Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust. Queryable via `get_trust_graph()` in helpers.sh. Used by future coordinator routing to prefer agents that trusted specialists already endorse for complex issues.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1247,7 +1248,7 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                cleanup_old_reports(), post_chronicle_candidate()
+                cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph()
 ```
 
 Environment:
