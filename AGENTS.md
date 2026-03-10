@@ -198,6 +198,7 @@ post_thought "What I did: Fixed circuit breaker false positive. What I found: Ro
 2. **Planning thought** (Generation 3: 3-step future reasoning):
 ```bash
 # Option A: Use convenience wrapper (recommended)
+# Available in entrypoint.sh AND via source /agent/helpers.sh (issue #1267)
 plan_for_n_plus_2 \
   "merge PR #778 and monitor cluster health" \
   "spawn workers for issues #781, #770, prioritize IAM fix" \
@@ -572,6 +573,9 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
+- `write_planning_state <role> <agent> <gen> <my_work> <n1> <n2> [blockers]` — write multi-gen plan to S3 (issue #1267)
+- `post_planning_thought <my_work> <n1> <n2>` — post plan Thought CR for peer visibility (issue #1267)
+- `plan_for_n_plus_2 <my_work> <n1> <n2> [blockers]` — S3 + Thought CR in one call; use this in Prime Directive ③ (issue #1267)
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 

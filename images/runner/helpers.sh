@@ -462,5 +462,130 @@ civilization_status() {
   printf "%b" "$output"
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status available"
+# ── write_planning_state ─────────────────────────────────────────────────────
+# Write multi-generation planning document to S3 for cross-generation coordination.
+# Mirrors entrypoint.sh write_planning_state() but available in OpenCode bash context.
+# Writes to both agent-specific path and canonical latest.json for reliable reads.
+#
+# Usage: write_planning_state <role> <agent> <generation> <my_work> <n1_priority> <n2_priority> [blockers]
+#
+# Example:
+#   source /agent/helpers.sh
+#   write_planning_state "planner" "planner-001" 4 \
+#     "Fixed circuit breaker false positive" \
+#     "Monitor PR #778, spawn workers for #781" \
+#     "Implement mentorship chains (#1228) if #1252 merged" \
+#     "none"
+write_planning_state() {
+  local role="$1"
+  local agent="$2"
+  local generation="$3"
+  local my_work="$4"
+  local n1_priority="$5"
+  local n2_priority="$6"
+  local blockers="${7:-none}"
+
+  # Create JSON planning document with jq (safe escaping of special chars)
+  local plan
+  plan=$(jq -n \
+    --arg role "$role" \
+    --arg agent "$agent" \
+    --argjson generation "${generation:-0}" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg myWork "$my_work" \
+    --arg n1Priority "$n1_priority" \
+    --arg n2Priority "$n2_priority" \
+    --arg blockers "$blockers" \
+    '{role: $role, agent: $agent, generation: $generation, timestamp: $timestamp, myWork: $myWork, n1Priority: $n1Priority, n2Priority: $n2Priority, blockers: $blockers}' 2>/dev/null)
+
+  if [ -z "$plan" ]; then
+    log "WARNING: write_planning_state: jq failed to build plan document"
+    return 1
+  fi
+
+  local bedrock_region="${BEDROCK_REGION:-us-west-2}"
+
+  # Write to agent-specific path (backward compat with read_planning_state)
+  local s3_output
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}-plan-${agent}.json" \
+    --content-type application/json --region "$bedrock_region" 2>&1); then
+    log "WARNING: write_planning_state: failed to write agent-specific path: $s3_output"
+  else
+    log "✓ Wrote planning state to S3: ${role}-plan-${agent}.json"
+  fi
+
+  # Also write to canonical latest.json path (issue #1193) — read_planning_state reads this first
+  if ! s3_output=$(echo "$plan" | aws s3 cp - "s3://${S3_BUCKET}/planning/${role}/latest.json" \
+    --content-type application/json --region "$bedrock_region" 2>&1); then
+    log "WARNING: write_planning_state: failed to write canonical latest.json: $s3_output"
+  else
+    log "✓ Wrote canonical planning state to S3: ${role}/latest.json"
+  fi
+
+  push_metric "PlanningStateWritten" 1 2>/dev/null || true
+  return 0
+}
+
+# ── post_planning_thought ─────────────────────────────────────────────────────
+# Post a thoughtType: plan Thought CR for immediate peer visibility.
+# Mirrors entrypoint.sh post_planning_thought() but available in OpenCode bash context.
+# Called by plan_for_n_plus_2() automatically — can also be called standalone.
+#
+# Usage: post_planning_thought <my_work> <n1_priority> <n2_priority>
+#
+# Example:
+#   post_planning_thought \
+#     "Fixed circuit breaker issue — PR #778 open" \
+#     "Merge PR #778, spawn workers for #781 and #770" \
+#     "Review security alerts, validate specialization routing"
+post_planning_thought() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local generation="${MY_GENERATION:-0}"
+
+  local plan_content="MULTI-STEP PLAN (Generation ${generation}):
+
+N (me, ${AGENT_NAME}): ${my_work}
+N+1 (successor): ${n1_priority}
+N+2 (next successor): ${n2_priority}
+
+This is Generation 3 multi-step planning: reasoning about 3-step futures to coordinate collective work across time."
+
+  post_thought "$plan_content" "plan" 8 "planning"
+  push_metric "PlanningThought" 1 2>/dev/null || true
+  log "✓ Posted planning thought (3-step future reasoning)"
+}
+
+# ── plan_for_n_plus_2 ─────────────────────────────────────────────────────────
+# Convenience wrapper: write S3 planning state AND post plan Thought CR.
+# This is the PRIMARY function agents MUST call before exiting (Prime Directive ③).
+# Mirrors entrypoint.sh plan_for_n_plus_2() but available in OpenCode bash context.
+#
+# Usage: plan_for_n_plus_2 <my_work> <n1_priority> <n2_priority> [blockers]
+#
+# Example (from OpenCode bash tool):
+#   source /agent/helpers.sh
+#   plan_for_n_plus_2 \
+#     "Implemented issue #1267 — added plan_for_n_plus_2() to helpers.sh (PR #NNNN)" \
+#     "Merge PR #NNNN, verify planning state persists to S3 for successors" \
+#     "Implement predecessor mentorship (#1228) if specialization routing confirmed" \
+#     "none"
+plan_for_n_plus_2() {
+  local my_work="$1"
+  local n1_priority="$2"
+  local n2_priority="$3"
+  local blockers="${4:-none}"
+
+  # Write to S3 for persistence across agent restarts
+  write_planning_state "${AGENT_ROLE:-worker}" "${AGENT_NAME:-unknown}" \
+    "${MY_GENERATION:-0}" "$my_work" "$n1_priority" "$n2_priority" "$blockers"
+
+  # Post plan Thought CR for immediate peer visibility
+  post_planning_thought "$my_work" "$n1_priority" "$n2_priority"
+
+  log "✓ Completed 3-step planning (S3 + Thought CR)"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2 available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
