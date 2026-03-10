@@ -287,6 +287,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"lastTallyTimestamp":""}}' 2>/dev/null || true
   fi
 
+  # preClaimTimestamps (issues #1474/#1546): semicolon-separated "agent:issue:epoch_seconds" entries.
+  # route_tasks_by_specialization() writes here when pre-claiming issues on behalf of workers.
+  # cleanup_stale_assignments() uses these timestamps to enforce a 120s grace window —
+  # pre-claimed assignments survive even when the worker's Job hasn't started yet.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("preClaimTimestamps")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing preClaimTimestamps (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"preClaimTimestamps":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -678,6 +688,36 @@ cleanup_stale_assignments() {
         echo "$fetched"
     }
 
+    # Issue #1474/#1546: Load pre-claim timestamps to protect coordinator-created pre-claims
+    # from being pruned before the worker's Job starts. Format: "agent:issue:ts;..."
+    # route_tasks_by_specialization() writes here when pre-claiming on an agent's behalf.
+    local pre_claim_timestamps
+    pre_claim_timestamps=$(get_state "preClaimTimestamps" 2>/dev/null || echo "")
+    local now_epoch
+    now_epoch=$(date +%s)
+    # Grace window: 120 seconds — worker spawn latency can exceed 60s (kro + EKS node scaling).
+    local PRE_CLAIM_GRACE_WINDOW=120
+    # Extended TTL: drop any pre-claim timestamp entries older than 300s (5 min)
+    # to prevent stale entries from accumulating forever.
+    if [ -n "$pre_claim_timestamps" ]; then
+        local cleaned_ts=""
+        while IFS= read -r ts_entry; do
+            [ -z "$ts_entry" ] && continue
+            local ts_val
+            ts_val=$(echo "$ts_entry" | cut -d: -f3)
+            if [[ "$ts_val" =~ ^[0-9]+$ ]]; then
+                local age=$(( now_epoch - ts_val ))
+                if [ "$age" -lt 300 ]; then
+                    cleaned_ts="${cleaned_ts:+$cleaned_ts;}${ts_entry}"
+                fi
+            fi
+        done < <(echo "$pre_claim_timestamps" | tr ';' '\n')
+        if [ "$cleaned_ts" != "$pre_claim_timestamps" ]; then
+            update_state "preClaimTimestamps" "$cleaned_ts"
+            pre_claim_timestamps="$cleaned_ts"
+        fi
+    fi
+
     IFS=',' read -ra PAIRS <<< "$assignments"
     for pair in "${PAIRS[@]}"; do
         [ -z "$pair" ] && continue
@@ -722,6 +762,38 @@ cleanup_stale_assignments() {
                 && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
                 || cleaned_assignments="${clean_pair}"
         else
+            # Job is not active (Job doesn't exist or has completionTime set).
+            # Issue #1474/#1546: Before pruning, check if this is a coordinator pre-claim
+            # (from route_tasks_by_specialization) that is within the 120s grace window.
+            # Worker spawn latency can exceed 60s (kro + EKS node scaling), so the pre-claim
+            # might exist in activeAssignments before the worker's Job has started.
+            local pre_claim_entry="${agent_name}:${issue}"
+            local pre_claim_ts=""
+            if [ -n "$pre_claim_timestamps" ]; then
+                # Format: "agent:issue:epoch_seconds;..."
+                pre_claim_ts=$(echo "$pre_claim_timestamps" | tr ';' '\n' | \
+                    grep "^${pre_claim_entry}:" | tail -1 | cut -d: -f3 || echo "")
+            fi
+            if [ -n "$pre_claim_ts" ] && [[ "$pre_claim_ts" =~ ^[0-9]+$ ]]; then
+                local pre_age=$(( now_epoch - pre_claim_ts ))
+                if [ "$pre_age" -lt "$PRE_CLAIM_GRACE_WINDOW" ]; then
+                    # Recent pre-claim — keep it; worker hasn't started yet
+                    echo "[$(date -u +%H:%M:%S)] Pre-claim grace: $agent_name → issue #$issue (age=${pre_age}s < ${PRE_CLAIM_GRACE_WINDOW}s) — keeping"
+                    local clean_pair="${agent_name}:${issue}"
+                    [ -n "$cleaned_assignments" ] \
+                        && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                        || cleaned_assignments="${clean_pair}"
+                    continue
+                else
+                    echo "[$(date -u +%H:%M:%S)] Pre-claim expired: $agent_name → issue #$issue (age=${pre_age}s) — releasing"
+                    # Remove this expired timestamp entry from preClaimTimestamps
+                    local updated_ts
+                    updated_ts=$(echo "$pre_claim_timestamps" | tr ';' '\n' | \
+                        grep -v "^${pre_claim_entry}:" | tr '\n' ';' | sed 's/;$//')
+                    update_state "preClaimTimestamps" "$updated_ts"
+                    pre_claim_timestamps="$updated_ts"
+                fi
+            fi
             # Issue #1556: Job completed, but check if issue is closed before releasing claim.
             # Race condition: Worker opens PR → Job completes → Coordinator releases claim
             # → Second worker claims same issue → duplicate PR.
@@ -2392,20 +2464,55 @@ route_tasks_by_specialization() {
 
         # Find best specialized agent
         # Issue #1478: pass active_assignments to avoid N redundant get_state calls inside find_best_agent_for_issue
-        local best_agent
-        best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
+         local best_agent
+         best_agent=$(find_best_agent_for_issue "$issue_num" "$issue_labels" "$active_assignments")
 
-        if [ -n "$best_agent" ]; then
-            # Record specialized routing decision in coordinator state
-            local routing_entry="${issue_num}:${best_agent}"
-            routing_log="${routing_log}${routing_entry};"
-            specialized_count=$((specialized_count + 1))
-            push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
-            echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING: issue #$issue_num → $best_agent"
-        else
-            generic_count=$((generic_count + 1))
-        fi
-    done
+         if [ -n "$best_agent" ]; then
+             # Issue #1474: Pre-claim the issue on behalf of the specialized agent.
+             # Write best_agent:issue_num DIRECTLY to activeAssignments so the agent
+             # finds its pre-assignment when it calls claim_task() or checks activeAssignments.
+             # Without this, workers race to claim tasks BEFORE routing runs, finding nothing
+             # left to route — specializedAssignments stays 0 forever.
+             local cur_assignments
+             cur_assignments=$(get_state "activeAssignments")
+             local new_pre_assignments
+             if [ -z "$cur_assignments" ]; then
+                 new_pre_assignments="${best_agent}:${issue_num}"
+             else
+                 new_pre_assignments="${cur_assignments},${best_agent}:${issue_num}"
+             fi
+             if update_state "activeAssignments" "$new_pre_assignments"; then
+                 # Update local variable so subsequent loop iterations see the new pre-claim
+                 active_assignments="$new_pre_assignments"
+
+                 # Issue #1546: Record pre-claim timestamp so cleanup_stale_assignments()
+                 # does not prune this entry before the worker's Job starts.
+                 # Format: "agent:issue:epoch_seconds;..." (semicolon-separated)
+                 local ts_epoch
+                 ts_epoch=$(date +%s)
+                 local ts_entry="${best_agent}:${issue_num}:${ts_epoch}"
+                 local cur_pre_claim_ts
+                 cur_pre_claim_ts=$(get_state "preClaimTimestamps" 2>/dev/null || echo "")
+                 if [ -z "$cur_pre_claim_ts" ]; then
+                     update_state "preClaimTimestamps" "$ts_entry"
+                 else
+                     update_state "preClaimTimestamps" "${cur_pre_claim_ts};${ts_entry}"
+                 fi
+
+                 # Record specialized routing decision
+                 local routing_entry="${issue_num}:${best_agent}"
+                 routing_log="${routing_log}${routing_entry};"
+                 specialized_count=$((specialized_count + 1))
+                 push_metric "SpecializedTaskRouting" 1 "Count" "IssueNumber=${issue_num}"
+                 echo "[$(date -u +%H:%M:%S)] SPECIALIZED ROUTING (pre-claimed): issue #$issue_num → $best_agent"
+             else
+                 echo "[$(date -u +%H:%M:%S)] WARNING: pre-claim CAS failed for $best_agent:$issue_num — falling back to generic"
+                 generic_count=$((generic_count + 1))
+             fi
+         else
+             generic_count=$((generic_count + 1))
+         fi
+     done
 
     # Update routing metrics in coordinator state
     if [ "$specialized_count" -gt 0 ] || [ "$generic_count" -gt 0 ]; then
