@@ -1092,6 +1092,27 @@ request_coordinator_task() {
       continue
     fi
 
+    # Issue #1015: Validate the claimed issue is still OPEN on GitHub before proceeding.
+    # The coordinator queue may lag behind issue closures, causing agents to waste entire
+    # LLM sessions working on already-closed issues.
+    local issue_state
+    issue_state=$(gh issue view "$claimed_issue" --repo "${GITHUB_REPO}" --json state \
+      -q '.state' 2>/dev/null || echo "UNKNOWN")
+    if [ "$issue_state" != "OPEN" ]; then
+      log "Coordinator: issue #$claimed_issue is $issue_state (not OPEN) — skipping and removing from queue"
+      # Release the claim from activeAssignments
+      release_coordinator_task "$claimed_issue"
+      # Remove from queue as well so future agents don't pick it up
+      local new_queue
+      new_queue=$(echo "$queue" | tr ',' '\n' | grep -v "^${claimed_issue}$" || true)
+      new_queue=$(echo "$new_queue" | tr '\n' ',' | sed 's/,$//')
+      kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+        --type=merge \
+        -p "{\"data\":{\"taskQueue\":\"${new_queue}\"}}" 2>/dev/null || true
+      retry=$((retry + 1))
+      continue
+    fi
+
     # Remove claimed issue from the queue
     # Use grep -v || true: when queue has only this issue, grep -v returns exit code 1 (no matches),
     # which would crash the script under set -euo pipefail (issue #979)
