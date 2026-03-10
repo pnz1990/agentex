@@ -323,6 +323,78 @@ cite_debate_outcome() {
       fi
     fi
   fi
+
+  # v0.5 Trust Graph (issue #1734): Record trust edge in coordinator-state.agentTrustGraph.
+  # Format: "citingAgent:citedAgent:count|citingAgent2:citedAgent2:count2|..."
+  # This builds a queryable social graph: "who does each agent trust based on citation history?"
+  # Coordinator can use this for routing complex issues to trusted specialists.
+  local citing_agent="${AGENT_NAME:-unknown}"
+  if [ "$citing_agent" != "unknown" ] && [ -n "$recorded_by" ] && [ "$citing_agent" != "$recorded_by" ]; then
+    local edge_key="${citing_agent}:${recorded_by}"
+    local current_graph
+    current_graph=$(kubectl_with_timeout 10 get configmap coordinator-state \
+      -n "$NAMESPACE" -o jsonpath='{.data.agentTrustGraph}' 2>/dev/null || echo "")
+
+    # Find existing edge count or default to 0
+    local existing_count=0
+    if [ -n "$current_graph" ]; then
+      existing_count=$(echo "$current_graph" | tr '|' '\n' | grep "^${edge_key}:" | sed 's/.*://' | head -1 || echo "0")
+      existing_count="${existing_count:-0}"
+    fi
+    local new_count=$((existing_count + 1))
+
+    # Build updated graph: replace existing edge or append new one
+    local updated_graph
+    if [ -n "$current_graph" ] && echo "$current_graph" | grep -q "^${edge_key}:"; then
+      # Replace existing edge count
+      updated_graph=$(echo "$current_graph" | tr '|' '\n' | \
+        sed "s|^${edge_key}:[0-9]*$|${edge_key}:${new_count}|" | \
+        tr '\n' '|' | sed 's/|$//')
+    elif [ -n "$current_graph" ]; then
+      updated_graph="${current_graph}|${edge_key}:${new_count}"
+    else
+      updated_graph="${edge_key}:${new_count}"
+    fi
+
+    # Patch coordinator-state (best-effort — non-fatal if fails)
+    kubectl_with_timeout 10 patch configmap coordinator-state -n "$NAMESPACE" \
+      --type=merge -p "{\"data\":{\"agentTrustGraph\":\"${updated_graph}\"}}" \
+      2>/dev/null && log "cite_debate_outcome: trust graph updated — ${citing_agent} trusts ${recorded_by} (count=${new_count})" \
+      || log "WARNING: cite_debate_outcome: could not update trust graph (non-fatal)"
+  fi
+}
+
+# ── get_trust_graph ───────────────────────────────────────────────────────────
+# Query the agent trust graph from coordinator-state (v0.5, issue #1734).
+# Returns trust edges sorted by count (highest first).
+#
+# Usage:
+#   get_trust_graph                 # all edges, sorted by trust count
+#   get_trust_graph "worker-123"    # edges FROM a specific agent
+#
+# Output format (one edge per line): citingAgent:citedAgent:count
+# Example:
+#   get_trust_graph "worker-abc"
+#   → worker-abc:worker-xyz:5
+#   → worker-abc:worker-turing:2
+get_trust_graph() {
+  local filter_agent="${1:-}"
+  local graph
+  graph=$(kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "$NAMESPACE" -o jsonpath='{.data.agentTrustGraph}' 2>/dev/null || echo "")
+
+  if [ -z "$graph" ]; then
+    return 0
+  fi
+
+  # Split on | and sort by count (field 3) descending
+  if [ -n "$filter_agent" ]; then
+    echo "$graph" | tr '|' '\n' | grep "^${filter_agent}:" | \
+      sort -t: -k3 -rn
+  else
+    echo "$graph" | tr '|' '\n' | \
+      sort -t: -k3 -rn
+  fi
 }
 
 # ── post_debate_response ──────────────────────────────────────────────────────
