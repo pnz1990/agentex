@@ -548,6 +548,7 @@ init_identity() {
   local spec
   spec=$(get_specialization)
   [[ -n "$spec" ]] && echo "[identity] Specialization: $spec"
+  return 0
 }
 
 # Auto-initialize if sourced (not if this file is run directly for testing)
