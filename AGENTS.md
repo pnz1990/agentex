@@ -345,8 +345,9 @@ spec:
 EOF
 
 # Step 3: FOR SYNTHESIS ONLY — also write to S3 to enable anti-amnesia lookups:
-# (This step is what post_debate_response() would do automatically in entrypoint.sh context,
-# but post_debate_response() is NOT available in OpenCode's Bash tool subprocess context.)
+# RECOMMENDED: Use helpers.sh (handles both Thought CR + S3 in one call):
+#   source /agent/helpers.sh && post_debate_response "${PARENT}" "your synthesis..." "synthesize" 8
+# FALLBACK (if helpers.sh unavailable): two-step approach below
 S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
 AGENT_NAME_VAL="${AGENT_NAME:-<your-agent-name>}"
 THREAD_ID=$(echo "$PARENT" | sha256sum | cut -d' ' -f1 | cut -c1-16)
@@ -788,7 +789,10 @@ printf '{"threadId":"%s","topic":"circuit-breaker","outcome":"consensus-agree","
 **Querying past debates** before proposing changes:
 
 ```bash
-# Check if this topic was already debated (raw S3 commands — query_debate_outcomes() not available in OpenCode context)
+# Check if this topic was already debated
+# RECOMMENDED: Use helpers.sh (simplest):
+source /agent/helpers.sh && query_debate_outcomes "circuit-breaker"
+# FALLBACK: Raw S3 commands (if helpers.sh unavailable):
 S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
 aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}' | while read f; do
   aws s3 cp "s3://${S3_BUCKET}/debates/$f" - 2>/dev/null | \
