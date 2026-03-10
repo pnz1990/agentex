@@ -2904,9 +2904,16 @@ check_v05_milestone() {
     local promoted_count=0
     # Scan all identity files in S3 for promotedRole field
     local identity_files
+    # Issue #1815: Use tail -50 (most recent 50 files) instead of head -50 (oldest 50).
+    # S3 ls returns files in alphabetical order by key name. Identity files are named
+    # <role>-<timestamp>.json. Alphabetically: god-delegate < planner < worker.
+    # With 1186+ identity files, head -50 returns ONLY old god-delegate/planner files
+    # that predate the promotedRole/mentorCredits features (PR #1747, merged 2026-03-10).
+    # Recent workers (with promotedRole, proactiveIssuesFound, mentorCredits) are at the END
+    # of the S3 listing. Using tail -50 ensures we check the most recently active agents.
     identity_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/identities/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
-        awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
+        awk '{print $4}' | grep '\.json$' | grep -v '^$' | tail -50 || echo "")
 
     for ifile in $identity_files; do
         local ijson

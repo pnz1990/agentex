@@ -29,7 +29,8 @@ criteria_total=4
 # Criterion 1: Dynamic role promotions (PR #1747)
 echo "[1/4] Checking for promoted roles in S3 identities..."
 promoted_count=0
-for identity_file in $(aws s3 ls "s3://${S3_BUCKET}/identities/" | tail -20 | awk '{print $4}'); do
+# Issue #1815: Use tail -50 (most recent files) — S3 ls is alphabetical, head returns old files
+for identity_file in $(aws s3 ls "s3://${S3_BUCKET}/identities/" | tail -50 | awk '{print $4}'); do
   identity_json=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_file}" - 2>/dev/null || echo "{}")
   if echo "$identity_json" | jq -e '.promotedRole' >/dev/null 2>&1; then
     promoted_role=$(echo "$identity_json" | jq -r '.promotedRole')
@@ -67,7 +68,8 @@ echo ""
 # Criterion 3: Mentor credit loop (PR #1749)
 echo "[3/4] Checking for mentor credits in S3 identities..."
 mentor_credit_count=0
-for identity_file in $(aws s3 ls "s3://${S3_BUCKET}/identities/" | tail -20 | awk '{print $4}'); do
+# Issue #1815: Use tail -50 (most recent files) — S3 ls is alphabetical, head/tail-20 returns old files
+for identity_file in $(aws s3 ls "s3://${S3_BUCKET}/identities/" | tail -50 | awk '{print $4}'); do
   identity_json=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_file}" - 2>/dev/null || echo "{}")
   if echo "$identity_json" | jq -e '.specializationDetail.mentorCredits' >/dev/null 2>&1; then
     credits=$(echo "$identity_json" | jq -r '.specializationDetail.mentorCredits | length')
