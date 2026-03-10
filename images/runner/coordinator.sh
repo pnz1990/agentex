@@ -252,7 +252,9 @@ ensure_state_fields_initialized() {
       -p '{"data":{"spawnSlots":"0"}}' 2>/dev/null || true
   fi
 
-  # visionQueue (issue #1219/#1149): comma-separated issue numbers voted in by collective governance.
+  # visionQueue (issue #1219/#1149): semicolon-separated entries voted in by collective governance.
+  # Contains both numeric issue numbers and named features (feature:description:ts:proposer format).
+  # Separator changed from comma to semicolon in issues #1444/#1455 for consistent parsing.
   # Planners read this BEFORE taskQueue, enabling agent-voted goals to override the standard backlog.
   # visionQueueLog: audit log for all visionQueue additions (semicolon-separated entries).
   for field in visionQueue visionQueueLog; do
