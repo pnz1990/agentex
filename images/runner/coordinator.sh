@@ -693,8 +693,34 @@ cleanup_stale_assignments() {
                 && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
                 || cleaned_assignments="${clean_pair}"
         else
-            echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue, releasing assignment (NOT re-queuing; refresh_task_queue handles re-population)"
-            stale_count=$((stale_count + 1))
+            # Issue #1556: Job completed, but check if issue is closed before releasing claim.
+            # Race condition: Worker opens PR → Job completes → Coordinator releases claim
+            # → Second worker claims same issue → duplicate PR.
+            # Fix: Keep assignment if issue still OPEN (PR pending merge). Only release when CLOSED.
+            if [[ "$issue" =~ ^[0-9]+$ ]]; then
+                local issue_state
+                issue_state=$(gh issue view "$issue" --repo "${GITHUB_REPO}" --json state \
+                    --jq '.state' 2>/dev/null || echo "UNKNOWN")
+                if [ "$issue_state" = "CLOSED" ]; then
+                    echo "[$(date -u +%H:%M:%S)] Complete: $agent_name → issue #$issue CLOSED, releasing assignment"
+                    stale_count=$((stale_count + 1))
+                elif [ "$issue_state" = "OPEN" ]; then
+                    # Job done but issue still open - likely PR pending merge. Keep assignment.
+                    echo "[$(date -u +%H:%M:%S)] Pending: $agent_name → issue #$issue still OPEN (PR likely pending), keeping assignment"
+                    local clean_pair="${agent_name}:${issue}"
+                    [ -n "$cleaned_assignments" ] \
+                        && cleaned_assignments="${cleaned_assignments},${clean_pair}" \
+                        || cleaned_assignments="${clean_pair}"
+                else
+                    # UNKNOWN state (API error or non-issue task) - release to be safe
+                    echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → issue #$issue state UNKNOWN, releasing assignment"
+                    stale_count=$((stale_count + 1))
+                fi
+            else
+                # Non-numeric issue ref (e.g., vision queue feature) - release when job done
+                echo "[$(date -u +%H:%M:%S)] Stale: $agent_name → task $issue (non-issue), releasing assignment"
+                stale_count=$((stale_count + 1))
+            fi
         fi
     done
 
