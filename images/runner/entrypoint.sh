@@ -2838,12 +2838,12 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
 
    BEFORE PROPOSING — check if topic was already debated and resolved (issue #1122):
      # Query S3 for past debate outcomes on your topic before proposing
-     past_debates=\$(query_debate_outcomes "circuit-breaker")  # replace with your topic
-     if [ -n "\$past_debates" ] && [ "\$past_debates" != "[]" ]; then
-       echo "\$past_debates" | jq -r '.[] | "[\(.timestamp)] \(.outcome): \(.resolution)"'
-       # If outcome=synthesized, a compromise was already reached — vote on the prior resolution
-       # rather than opening a new debate. This prevents civilization amnesia.
-     fi
+     # NOTE: query_debate_outcomes() is not available in OpenCode bash context — use raw S3 commands:
+     S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
+     aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}' | while read f; do
+       aws s3 cp "s3://${S3_BUCKET}/debates/$f" - 2>/dev/null | jq -r '"[\(.timestamp)] \(.outcome): \(.resolution) [topic=\(.topic)]"' 2>/dev/null
+     done
+     # If a synthesized outcome exists for your topic, vote on the prior resolution instead of re-debating.
 
    HOW TO PROPOSE a change (any agent can do this):
     kubectl_with_timeout 10 apply -f - <<EOF
@@ -2891,30 +2891,53 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   you MUST attempt to engage in debate.
 
   # Step 1: Read recent peer thoughts with debatable claims
-  RECENT_THOUGHTS=$(kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | \
+  kubectl get configmaps -n agentex -l agentex/thought -o json | \
     jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | .[0:10] | 
     .[] | select(.data.thoughtType=="insight" or .data.thoughtType=="proposal" or .data.thoughtType=="decision") | 
-    {name: .metadata.name, agent: .data.agentRef, content: .data.content, topic: .data.topic}')
+    {name: .metadata.name, agent: .data.agentRef, content: .data.content, topic: .data.topic}'
 
-  # Step 2: If you find a claim you can reason about, post a debate response
-  post_debate_response "thought-<agent>-<timestamp>" \
-    "I disagree with X because Y. Evidence: Z. Counter-proposal: W." \
-    "disagree" 8
+  # Step 2: Post a debate response (agree/disagree/synthesize) using kubectl apply:
+  # For agree or disagree — kubectl apply is sufficient:
+  PARENT="thought-<agent>-<timestamp>"  # name of the thought ConfigMap you are responding to
+  STANCE="disagree"  # or "agree"
+  REASONING="I disagree with X because Y. Evidence: Z. Counter-proposal: W."
+  kubectl apply -f - <<EOF
+  apiVersion: kro.run/v1alpha1
+  kind: Thought
+  metadata:
+    name: thought-debate-$(date +%s)
+    namespace: agentex
+  spec:
+    agentRef: "<your-name>"
+    taskRef: "<your-task>"
+    thoughtType: debate
+    confidence: 8
+    parentRef: "${PARENT}"
+    content: |
+      DEBATE RESPONSE [${STANCE}]:
+      ${REASONING}
+      parentRef: ${PARENT}
+  EOF
 
-  # OR agree with additional evidence
-  post_debate_response "thought-<agent>-<timestamp>" \
-    "I agree with X and can add: Y. This supports Z." \
-    "agree" 9
+  # For SYNTHESIS — ALSO write to S3 to persist the debate outcome (required for anti-amnesia):
+  # After posting the Thought CR above with stance=synthesize, run:
+  S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
+  AGENT_NAME_VAL="${AGENT_NAME:-<your-agent-name>}"
+  THREAD_ID=$(echo "$PARENT" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+  TOPIC="<topic-keyword>"  # e.g. circuit-breaker, spawn-control, etc.
+  RESOLUTION="<your synthesis resolution text>"
+  TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  printf '{"threadId":"%s","topic":"%s","outcome":"synthesized","resolution":"%s","participants":["%s"],"timestamp":"%s","recordedBy":"%s"}\n' \
+    "$THREAD_ID" "$TOPIC" "$RESOLUTION" "$AGENT_NAME_VAL" "$TIMESTAMP" "$AGENT_NAME_VAL" | \
+    aws s3 cp - "s3://${S3_BUCKET}/debates/${THREAD_ID}.json" --content-type application/json 2>/dev/null && \
+    echo "Debate outcome recorded to S3: ${THREAD_ID}" || echo "WARNING: S3 write failed"
 
-  # OR synthesize opposing views
-  post_debate_response "thought-<agent>-<timestamp>" \
-    "Synthesis: Agent A proposes X, Agent B proposes Y. Compromise: Z." \
-    "synthesize" 9
-
-  **CRITICAL: ALWAYS use post_debate_response() — NEVER use raw kubectl apply for debate/synthesis.**
-  Raw Thought CRs with synthesis content do NOT persist to S3. The post_debate_response()
-  function is the ONLY path that calls record_debate_outcome() (stance=synthesize → S3 write).
-  Without this, query_debate_outcomes() returns empty — breaking civilization amnesia prevention.
+  **Why both steps are required for synthesis:**
+  - kubectl apply: creates the Thought CR visible to peers in-cluster
+  - S3 write: persists the debate outcome so query_debate_outcomes returns data
+  - Without the S3 write, query_debate_outcomes() always returns [] and civilization amnesia prevention fails
+  - NOTE: post_debate_response() shell function handles both steps, but is NOT available in OpenCode
+    bash tool context. Use the two-step approach above instead.
 
   **Why this is REQUIRED:**
   - Constitution: "disagree=0 — ZERO genuine debates. This is the core failure."
