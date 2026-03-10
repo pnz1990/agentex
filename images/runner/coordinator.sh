@@ -246,6 +246,15 @@ ensure_state_fields_initialized() {
     fi
   done
 
+  # lastTallyTimestamp (issue #1407): tracks when tally_and_enact_votes() last ran.
+  # Enables time-based filtering of governance thoughts, preventing O(N) slowdown as
+  # Thought CRs accumulate. Initialized to empty (first tally loads full 24h window).
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("lastTallyTimestamp")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing lastTallyTimestamp (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"lastTallyTimestamp":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -905,8 +914,36 @@ tally_and_enact_votes() {
      # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
      # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
      # Issue #1248: Also include debate thoughts for vision-feature deliberation threshold check.
+     # Issue #1407: Time-based filter — only load thoughts newer than lastTallyTimestamp to prevent
+     # O(N) growth as Thought CRs accumulate. voteRegistry_* fields already cache running totals,
+     # but we must reload ALL thoughts at least once to rebuild accurate totals after restart.
+     # Use 24h window as a floor to ensure vote counts remain accurate after coordinator restarts.
+     local last_tally_ts
+     last_tally_ts=$(get_state "lastTallyTimestamp" 2>/dev/null || echo "")
+     local tally_cutoff_ts
+     # Default: load thoughts from the last 24 hours. This catches any newly-posted votes
+     # and ensures vote totals are complete even after coordinator restart (voteRegistry reset).
+     local cutoff_24h
+     cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+     if [ -n "$last_tally_ts" ] && [ -n "$cutoff_24h" ]; then
+       # Use the EARLIER of (lastTallyTimestamp - 5min buffer) and (now - 24h)
+       # The 5-min buffer handles clock skew and thoughts created just before last tally.
+       local last_tally_minus5m
+       last_tally_minus5m=$(date -u -d "${last_tally_ts} -5 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$cutoff_24h")
+       # Compare: use 24h window if lastTallyTimestamp is older than 24h
+       if [[ "$last_tally_minus5m" < "$cutoff_24h" ]]; then
+         tally_cutoff_ts="$cutoff_24h"
+       else
+         tally_cutoff_ts="$last_tally_minus5m"
+       fi
+     else
+       tally_cutoff_ts="$cutoff_24h"
+     fi
+
      kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-         | jq '[.items[] | select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") | {
+         | jq --arg cutoff "$tally_cutoff_ts" '[.items[] |
+             select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") |
+             select(if $cutoff != "" then .metadata.creationTimestamp >= $cutoff else true end) | {
              agent: (.data.agentRef // "unknown"),
              content: (.data.content // ""),
              type: (.data.thoughtType // ""),
@@ -914,12 +951,19 @@ tally_and_enact_votes() {
              ts: .metadata.creationTimestamp
            }]' 2>/dev/null > "$thoughts_file" || echo "[]" > "$thoughts_file"
 
+    # Update lastTallyTimestamp so next run only processes newer thoughts
+    local now_ts
+    now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p "{\"data\":{\"lastTallyTimestamp\":\"${now_ts}\"}}" 2>/dev/null || true
+
     local thought_count
     thought_count=$(jq 'length' "$thoughts_file" 2>/dev/null || echo 0)
     if [ "$thought_count" -eq 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] No new governance thoughts since ${tally_cutoff_ts:-startup} — skipping tally"
         return 0
     fi
-    echo "[$(date -u +%H:%M:%S)] Loaded $thought_count thoughts for tally"
+    echo "[$(date -u +%H:%M:%S)] Loaded $thought_count thoughts for tally (since ${tally_cutoff_ts:-epoch})"
 
     # Extract all unique proposal topics from #proposal-<topic> tags
     local topics
@@ -943,6 +987,23 @@ tally_and_enact_votes() {
     # Process each topic
     while IFS= read -r topic; do
         [ -z "$topic" ] && continue
+
+        # Issue #1407: Early skip — if any decision for this topic was already enacted,
+        # AND no new votes have appeared (time-window filtered), skip expensive tallying.
+        # This prevents the coordinator from re-tallying 39+ circuit-breaker votes every cycle.
+        # We still process topics with recent votes (within tally_cutoff_ts window).
+        if echo "$loop_enacted" | grep -qF "enacted_topic_${topic}"; then
+            # Topic has prior enactments. Check if there are ANY new proposal/vote thoughts for it.
+            # (If no new thoughts exist for this topic in the time window, the tally outcome
+            # cannot change — skip the full tally to save time.)
+            local new_votes_for_topic
+            new_votes_for_topic=$(jq -r ".[] | select(.type == \"vote\" and (.content | contains(\"#vote-$topic\"))) | .ts" \
+                "$thoughts_file" 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$new_votes_for_topic" -eq 0 ]; then
+                echo "[$(date -u +%H:%M:%S)] $topic already enacted and no new votes — skipping"
+                continue
+            fi
+        fi
         
         echo "[$(date -u +%H:%M:%S)] Processing governance topic: $topic"
         
