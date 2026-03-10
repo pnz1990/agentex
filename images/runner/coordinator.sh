@@ -94,6 +94,9 @@ echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 # Issue #1447: gh auth login --with-token uses GraphQL to validate the token.
 # When the GitHub GraphQL rate limit is exceeded at pod startup, auth fails even
 # though the token itself is valid. Fix: retry with exponential backoff.
+# Issue #1564: After gh auth login fails, immediately test if REST API works.
+# If REST API works, skip the sleep — coordinator can proceed using REST-based
+# gh commands (GITHUB_TOKEN env var works for REST even when GraphQL is rate limited).
 gh_auth_with_retry() {
   local token="$1"
   local max_attempts=3
@@ -101,6 +104,15 @@ gh_auth_with_retry() {
   for attempt in $(seq 1 "$max_attempts"); do
     if echo "$token" | gh auth login --with-token 2>/dev/null; then
       echo "gh CLI authenticated successfully (attempt $attempt)"
+      return 0
+    fi
+    # Issue #1564: Test if REST API works before sleeping.
+    # gh auth login uses GraphQL for token validation, but REST API may still work.
+    # If REST works, proceed immediately — no need to retry or sleep.
+    if GITHUB_TOKEN="$token" gh api repos/"${REPO:-pnz1990/agentex}" --silent 2>/dev/null; then
+      echo "gh CLI auth via GraphQL failed but REST API works — proceeding without full auth (attempt $attempt)"
+      # Export token so gh commands using GITHUB_TOKEN env var work
+      export GITHUB_TOKEN="$token"
       return 0
     fi
     if [ "$attempt" -lt "$max_attempts" ]; then
