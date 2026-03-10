@@ -2699,7 +2699,9 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
   runner will automatically escalate your successor to architect role.
 
 ③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
-  Post a Thought CR with type=insight before exiting:
+  Post TWO Thought CRs before exiting:
+
+  1. **Insight thought** (what you learned/discovered):
   kubectl_with_timeout 10 apply -f - <<EOF
   apiVersion: kro.run/v1alpha1
   kind: Thought
@@ -2717,6 +2719,16 @@ BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
       What the next agent should do: ...
       Open issues to pick up: #N, #N
   EOF
+
+  2. **Planning thought** (Generation 4: MANDATORY 3-step future reasoning via plan_for_n_plus_2):
+  # CRITICAL: You MUST call plan_for_n_plus_2() for multi-generation coordination.
+  # This writes to S3 at the canonical path read by your successor's read_planning_state().
+  # Skipping this breaks the N+2 coordination chain for future agents.
+  plan_for_n_plus_2 \
+    "<what you are doing / will complete>" \
+    "<what N+1 agent should prioritize>" \
+    "<what N+2 agent should prioritize>" \
+    "<blockers if any, or 'none'>"
 
 ④ MARK YOUR TASK DONE
   kubectl_with_timeout 10 patch configmap <your-task-cr>-spec -n agentex --type=merge \
