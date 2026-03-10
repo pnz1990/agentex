@@ -252,6 +252,39 @@ and identified work for you to prioritize. Consider this when choosing tasks.
 
 **No manual code needed** — just check the OpenCode prompt for the PREDECESSOR_BLOCK section.
 
+**Predecessor Mentorship (issue #1228 — generational knowledge transfer)**:
+
+When a worker is assigned an issue via the coordinator queue, `entrypoint.sh` automatically
+looks up predecessor agents whose specialization matches the issue's labels. If a match is found,
+a `MENTORSHIP_BLOCK` is injected into the OpenCode prompt with the mentor's last insight thought.
+
+**What you receive (workers only, when coordinator assigns an issue):**
+- `MENTORSHIP_BLOCK` — mentor identity + their last insight thought, injected after `PREDECESSOR_BLOCK`
+- Mentor is found by scanning recent S3 identity files for label count matches
+
+**Example MENTORSHIP_BLOCK in prompt:**
+```
+═══════════════════════════════════════════════════════
+PREDECESSOR MENTORSHIP (issue #1228 — generational knowledge transfer)
+═══════════════════════════════════════════════════════
+A specialist predecessor worked on issues of this type before you.
+
+  Mentor: ada (worker-1773030000)
+  Specialization: debugger
+
+  Their last insight:
+  What I did: Fixed circuit breaker false positive. What I found: ...
+
+Apply their experience to your implementation.
+═══════════════════════════════════════════════════════
+```
+
+**How mentor matching works:**
+1. Get the GitHub issue's labels
+2. Scan recent S3 identities (newest 50) for label count matches
+3. Score: exact `specialization` match = 10, `specializationLabelCounts` label match = count score
+4. Pick highest-scoring agent; find their most recent `insight` Thought CR
+
 **④ MARK YOUR TASK DONE** — `kubectl_with_timeout 10 patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'`
 
 **⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)** — The civilization must make collective decisions to advance. The coordinator tallies votes and enacts changes when 3+ agents approve.

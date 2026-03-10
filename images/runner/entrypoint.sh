@@ -1779,6 +1779,127 @@ register_with_coordinator() {
   return 0
 }
 
+# get_mentor_insight() - Find predecessor mentor for an issue (issue #1228)
+# Predecessor mentorship: when an agent claims an issue, we look up S3 identities
+# for agents whose specialization (or specializationLabelCounts) matches the issue labels.
+# Returns: sets MENTOR_DISPLAY_NAME, MENTOR_AGENT_NAME, MENTOR_INSIGHT vars.
+# The caller builds MENTORSHIP_BLOCK from these values and injects into OpenCode prompt.
+#
+# Algorithm:
+#   1. Get labels for the GitHub issue
+#   2. List S3 identities and sample up to 50 (most recent) for matching
+#   3. Score each: exact specialization match = 10, label count match = count score
+#   4. Pick highest-scoring agent with score > 0
+#   5. Find their most recent insight Thought CR
+#
+# Gracefully degrades: returns empty strings if S3/cluster unavailable.
+get_mentor_insight() {
+  local issue_num="${1:-}"
+  MENTOR_DISPLAY_NAME=""
+  MENTOR_AGENT_NAME=""
+  MENTOR_INSIGHT=""
+  MENTOR_SPECIALIZATION=""
+
+  [ -z "$issue_num" ] || [ "$issue_num" = "0" ] && return 0
+
+  log "Mentorship: looking up predecessor mentor for issue #$issue_num..."
+
+  # Step 1: Get labels for the issue
+  local issue_labels
+  issue_labels=$(gh issue view "$issue_num" --repo "$REPO" \
+    --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+  if [ -z "$issue_labels" ]; then
+    log "Mentorship: no labels found for issue #$issue_num — skipping mentor lookup"
+    return 0
+  fi
+  log "Mentorship: issue #$issue_num labels: $issue_labels"
+
+  # Step 2: List S3 identities (newest first, sample up to 30 to stay fast)
+  # Limit: 30 identities × ~200ms/S3-read = ~6s max. Graceful degradation if slow.
+  local identity_keys
+  identity_keys=$(timeout 10s aws s3 ls "s3://${S3_BUCKET}/identities/" \
+    --region "$BEDROCK_REGION" 2>/dev/null | \
+    sort -k1,2 -r | awk '{print $4}' | head -30 || echo "")
+  if [ -z "$identity_keys" ]; then
+    log "Mentorship: no identity files found in S3 — skipping"
+    return 0
+  fi
+
+  # Step 3: Score identities for label match
+  local best_agent="" best_display="" best_score=0 best_spec=""
+  while IFS= read -r identity_key; do
+    [ -z "$identity_key" ] && continue
+    # Skip own identity
+    [[ "$identity_key" == "${AGENT_NAME}.json" ]] && continue
+
+    local identity_json
+    identity_json=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
+      --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+    [ -z "$identity_json" ] && continue
+
+    local agent_name display_name spec label_counts
+    agent_name=$(echo "$identity_json" | jq -r '.agentName // ""' 2>/dev/null || echo "")
+    display_name=$(echo "$identity_json" | jq -r '.displayName // .agentName // ""' 2>/dev/null || echo "")
+    spec=$(echo "$identity_json" | jq -r '.specialization // ""' 2>/dev/null || echo "")
+    label_counts=$(echo "$identity_json" | jq -r '.specializationLabelCounts // {}' 2>/dev/null || echo "{}")
+
+    [ -z "$agent_name" ] && continue
+
+    local score=0
+    # Exact specialization match (highest priority)
+    if [ -n "$spec" ] && echo "$issue_labels" | grep -qi "$spec"; then
+      score=10
+    fi
+
+    # Label count match: sum counts for labels that appear in issue_labels
+    if [ "$score" -eq 0 ] && [ "$label_counts" != "{}" ]; then
+      local label_score
+      label_score=$(echo "$label_counts" | jq -r \
+        --arg issue_labels "$issue_labels" \
+        '[to_entries[] | . as $e | select(($issue_labels | split(",") | map(ascii_downcase)) | contains([$e.key | ascii_downcase])) | .value] | add // 0' \
+        2>/dev/null || echo "0")
+      # Truncate to integer (jq may output floats)
+      score=$(echo "${label_score:-0}" | cut -d. -f1)
+      score="${score:-0}"
+    fi
+
+    if [ "$score" -gt "$best_score" ]; then
+      best_score="$score"
+      best_agent="$agent_name"
+      best_display="$display_name"
+      best_spec="${spec:-$issue_labels}"
+    fi
+  done <<< "$identity_keys"
+
+  if [ -z "$best_agent" ] || [ "$best_score" -eq 0 ]; then
+    log "Mentorship: no matching specialist found for issue #$issue_num labels ($issue_labels)"
+    return 0
+  fi
+
+  log "Mentorship: found mentor $best_display ($best_agent) with score=$best_score spec=$best_spec"
+
+  # Step 4: Find their most recent insight Thought CR
+  local mentor_thought
+  mentor_thought=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+    -l agentex/thought -o json 2>/dev/null | \
+    jq -r --arg agent "$best_agent" \
+    '.items | sort_by(.metadata.creationTimestamp) | reverse |
+     map(select(.data.agentRef == $agent and (.data.thoughtType == "insight" or .data.thoughtType == "decision"))) |
+     first | .data.content // ""' 2>/dev/null | head -c 500 || echo "")
+
+  if [ -z "$mentor_thought" ]; then
+    log "Mentorship: mentor $best_agent found but no insight thoughts in cluster"
+    # Still export the mentor identity so the agent knows who the specialist is
+  fi
+
+  MENTOR_DISPLAY_NAME="$best_display"
+  MENTOR_AGENT_NAME="$best_agent"
+  MENTOR_INSIGHT="$mentor_thought"
+  MENTOR_SPECIALIZATION="$best_spec"
+  log "Mentorship: predecessor mentor identified: $MENTOR_DISPLAY_NAME ($MENTOR_AGENT_NAME)"
+  return 0
+}
+
 patch_task_status() {
   local phase="$1" outcome="${2:-}"
   local completed_at=""
@@ -2679,6 +2800,11 @@ if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ]; then
       COORDINATOR_CONTEXT="The coordinator has assigned you issue #${COORDINATOR_ISSUE} to work on. Implement it and open a PR. When done, call release_coordinator_task ${COORDINATOR_ISSUE}."
     fi
     push_metric "CoordinatorAssignment" 1
+    # Issue #1228: Predecessor mentorship — look up a specialist mentor for this issue.
+    # Only for workers (not planners) and only when coordinator assigned a specific issue.
+    if [ "$AGENT_ROLE" = "worker" ]; then
+      get_mentor_insight "$COORDINATOR_ISSUE"
+    fi
   else
     log "Coordinator queue empty or unavailable — ${AGENT_ROLE} will self-select from GitHub"
     COORDINATOR_CONTEXT="The coordinator task queue is currently empty. Self-select the highest-priority open GitHub issue.
@@ -2988,6 +3114,43 @@ Your predecessor (previous $AGENT_ROLE) planned for YOU (N+2) to:
 This is multi-generation coordination. Your predecessor reasoned 3 steps ahead
 and identified work for you to prioritize. Consider this when choosing tasks.
 ═══════════════════════════════════════════════════════"
+fi
+
+# Issue #1228: Predecessor Mentorship Block — specialist context for assigned issues
+# When get_mentor_insight() found a mentor (called in step 3.8 above), inject their
+# identity and last insight so this agent can learn from prior specialists.
+MENTORSHIP_BLOCK=""
+if [ -n "${MENTOR_AGENT_NAME:-}" ]; then
+  if [ -n "${MENTOR_INSIGHT:-}" ]; then
+    MENTORSHIP_BLOCK="
+═══════════════════════════════════════════════════════
+PREDECESSOR MENTORSHIP (issue #1228 — generational knowledge transfer)
+═══════════════════════════════════════════════════════
+A specialist predecessor worked on issues of this type before you.
+
+  Mentor: ${MENTOR_DISPLAY_NAME} (${MENTOR_AGENT_NAME})
+  Specialization: ${MENTOR_SPECIALIZATION}
+
+  Their last insight:
+  ${MENTOR_INSIGHT}
+
+Apply their experience to your implementation. If their approach was wrong,
+note it in your own insight thought so future agents can learn.
+═══════════════════════════════════════════════════════"
+  else
+    MENTORSHIP_BLOCK="
+═══════════════════════════════════════════════════════
+PREDECESSOR MENTORSHIP (issue #1228 — generational knowledge transfer)
+═══════════════════════════════════════════════════════
+A specialist predecessor worked on issues of this type:
+
+  Mentor: ${MENTOR_DISPLAY_NAME} (${MENTOR_AGENT_NAME})
+  Specialization: ${MENTOR_SPECIALIZATION}
+
+  No recent insight thoughts found for this mentor in the cluster.
+  Check their identity in S3: s3://${S3_BUCKET}/identities/${MENTOR_AGENT_NAME}.json
+═══════════════════════════════════════════════════════"
+  fi
 fi
 
 # Role-specialized context block (issue #881)
@@ -3499,6 +3662,8 @@ ${INBOX_MESSAGES}
 ${PEER_BLOCK}
 
 ${PREDECESSOR_BLOCK}
+
+${MENTORSHIP_BLOCK}
 
 ${ROLE_CONTEXT}
 
