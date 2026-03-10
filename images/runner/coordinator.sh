@@ -245,9 +245,14 @@ push_metric() {
 update_state() {
     local field="$1"
     local value="$2"
+    # Issue #1398: Sanitize value to remove newlines and JSON-breaking characters before embedding
+    # in JSON. Embedded newlines cause 'invalid character \n in string literal' errors that are
+    # swallowed by 2>/dev/null, causing silent failures (e.g., enactedDecisions never updated).
+    local safe_value
+    safe_value=$(echo "$value" | tr '\n\r' '  ' | tr -s ' ' | sed 's/"/\\"/g')
     # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
     kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" \
-        --type=merge -p "{\"data\":{\"$field\":\"$value\"}}" 2>/dev/null || true
+        --type=merge -p "{\"data\":{\"$field\":\"$safe_value\"}}" 2>/dev/null || true
 }
 
 get_state() {
@@ -742,15 +747,25 @@ Fixes #893"
             
             # Create PR using gh CLI
             if command -v gh &>/dev/null && [ -n "${GITHUB_TOKEN:-}" ]; then
-                # Check if PR already exists for this topic to avoid duplicate PRs (#1333)
+                # Check if PR already exists for this topic (open or merged) to avoid duplicates (#1333, #1398)
                 local pr_title="chore: sync constitution.yaml with enacted governance ($topic)"
-                local existing_pr
-                existing_pr=$(gh pr list --repo "${GITHUB_REPO}" --state open \
+                local existing_open_pr
+                existing_open_pr=$(gh pr list --repo "${GITHUB_REPO}" --state open \
                     --search "sync constitution.yaml with enacted governance ($topic)" \
                     --json number --jq '.[0].number' 2>/dev/null)
-                if [ -n "$existing_pr" ]; then
-                    echo "[$(date -u +%H:%M:%S)] ✓ PR #${existing_pr} already exists for topic ${topic} — skipping duplicate creation"
+                if [ -n "$existing_open_pr" ]; then
+                    echo "[$(date -u +%H:%M:%S)] ✓ Open PR #${existing_open_pr} already exists for topic ${topic} — skipping duplicate creation"
                     push_metric "ConstitutionSyncDuplicatePrevented" 1 "Count" "Topic=${topic}"
+                    return 0
+                fi
+                # Also check if a merged PR already exists — if so, no new PR needed
+                local existing_merged_pr
+                existing_merged_pr=$(gh pr list --repo "${GITHUB_REPO}" --state merged \
+                    --search "sync constitution.yaml with enacted governance ($topic)" \
+                    --json number --jq '.[0].number' 2>/dev/null)
+                if [ -n "$existing_merged_pr" ]; then
+                    echo "[$(date -u +%H:%M:%S)] ✓ Merged PR #${existing_merged_pr} already exists for topic ${topic} — constitution already synced"
+                    push_metric "ConstitutionSyncAlreadyMerged" 1 "Count" "Topic=${topic}"
                     return 0
                 fi
                 gh pr create \
@@ -861,6 +876,13 @@ tally_and_enact_votes() {
         return 0
     fi
 
+    # Issue #1398: Read enacted decisions ONCE before the loop and maintain in-memory.
+    # This prevents read-modify-write race condition where later topics read stale enacted
+    # (before earlier topics' writes propagate), causing them to overwrite each other's entries.
+    local loop_enacted
+    loop_enacted=$(get_state "enactedDecisions")
+    [ -z "$loop_enacted" ] && loop_enacted=""
+
     # Process each topic
     while IFS= read -r topic; do
         [ -z "$topic" ] && continue
@@ -963,14 +985,13 @@ tally_and_enact_votes() {
         local registry_entry="$topic: approve=$approve_votes reject=$reject_votes abstain=$abstain_votes"
         update_state "voteRegistry_${topic}" "$registry_entry"
 
-        # Check if already enacted
-        local enacted
-        enacted=$(get_state "enactedDecisions")
-        # Issue #940: null guard - treat empty/null as empty string
-        [ -z "$enacted" ] && enacted=""
-        local decision_key="${topic}_${kv_pairs// /_}"  # unique key for this exact proposal
+        # Check if already enacted (Issue #1398: use in-memory loop_enacted to prevent
+        # read-modify-write race condition; also normalize decision_key to topic-only
+        # so different kv_pairs values for the same topic don't bypass dedup).
+        # decision_key uses topic only — governance enacts once per topic per civilization cycle.
+        local decision_key="enacted_topic_${topic}"
         
-        if echo "$enacted" | grep -qF "$decision_key"; then
+        if echo "$loop_enacted" | grep -qF "$decision_key"; then
             echo "[$(date -u +%H:%M:%S)] $topic already enacted, skipping"
             continue
         fi
@@ -1339,14 +1360,21 @@ NUDGE_EOF
             fi
 
             # Record the enacted decision with full audit trail
+            # Issue #1398: store decision_key (topic-based), approvals count, proposer, timestamp.
+            # Truncate voters list and sanitize newlines to prevent JSON encoding failures in update_state.
+            # kv_pairs can contain embedded newlines (multi-line grep output) which break kubectl patch JSON.
             local ts
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            local enacted_entry="${ts} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${proposer_agent} voters=${approvers}"
-            if [ -z "$enacted" ]; then
-                update_state "enactedDecisions" "$enacted_entry"
+            # Strip newlines from proposer_agent (safety - proposer_agent is typically single-line)
+            local safe_proposer
+            safe_proposer=$(echo "$proposer_agent" | tr '\n' ' ' | tr -s ' ')
+            local enacted_entry="${ts} ${decision_key} approvals=${approve_votes} rejections=${reject_votes} proposer=${safe_proposer}"
+            if [ -z "$loop_enacted" ]; then
+                loop_enacted="$enacted_entry"
             else
-                update_state "enactedDecisions" "${enacted} | ${enacted_entry}"
+                loop_enacted="${loop_enacted} | ${enacted_entry}"
             fi
+            update_state "enactedDecisions" "$loop_enacted"
             
             echo "[$(date -u +%H:%M:%S)] AUDIT: Decision recorded in enactedDecisions log"
 
