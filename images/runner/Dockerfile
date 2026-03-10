@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Image version: 2026-03-09-r8 (fix: Dockerfile npm patch quoting crash; issue #963)
+# Image version: 2026-03-10-r9 (fix: nested tar CVEs in node-gyp/cacache + glob CVE; issue #988)
 ARG KUBECTL_VERSION=1.35.2
 ARG GH_VERSION=2.87.3
 ARG OPENCODE_VERSION=latest
@@ -47,20 +47,30 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
-# Fix npm bundled dependency CVEs (issue #858, issue #658, issue #963)
+# Fix npm bundled dependency CVEs (issue #858, issue #658, issue #963, issue #988)
 # npm bundles tar and minimatch in its own node_modules directory.
+# node-gyp and cacache also have their own nested tar copies (issue #988).
 # HIGH CVEs fixed:
-#   tar 7.5.9 -> 7.5.11 (CVE-2026-29786)
+#   tar 7.5.9/7.4.3 -> 7.5.11 (CVE-2026-29786, CVE-2026-26960, CVE-2026-24842,
+#                                CVE-2026-23950, CVE-2026-23745)
+#     - Patched in: npm/node_modules/tar (top-level)
+#     - Patched in: npm/node_modules/node-gyp/node_modules/tar (nested)
+#     - Patched in: npm/node_modules/cacache/node_modules/tar (nested)
 #   minimatch 10.2.2 -> 10.2.3 (CVE-2026-27903, CVE-2026-27904)
+#   glob 10.4.5 -> 10.5.0 (CVE-2025-64756 command injection via malicious filenames)
+#     - Patched in: npm/node_modules/glob
 #
 # Install patched packages in an isolated temp dir (avoids npm's @npmcli/docs 404 issue),
 # then copy them over npm's bundled versions.
 RUN mkdir -p /tmp/npm-patch \
     && echo '{"name":"patch","version":"1.0.0"}' > /tmp/npm-patch/package.json \
-    && npm install --prefix /tmp/npm-patch --save-exact tar@7.5.11 minimatch@10.2.3 \
+    && npm install --prefix /tmp/npm-patch --save-exact tar@7.5.11 minimatch@10.2.3 glob@10.5.0 \
     && NPM_DIR="$(npm root -g)/npm" \
     && cp -r /tmp/npm-patch/node_modules/tar/. "${NPM_DIR}/node_modules/tar/" \
+    && cp -r /tmp/npm-patch/node_modules/tar/. "${NPM_DIR}/node_modules/node-gyp/node_modules/tar/" \
+    && cp -r /tmp/npm-patch/node_modules/tar/. "${NPM_DIR}/node_modules/cacache/node_modules/tar/" \
     && cp -r /tmp/npm-patch/node_modules/minimatch/. "${NPM_DIR}/node_modules/minimatch/" \
+    && cp -r /tmp/npm-patch/node_modules/glob/. "${NPM_DIR}/node_modules/glob/" \
     && rm -rf /tmp/npm-patch \
     && npm cache clean --force \
     && rm -rf /root/.npm
