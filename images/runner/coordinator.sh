@@ -352,6 +352,16 @@ ensure_state_fields_initialized() {
       -p '{"data":{"routingCyclesWithZeroSpec":"0"}}' 2>/dev/null || true
   fi
 
+  # chronicleCandidates (issue #1605, v0.4 Collective Memory): semicolon-separated
+  # Thought ConfigMap names for agent-proposed chronicle entries. Aggregated by
+  # aggregate_chronicle_candidates() every ~3 min. God-delegate reads this field
+  # when writing the chronicle for efficient curation.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"chronicleCandidates":""}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 }
 
@@ -2398,6 +2408,64 @@ The civilization needs mediators, not just voters." \
     fi
 }
 
+# ── aggregate_chronicle_candidates (issue #1605, v0.4 Collective Memory) ──────
+#
+# Aggregate Thought CRs with thoughtType=chronicle-candidate and surface the
+# top 3 (by confidence score, minimum confidence=8) in coordinator-state.chronicleCandidates.
+#
+# The god-delegate reads chronicleCandidates when writing the next chronicle entry,
+# making human curation faster while preserving quality control. This converts
+# the chronicle from exclusively god-curated to agent-proposed/god-curated.
+#
+# Flow:
+#   1. Read all Thought CRs with thoughtType=chronicle-candidate
+#   2. Filter to minimum confidence=8 (low-confidence nominations are noise)
+#   3. Sort by confidence (highest first), break ties by newest first
+#   4. Take top 3 ConfigMap names
+#   5. Patch coordinator-state.chronicleCandidates (semicolon-separated names)
+#
+# Called every ~6 iterations (~3 min) in the coordinator main loop (inside track_debate_activity block).
+aggregate_chronicle_candidates() {
+    # Fetch chronicle-candidate thoughts using label selector to avoid OOM
+    # (fetching all configmaps on clusters with 6000+ CRs causes OOM kill)
+    local candidates_json
+    candidates_json=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+        -l agentex/thought -o json 2>/dev/null | \
+        jq '[.items[] | select(.data.thoughtType == "chronicle-candidate") | {
+            name: .metadata.name,
+            confidence: ((.data.confidence // "7") | tonumber),
+            agent: (.data.agentRef // ""),
+            content: ((.data.content // "") | .[0:200]),
+            createdAt: .metadata.creationTimestamp
+        }] | sort_by(-.confidence, -.createdAt) | .[0:3]' 2>/dev/null || echo "[]")
+
+    if [ -z "$candidates_json" ] || [ "$candidates_json" = "[]" ] || [ "$candidates_json" = "null" ]; then
+        # No candidates found — no update needed
+        return 0
+    fi
+
+    # Extract top candidate ConfigMap names (semicolon-separated for coordinator-state)
+    local top_candidates
+    top_candidates=$(echo "$candidates_json" | jq -r '.[].name' 2>/dev/null | tr '\n' ';' | sed 's/;$//')
+
+    if [ -z "$top_candidates" ]; then
+        return 0
+    fi
+
+    # Count how many candidates we found for logging
+    local candidate_count
+    candidate_count=$(echo "$candidates_json" | jq 'length' 2>/dev/null || echo "0")
+
+    echo "[$(date -u +%H:%M:%S)] Chronicle candidates: found $candidate_count, surfacing top 3 in coordinator-state"
+
+    # Patch coordinator-state.chronicleCandidates with the top 3 names
+    local escaped_candidates
+    escaped_candidates=$(echo "$top_candidates" | sed 's/"/\\"/g')
+    kubectl_with_timeout 10 patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+        -p "{\"data\":{\"chronicleCandidates\":\"${escaped_candidates}\"}}" 2>/dev/null || \
+        echo "[$(date -u +%H:%M:%S)] WARNING: aggregate_chronicle_candidates: failed to patch coordinator-state"
+}
+
 # NOTE (issue #867): Planner-chain liveness is now handled by the planner-loop Deployment.
 # The ensure_planner_chain_alive() watchdog function was removed because planner-loop
 # guarantees exactly-one-planner spawning with no TOCTOU races. The coordinator no longer
@@ -3149,6 +3217,7 @@ while true; do
     # Every 6 iterations (~3 min): track debate activity and nudge if needed
     if [ $((iteration % 6)) -eq 0 ]; then
         track_debate_activity
+        aggregate_chronicle_candidates
     fi
 
     # Every 7 iterations (~3.5 min): run identity-based task routing (issue #1113)
