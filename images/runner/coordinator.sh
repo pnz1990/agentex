@@ -94,6 +94,10 @@ echo "Minimum vision score (from constitution): $MINIMUM_VISION_SCORE"
 # Issue #1447: gh auth login --with-token uses GraphQL to validate the token.
 # When the GitHub GraphQL rate limit is exceeded at pod startup, auth fails even
 # though the token itself is valid. Fix: retry with exponential backoff.
+# Issue #1564: After gh auth login fails, immediately test if REST API works.
+# If REST API is available (GITHUB_TOKEN env var works), skip the sleep delay —
+# GraphQL rate limit does not affect REST API calls, so the coordinator can
+# proceed immediately. Only sleep if BOTH GraphQL and REST API are unavailable.
 gh_auth_with_retry() {
   local token="$1"
   local max_attempts=3
@@ -103,8 +107,15 @@ gh_auth_with_retry() {
       echo "gh CLI authenticated successfully (attempt $attempt)"
       return 0
     fi
+    # Issue #1564: Check if REST API works before sleeping.
+    # gh auth login validates via GraphQL, but REST API uses GITHUB_TOKEN env var directly.
+    # If REST API responds (even without full gh auth), the coordinator can proceed.
+    if GITHUB_TOKEN="$token" gh api /repos/"${GITHUB_REPO:-pnz1990/agentex}" --silent 2>/dev/null; then
+      echo "WARNING: gh auth login failed (GraphQL rate limited) but REST API works — proceeding without sleep (issue #1564)"
+      return 0
+    fi
     if [ "$attempt" -lt "$max_attempts" ]; then
-      echo "WARNING: gh auth login failed (attempt $attempt/$max_attempts) — retrying in ${delay}s (GitHub API rate limit may be exceeded)"
+      echo "WARNING: gh auth login failed (attempt $attempt/$max_attempts) — REST API also unavailable, retrying in ${delay}s (GitHub API rate limit may be exceeded)"
       sleep "$delay"
       delay=$((delay * 2))
     fi
