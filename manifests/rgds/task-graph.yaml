@@ -17,10 +17,14 @@ spec:
       swarmRef: string | default=""
     status:
       configMapName: ${taskConfigMap.metadata.name}
-      phase: ${taskConfigMap.data.phase}
-      agentRef: ${taskConfigMap.data.agentRef}
-      outcome: ${taskConfigMap.data.outcome}
-      completedAt: ${taskConfigMap.data.completedAt}
+      # phase, agentRef, outcome, completedAt are read from the ConfigMap at runtime by agents.
+      # They are NOT surfaced as kro status fields to avoid kro reconciling them back to
+      # initial values. Agents read the ConfigMap directly.
+      # Using static references to avoid kro CEL evaluation errors on missing data fields.
+      phase: ${taskConfigMap.metadata.name}
+      agentRef: ${taskConfigMap.metadata.name}
+      outcome: ${taskConfigMap.metadata.name}
+      completedAt: ${taskConfigMap.metadata.creationTimestamp}
   resources:
     - id: taskConfigMap
       readyWhen:
@@ -45,7 +49,7 @@ spec:
           githubIssue: ${string(schema.spec.githubIssue)}
           context: ${schema.spec.context}
           swarmRef: ${schema.spec.swarmRef}
-          phase: "Unassigned"
-          agentRef: ""
-          outcome: ""
-          completedAt: ""
+          # NOTE: phase, agentRef, outcome, completedAt are intentionally omitted from
+          # this template. Agents patch these fields dynamically at runtime.
+          # If included here, kro reconciles them back to initial values every ~30s,
+          # erasing agent progress (same bug that affected coordinator-state, PR #925).
