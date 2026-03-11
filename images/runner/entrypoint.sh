@@ -1836,8 +1836,12 @@ proactive_consensus_scan() {
   unresolved=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
   
+  # Issue #1983: Declare count=0 OUTSIDE the if block so it is always initialized.
+  # Previously, 'local count' was inside 'if [ -n "$unresolved" ]' — when unresolved
+  # is empty (zero debates, the normal case), count was never set and the final log
+  # line referenced unbound $count, crashing the agent under set -euo pipefail.
+  local count=0
   if [ -n "$unresolved" ]; then
-    local count
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
       log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
@@ -1855,7 +1859,8 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h"
+3. Update coordinator to prune debates older than 48h" \
+        "debate backlog unresolved debate threads need synthesis"
       return 0
     fi
   fi
