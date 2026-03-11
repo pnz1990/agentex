@@ -31,6 +31,10 @@ type Coordinator struct {
 	running       atomic.Bool
 	metrics       *Metrics
 	healthMonitor *health.Monitor
+
+	// Completion tracking for coordinator-controlled spawning (#2061)
+	tracker                  *completionTracker
+	coordinatorSpawnsEnabled bool
 }
 
 // NewCoordinator creates a new Coordinator instance.
@@ -43,6 +47,7 @@ func NewCoordinator(client *k8sclient.Client, cfg *config.Config, logger *slog.L
 		githubFetcher: newHTTPGitHubFetcher(logger),
 		logger:        logger,
 		stopCh:        make(chan struct{}),
+		tracker:       newCompletionTracker(),
 	}
 }
 
@@ -94,6 +99,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	if err := c.reconcileSpawnSlots(ctx); err != nil {
 		c.logger.Error("early spawn slot reconciliation failed", "error", err)
 	}
+
+	// Read coordinator-spawns feature flag (#2061 Phase 2)
+	c.refreshCoordinatorSpawnsFlag(ctx)
 
 	// Start health monitor if configured (#2059)
 	if c.healthMonitor != nil {
@@ -154,6 +162,14 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 	if err := c.dispatchNextTask(ctx); err != nil {
 		c.logger.Error("dispatch next task failed", "error", err)
 		tickErr = true
+	}
+
+	// Every 2 ticks: handle completed agents and optionally respawn (#2061)
+	if iteration%2 == 0 {
+		if err := c.handleCompletedAgents(ctx); err != nil {
+			c.logger.Error("handle completed agents failed", "error", err)
+			tickErr = true
+		}
 	}
 
 	// Every 3 ticks: tally governance votes
