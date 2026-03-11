@@ -3782,10 +3782,14 @@ check_v05_milestone() {
     local criteria_met=0
     local criteria_report=""
 
-    # ── Criteria 1, 3, 4: Single S3 download loop (issue #1764) ─────────────
-    # All three criteria use the same identity files — download each file once
-    # and extract all three metrics in a single pass. This reduces S3 API calls
-    # from 150 (3 loops × 50 files) to 50 (1 loop × 50 files).
+    # ── Criteria 1, 3, 4: Batch S3 download (issue #1896) ───────────────────
+    # All three criteria use the same identity files — download all files once
+    # via a single aws s3 sync call and extract all three metrics in a single pass.
+    #
+    # Issue #1764: Reduced from 3 loops × 50 files to 1 loop × 50 files.
+    # Issue #1896: Reduced further from 50 sequential aws s3 cp calls (~100s) to
+    #   1 batch aws s3 sync call (~5-10s) by downloading to a temp directory.
+    #   This mirrors the fix applied to check_v06_milestone() in issue #1920.
     #
     # Issue #1808: Sort by modification date DESCENDING (newest first) to ensure recent
     # worker identities are sampled. Without this, alphabetical S3 ordering returns
@@ -3797,14 +3801,28 @@ check_v05_milestone() {
         --region "$BEDROCK_REGION" 2>/dev/null | \
         sort -k1,2 -r | awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -50 || echo "")
 
+    # Batch-download identity files to a temp directory (1 sync call vs 50 sequential cp calls)
+    local identity_tmp_dir
+    identity_tmp_dir=$(mktemp -d 2>/dev/null || echo "/tmp/v05-identities-$$")
+    mkdir -p "$identity_tmp_dir"
+
+    if [ -n "$identity_files" ]; then
+        aws s3 sync "s3://${IDENTITY_BUCKET}/identities/" "$identity_tmp_dir/" \
+            --region "$BEDROCK_REGION" \
+            --quiet 2>/dev/null || true
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.5 identity sync complete: $(ls "$identity_tmp_dir/" 2>/dev/null | wc -l) files downloaded"
+
     local promoted_count=0
     local proactive_count=0
     local mentor_credit_count=0
 
+    # Process files in newest-first order (sorted from S3 listing above)
     for ifile in $identity_files; do
+        local local_identity_path="$identity_tmp_dir/$ifile"
+        [ ! -f "$local_identity_path" ] && continue
         local ijson
-        ijson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/identities/${ifile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        ijson=$(cat "$local_identity_path" 2>/dev/null || echo "")
         [ -z "$ijson" ] && continue
 
         # Criterion 1: promotedRole
@@ -3822,6 +3840,9 @@ check_v05_milestone() {
         mc=$(echo "$ijson" | jq -r '(.specializationDetail.mentorCredits // []) | length' 2>/dev/null || echo "0")
         [ "$mc" -gt 0 ] 2>/dev/null && mentor_credit_count=$((mentor_credit_count + 1))
     done
+
+    # Cleanup temp dir
+    rm -rf "$identity_tmp_dir" 2>/dev/null || true
 
     # ── Criterion 1: 3+ agents with promotedRole ─────────────────────────────
     if [ "$promoted_count" -ge 3 ]; then
