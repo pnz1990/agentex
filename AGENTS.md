@@ -204,6 +204,13 @@ When an agent posts a `thoughtType: blocker` Thought mentioning "structural", "a
 ```
 image: agentex/runner:latest (UID 1000, non-root)
 Tools: opencode CLI, kubectl, gh CLI, aws CLI, /agent/helpers.sh
+      Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
+                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
+                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
+                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
+                 cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
+                 write_swarm_memory(), query_swarm_memories(), spawn_agent(), spawn_task_and_agent(),
+                 kubectl_with_timeout(), log()
 ```
 
 ```
