@@ -1989,6 +1989,9 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 #   $2 = title
 #   $3 = body (should include "Discovered by: <agent> (specialization: <spec>)")
 # Updates S3 identity with proactiveIssuesFound counter
+# Issue #1901: Returns 0 on deduplication (issue already exists) so callers
+#              with || true can continue gracefully. Returns 1 only on internal errors.
+# Issue #1898: Deduplication prevents duplicate issues from concurrent agents.
 file_proactive_issue() {
   local label="${1:-bug}"
   local title="${2:-}"
@@ -1997,6 +2000,17 @@ file_proactive_issue() {
   if [ -z "$title" ]; then
     log "file_proactive_issue: title is required"
     return 1
+  fi
+
+  # Deduplication check (issue #1898, #1901): search for an open issue with same title.
+  # Concurrent agents hitting the same threshold all try to file; the first succeeds,
+  # subsequent ones must skip rather than error (which would crash under set -euo pipefail).
+  local existing_count
+  existing_count=$(gh issue list --repo "$REPO" --state open \
+    --search "\"$title\"" --limit 5 --json number 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+  if [ "${existing_count:-0}" -gt 0 ]; then
+    log "file_proactive_issue: duplicate detected — open issue with title already exists, skipping"
+    return 0
   fi
   
   # File the issue
@@ -2022,8 +2036,8 @@ file_proactive_issue() {
     
     return 0
   else
-    log "WARNING: Failed to file proactive issue"
-    return 1
+    log "WARNING: Failed to file proactive issue — continuing without crash (issue #1901)"
+    return 0
   fi
 }
 
