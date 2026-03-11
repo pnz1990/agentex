@@ -2770,7 +2770,8 @@ track_debate_activity() {
             type: (.data.thoughtType // ""),
             parent: (.data.parentRef // ""),
             agent: (.data.agentRef // ""),
-            content: ((.data.content // "") | .[0:100])
+            content: ((.data.content // "") | .[0:100]),
+            ts: (.metadata.creationTimestamp // "")
           }]' 2>/dev/null) || return 0
 
     [ -z "$all_cm" ] || [ "$all_cm" = "null" ] || [ "$all_cm" = "[]" ] && return 0
@@ -2831,9 +2832,23 @@ track_debate_activity() {
 
         # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
         # N individual kubectl get calls (one per disagree thread) for orphan detection.
+        # Issue #1941: Also use creationTimestamp (from all_cm, now includes ts field) for
+        # age-based TTL resolution.
+        # Note: all_cm filters to debate/insight/decision/proposal types. For orphan detection
+        # of parentRef thoughts (which may be any type), we need a broader name list.
+        # Fetch all thought names in one batch (names-only jsonpath is memory-efficient).
         local existing_thought_names_tda
         existing_thought_names_tda=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
             -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+
+        # Issue #1941: Threads older than 48h with no synthesis are auto-resolved as timed-out.
+        # This prevents the unresolvedDebates list from growing unbounded as old debates outlive
+        # cleanup_old_thoughts() TTL. Timed-out resolutions are written to S3 debates/ so
+        # query_debate_outcomes() can return them.
+        local debate_ttl_secs=172800  # 48 hours
+        local now_epoch_tda
+        now_epoch_tda=$(date +%s)
+        local timed_out_count=0
 
         # Build list of unresolved thread IDs (in disagree but not in resolved)
         while IFS= read -r thread_id; do
@@ -2847,12 +2862,45 @@ track_debate_activity() {
                 continue
             fi
             # Check if this thread has a synthesis response
-            if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
-                [ -n "$unresolved_threads" ] \
-                    && unresolved_threads="${unresolved_threads},${thread_id}" \
-                    || unresolved_threads="$thread_id"
+            if echo "$resolved_threads" | grep -qF "$thread_id"; then
+                continue
             fi
+            # Issue #1941: Check age of the parent thought. If older than debate TTL (48h),
+            # auto-resolve it as timed-out to prevent unbounded accumulation.
+            # Look up the parent's timestamp from all_cm (which now includes ts field).
+            local thread_ts
+            thread_ts=$(echo "$all_cm" | jq -r --arg name "$thread_id" \
+                '.[] | select(.name == $name) | .ts' 2>/dev/null || echo "")
+            if [ -n "$thread_ts" ]; then
+                local thread_epoch=0
+                thread_epoch=$(date -d "$thread_ts" +%s 2>/dev/null || echo "0")
+                local thread_age=$(( now_epoch_tda - thread_epoch ))
+                if [ "$thread_age" -gt "$debate_ttl_secs" ]; then
+                    # Write a timed-out resolution to S3 so it's queryable
+                    local thread_id_hash
+                    thread_id_hash=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+                    local timeout_json
+                    timeout_json=$(printf '{"threadId":"%s","topic":"timed-out","outcome":"timed-out","resolution":"Debate thread exceeded 48h TTL with no synthesis. Auto-resolved by coordinator.","participants":[],"timestamp":"%s","recordedBy":"coordinator","sourceThought":"%s"}\n' \
+                        "$thread_id_hash" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$thread_id")
+                    local s3_timeout_path="s3://${IDENTITY_BUCKET}/debates/${thread_id_hash}.json"
+                    # Write to S3 (idempotent — overwrites if already exists for this thread)
+                    echo "$timeout_json" | aws s3 cp - "$s3_timeout_path" \
+                        --content-type application/json \
+                        --region "$BEDROCK_REGION" >/dev/null 2>&1 && \
+                        echo "[$(date -u +%H:%M:%S)] Auto-resolved timed-out debate thread: $thread_id (age=${thread_age}s)" || true
+                    timed_out_count=$((timed_out_count + 1))
+                    continue
+                fi
+            fi
+            [ -n "$unresolved_threads" ] \
+                && unresolved_threads="${unresolved_threads},${thread_id}" \
+                || unresolved_threads="$thread_id"
         done <<< "$disagree_threads"
+
+        if [ "$timed_out_count" -gt 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] Auto-resolved $timed_out_count timed-out debate threads (>48h, no synthesis)"
+            push_metric "DebateThreadsTimedOut" "$timed_out_count" "Count" "Component=Coordinator"
+        fi
     fi
 
     local unresolved_count=0
