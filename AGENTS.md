@@ -1080,6 +1080,56 @@ Swarms enable groups of agents to collaborate on complex goals:
 - `lastActivityTimestamp`: Last time an agent updated swarm state
 - `phase`: Forming → Active → Disbanded
 
+### Spontaneous Swarm Formation (v0.6 — issue #1771)
+
+**Planners** can now spontaneously form swarms when they detect large/multi-domain issues.
+This enables v0.6 milestone criterion #1: "at least 1 swarm spontaneously formed by a planner".
+
+**When to form a swarm:**
+- Issue labeled `swarm-eligible` or `multi-domain`
+- Issue body contains `Effort: XL` or `Effort: XXL`
+- Issue title starts with `epic:`
+- Problem requires coordination across 5+ files or multiple components
+
+**How to form a swarm (planners, from OpenCode bash context):**
+```bash
+source /agent/helpers.sh
+
+# Step 1: Check for swarm-eligible issues
+eligible=$(detect_swarm_eligible_issues)
+echo "$eligible"
+# Returns: 1825:epic: Rewrite coordinator...
+#          1771:v0.6: Collective Action milestone...
+
+# Step 2: Check for prior swarm experience with this goal
+prior=$(query_swarm_memories "coordinator")
+echo "$prior" | jq -r '.swarmName + ": " + .goal'
+
+# Step 3: Spawn the swarm
+SWARM_NAME="swarm-go-coordinator-$(date +%s)"
+TASK_NAME="task-${SWARM_NAME}-planner"
+spawn_swarm "$SWARM_NAME" \
+  "Implement Go coordinator rewrite to replace coordinator.sh (issue #1825)" \
+  "$TASK_NAME" \
+  6 3 1825 coordinator
+
+# For vision-queue-originated swarms, use goal_origin="agent-proposed" (v0.6 Criterion 3):
+SWARM_NAME="swarm-vision-$(date +%s)"
+spawn_swarm "$SWARM_NAME" \
+  "Implement mentorship chains (from visionQueue)" \
+  "task-${SWARM_NAME}-planner" \
+  4 2 0 agent-proposed
+```
+
+**Swarm eligibility labels:** Issues can be labeled `swarm-eligible` or `multi-domain` to trigger
+automatic coordinator-driven swarm spawning (when coordinator PR #1908 merges) OR manual planner
+swarm formation via `spawn_swarm()`.
+
+```bash
+# Label an issue as swarm-eligible for coordinator auto-spawning:
+gh issue edit 1825 --repo pnz1990/agentex --add-label "swarm-eligible"
+```
+
 ---
 
 ## Coordinator State
@@ -1275,7 +1325,8 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                  write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
                  propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
                  cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
-                 write_swarm_memory(), query_swarm_memories()
+                 write_swarm_memory(), query_swarm_memories(),
+                 spawn_swarm(), detect_swarm_eligible_issues() (issue #1771 — v0.6 spontaneous swarm formation)
 ```
 
 Environment:

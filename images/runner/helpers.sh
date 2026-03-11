@@ -1723,5 +1723,213 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── spawn_swarm ───────────────────────────────────────────────────────────────
+# Issue #1771 v0.6: Enable planners to spontaneously form swarms for large/multi-domain issues.
+#
+# Creates a Swarm CR (processed by kro swarm-graph RGD) which:
+# 1. Creates a state ConfigMap (<swarm-name>-state) tracking goal, members, tasks
+# 2. Spawns a planner Job immediately to decompose the goal into worker tasks
+#
+# This is the primary mechanism for v0.6 Collective Action milestone criterion #1:
+# "At least 1 swarm spontaneously formed by a planner (not god)"
+#
+# Parameters:
+#   swarm_name     — Unique name for the swarm (e.g. "swarm-routing-fix-$(date +%s)")
+#   goal           — Human-readable goal description (shown to swarm planner)
+#   planner_task   — Task CR name the swarm planner will read (created separately or as empty task)
+#   max_agents     — Maximum agents in swarm (default: 6)
+#   workers        — Expected worker count (default: 3)
+#   github_issue   — Associated GitHub issue number (0 = no issue, default: 0)
+#   goal_origin    — "coordinator" or "agent-proposed" (default: coordinator)
+#                    Use "agent-proposed" when spawned from visionQueue for v0.6 Criterion 3.
+#
+# Returns: 0 on success, 1 on failure
+#
+# Usage (from OpenCode bash tool — planners):
+#   source /agent/helpers.sh
+#   # For a multi-domain issue detected as XL effort:
+#   SWARM_NAME="swarm-go-coordinator-$(date +%s)"
+#   TASK_NAME="task-${SWARM_NAME}-planner"
+#   spawn_swarm "$SWARM_NAME" "Implement Go coordinator rewrite (issue #1825)" "$TASK_NAME" 6 3 1825 coordinator
+#
+# See also: query_swarm_memories() to check for prior swarm experience before forming
+spawn_swarm() {
+  local swarm_name="${1:-}"
+  local goal="${2:-}"
+  local planner_task="${3:-}"
+  local max_agents="${4:-6}"
+  local workers="${5:-3}"
+  local github_issue="${6:-0}"
+  local goal_origin="${7:-coordinator}"
+
+  if [ -z "$swarm_name" ] || [ -z "$goal" ]; then
+    log "spawn_swarm: swarm_name and goal are required. Usage: spawn_swarm <name> <goal> [planner_task] [max_agents] [workers] [github_issue] [goal_origin]"
+    return 1
+  fi
+
+  # Check kill switch
+  local killswitch_enabled
+  killswitch_enabled=$(kubectl_with_timeout 10 get configmap agentex-killswitch \
+    -n "${NAMESPACE}" -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+  if [ "$killswitch_enabled" = "true" ]; then
+    local ks_reason
+    ks_reason=$(kubectl_with_timeout 10 get configmap agentex-killswitch \
+      -n "${NAMESPACE}" -o jsonpath='{.data.reason}' 2>/dev/null || echo "unknown")
+    log "spawn_swarm: kill switch active — skipping swarm formation. Reason: $ks_reason"
+    return 1
+  fi
+
+  # Check for existing swarm with same name
+  local existing
+  existing=$(kubectl_with_timeout 10 get configmap "${swarm_name}-state" -n "${NAMESPACE}" \
+    --ignore-not-found 2>/dev/null | grep -c "${swarm_name}-state" || echo "0")
+  if [ "$existing" -gt 0 ] 2>/dev/null; then
+    log "spawn_swarm: swarm ${swarm_name} already exists — skipping duplicate formation"
+    return 0
+  fi
+
+  # Read runtime values
+  local ecr_registry repo cluster model
+  ecr_registry="${ECR_REGISTRY:-}"
+  if [ -z "$ecr_registry" ]; then
+    ecr_registry=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+      -n "${NAMESPACE}" -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "")
+    ecr_registry="${ecr_registry:-569190534191.dkr.ecr.us-west-2.amazonaws.com}"
+  fi
+  repo="${REPO:-pnz1990/agentex}"
+  cluster="${CLUSTER:-agentex}"
+  model="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
+
+  # Create a planner Task CR if not provided or create a minimal bootstrap task
+  if [ -z "$planner_task" ]; then
+    planner_task="task-${swarm_name}-planner"
+  fi
+
+  # Escape goal for YAML (replace quotes with escaped quotes)
+  local safe_goal
+  safe_goal=$(echo "$goal" | sed 's/"/\\"/g' | tr '\n' ' ')
+
+  # Create planner Task CR (the swarm planner reads this for its goal)
+  log "spawn_swarm: creating planner task ${planner_task}..."
+  local task_err
+  task_err=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${planner_task}
+  namespace: ${NAMESPACE}
+spec:
+  title: "Swarm planner: ${safe_goal}"
+  description: "You are the planner for swarm ${swarm_name}. Goal: ${safe_goal}. GitHub issue: #${github_issue}. Decompose this goal into worker tasks, spawn workers, and coordinate swarm execution. Spawn a successor before exiting."
+  role: "planner"
+  effort: "L"
+  githubIssue: ${github_issue}
+  swarmRef: "${swarm_name}"
+  priority: 7
+EOF
+) || {
+    log "ERROR: spawn_swarm: failed to create planner Task CR ${planner_task}: ${task_err}"
+    return 1
+  }
+  log "spawn_swarm: planner task ${planner_task} created."
+
+  # Create the Swarm CR (kro swarm-graph processes this and spawns the planner Job)
+  log "spawn_swarm: creating Swarm CR ${swarm_name}..."
+  local swarm_err
+  swarm_err=$(kubectl_with_timeout 10 apply -f - <<EOF 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/spawned-by: ${AGENT_NAME}
+    agentex/goal-origin: ${goal_origin}
+spec:
+  goal: "${safe_goal}"
+  plannerTaskRef: "${planner_task}"
+  maxAgents: ${max_agents}
+  planners: 1
+  workers: ${workers}
+  reviewers: 1
+  consensusThreshold: 51
+  githubRepo: "${repo}"
+  model: "${model}"
+  imageRegistry: "${ecr_registry}"
+  clusterName: "${cluster}"
+EOF
+) || {
+    log "ERROR: spawn_swarm: failed to create Swarm CR ${swarm_name}: ${swarm_err}"
+    # Clean up the orphaned task
+    kubectl_with_timeout 10 delete task.kro.run "${planner_task}" -n "${NAMESPACE}" 2>/dev/null || true
+    return 1
+  }
+
+  log "spawn_swarm: Swarm CR ${swarm_name} created (goal: ${safe_goal}, goal_origin: ${goal_origin})"
+
+  # Update coordinator-state.activeSwarms to track this new swarm
+  local active_swarms
+  active_swarms=$(kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "${NAMESPACE}" -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo "")
+  local new_entry="${swarm_name}:Forming:${goal_origin}"
+  if [ -z "$active_swarms" ]; then
+    active_swarms="$new_entry"
+  else
+    active_swarms="${active_swarms}|${new_entry}"
+  fi
+  kubectl_with_timeout 10 patch configmap coordinator-state -n "${NAMESPACE}" \
+    --type=merge -p "{\"data\":{\"activeSwarms\":\"${active_swarms}\"}}" 2>/dev/null || true
+
+  # Post insight thought about swarm formation
+  post_thought "Swarm ${swarm_name} spontaneously formed by agent ${AGENT_NAME} (role: ${AGENT_ROLE}). Goal: ${safe_goal}. Goal origin: ${goal_origin}. This contributes to v0.6 milestone criterion 1 (spontaneous swarm formation)." "insight" 9
+
+  push_metric "SwarmSpawned" 1
+  log "spawn_swarm: success — ${swarm_name} (planner_task=${planner_task}, max_agents=${max_agents}, workers=${workers})"
+  return 0
+}
+
+# ── detect_swarm_eligible_issues ─────────────────────────────────────────────
+# Issue #1771 v0.6: Scan open GitHub issues for multi-domain/XL work that should
+# be tackled by a swarm rather than a single worker.
+#
+# Detection criteria (any of):
+# - Issue has label "swarm-eligible" or "multi-domain"
+# - Issue body contains "Effort: XL" or "Effort: XXL"
+# - Issue title starts with "epic:"
+#
+# Returns: Newline-separated list of "issue_number:title" pairs
+#
+# Usage:
+#   source /agent/helpers.sh
+#   detect_swarm_eligible_issues
+#   # Returns:
+#   # 1825:epic: Rewrite coordinator and agent lifecycle in Go
+#   # 1771:v0.6: Collective Action milestone...
+detect_swarm_eligible_issues() {
+  local eligible_issues=""
+
+  # Query open issues with swarm-related labels
+  local labeled_issues
+  labeled_issues=$(gh api "repos/${REPO}/issues?state=open&labels=swarm-eligible&per_page=20" \
+    --jq '.[] | "\(.number):\(.title)"' 2>/dev/null || echo "")
+  local multi_domain_issues
+  multi_domain_issues=$(gh api "repos/${REPO}/issues?state=open&labels=multi-domain&per_page=20" \
+    --jq '.[] | "\(.number):\(.title)"' 2>/dev/null || echo "")
+
+  # Query issues with XL/XXL effort annotations or epic titles
+  local xl_issues
+  xl_issues=$(gh api "repos/${REPO}/issues?state=open&per_page=50" \
+    --jq '.[] | select(
+      (.body // "" | test("Effort: (XXL|XL)"; "i")) or
+      (.title | test("^epic:"; "i"))
+    ) | "\(.number):\(.title)"' 2>/dev/null || echo "")
+
+  # Combine and deduplicate
+  eligible_issues=$(printf '%s\n%s\n%s\n' "$labeled_issues" "$multi_domain_issues" "$xl_issues" | \
+    sort -u | grep -v '^$')
+
+  echo "$eligible_issues"
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, spawn_swarm, detect_swarm_eligible_issues available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
