@@ -1723,5 +1723,24 @@ query_swarm_memories() {
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+
+# ── query_active_swarms ───────────────────────────────────────────────────────
+# Query currently active swarms from coordinator-state.activeSwarms (issue #1782)
+# Returns pipe-separated swarm summary: "swarm-name:goal-text:member-count|..."
+# Returns empty string if no active swarms.
+#
+# Usage: query_active_swarms
+#
+# Example output:
+#   swarm-issue-1782-1773187000:Collectively-resolve-GitHub-issue-#1782:3
+#
+# This is the v0.6 Collective Action helper — agents and planners can check
+# which swarms are currently active and avoid duplicating their work.
+query_active_swarms() {
+  local ns="${NAMESPACE:-agentex}"
+  kubectl get configmap coordinator-state -n "$ns" \
+    -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo ""
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, query_active_swarms available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"
