@@ -3044,10 +3044,15 @@ track_debate_activity() {
     local thread_count
     thread_count=$(echo "$all_cm" | jq '[.[] | select(.parent != "" and .parent != null)] | length' 2>/dev/null || echo "0")
 
-    # Find unresolved disagreements (debate thoughts with stance "disagree" that have no "synthesize" sibling)
-    # Issue #1096: Use case-insensitive regex to catch all disagreement patterns (disagree, DISAGREE, Disagree)
-    local disagree_count
-    disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("disagree"; "i"))] | length' 2>/dev/null || echo "0")
+     # Find unresolved disagreements (debate thoughts with stance "disagree" that have no "synthesize" sibling)
+     # Issue #1096: Use case-insensitive regex to catch all disagreement patterns (disagree, DISAGREE, Disagree)
+     # Issue #1899: Improved regex to detect disagree STANCE specifically:
+     #   - "DEBATE RESPONSE [.*disagree" — standard format
+     #   - "^DISAGREE:" — all-caps format
+     #   - "^I disagree" — informal format
+     # This prevents false positives where "agree" stances mention the word "disagree" in their reasoning.
+     local disagree_count
+     disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[.*disagree|^DISAGREE:|^I disagree|\\[disagree"; "i"))] | length' 2>/dev/null || echo "0")
     # Issue #1096: Use case-insensitive regex to catch all synthesis patterns (synthesis, SYNTHESIS, Synthesis, synthesize, SYNTHESIZE, Synthesize)
     local synthesize_count
     synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))] | length' 2>/dev/null || echo "0")
@@ -3067,54 +3072,92 @@ track_debate_activity() {
     push_metric "DebateResponses" "$debate_count" "Count" "Component=Coordinator"
     push_metric "DebateThreads" "$thread_count" "Count" "Component=Coordinator"
 
-    # ── Issue #1111: Track unresolved debate threads for planner triage ───────
-    # A debate thread is "unresolved" if:
-    #   - It has at least one debate thought with "disagree" stance
-    #   - No debate thought in the same thread has a "synthesize" response
-    # Thread ID = parentRef of the debate thoughts (the original thought being debated)
-    #
-    # Strategy: collect all parentRefs from disagree thoughts, then remove those that
-    # have a corresponding synthesize response in the same thread.
-    local unresolved_threads=""
-
-    # Get all parentRefs from "disagree" debate thoughts
-    local disagree_threads
-    disagree_threads=$(echo "$all_cm" | jq -r '
-        [.[] | select(.type == "debate") | select(.content | test("disagree"; "i")) | .parent]
-        | unique | .[]' 2>/dev/null || true)
-
-    if [ -n "$disagree_threads" ]; then
-        # Get all parentRefs from "synthesize" debate thoughts (resolved threads)
-        local resolved_threads
-        resolved_threads=$(echo "$all_cm" | jq -r '
-            [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i")) | .parent]
-            | unique | .[]' 2>/dev/null || true)
-
-        # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
-        # N individual kubectl get calls (one per disagree thread) for orphan detection.
-        local existing_thought_names_tda
-        existing_thought_names_tda=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
-            -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
-
-        # Build list of unresolved thread IDs (in disagree but not in resolved)
-        while IFS= read -r thread_id; do
-            [ -z "$thread_id" ] && continue
-            # Skip empty/null parentRefs
-            [ "$thread_id" = "null" ] && continue
-            # Issue #1667: Skip orphaned entries where the parent CM was already deleted.
-            # Uses pre-fetched batch list to avoid N individual kubectl get calls.
-            if ! echo " $existing_thought_names_tda " | grep -qF " $thread_id "; then
-                echo "[$(date -u +%H:%M:%S)] Skipping orphaned debate thread: $thread_id (parent CM deleted)"
-                continue
-            fi
-            # Check if this thread has a synthesis response
-            if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
-                [ -n "$unresolved_threads" ] \
-                    && unresolved_threads="${unresolved_threads},${thread_id}" \
-                    || unresolved_threads="$thread_id"
-            fi
-        done <<< "$disagree_threads"
-    fi
+     # ── Issue #1111: Track unresolved debate threads for planner triage ───────
+     # A debate thread is "unresolved" if:
+     #   - It has at least one debate thought with "disagree" stance
+     #   - No debate thought in the same thread has a "synthesize" response
+     # Thread ID = parentRef of the debate thoughts (the original thought being debated)
+     #
+     # Strategy: collect all parentRefs from disagree thoughts, then remove those that
+     # have a corresponding synthesize response in the same thread.
+     #
+     # Issue #1899: Extended resolution detection to handle 2-level debate chains.
+     # Pattern: original → disagree (parentRef=original) → synthesize (parentRef=disagree)
+     # Previously, synthesis at depth 2 was not recognized as resolving the original thread.
+     # Fix: build a map of all debate thoughts by name, then for each synthesis whose
+     # parentRef is itself a debate (depth-2 synthesis), also mark that debate's parent
+     # (the original thread) as resolved.
+     local unresolved_threads=""
+ 
+     # Get all parentRefs from "disagree" debate thoughts
+     # Issue #1899: Use precise stance-based regex to avoid false positives where "agree" stances
+     # mention "disagree" in their reasoning (inflates unresolved count by ~30%).
+     local disagree_threads
+     disagree_threads=$(echo "$all_cm" | jq -r '
+         [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[.*disagree|^DISAGREE:|^I disagree|\\[disagree"; "i")) | .parent]
+         | unique | .[]' 2>/dev/null || true)
+ 
+     if [ -n "$disagree_threads" ]; then
+         # Get all parentRefs from "synthesize" debate thoughts (resolved threads — direct)
+         local resolved_threads
+         resolved_threads=$(echo "$all_cm" | jq -r '
+             [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i")) | .parent]
+             | unique | .[]' 2>/dev/null || true)
+ 
+         # Issue #1899: Also resolve threads where synthesis is at depth-2
+         # (synthesis replies to a disagree response, not directly to the original thought).
+         # Build map: debate thought name → its parentRef, to trace ancestry one level up.
+         local debate_name_to_parent
+         debate_name_to_parent=$(echo "$all_cm" | jq -r '
+             [.[] | select(.type == "debate") | select(.parent != "" and .parent != null)]
+             | .[] | [.name, .parent] | @tsv' 2>/dev/null || true)
+ 
+         # For each synthesis, check if its parentRef is itself a debate.
+         # If so, add that debate's parentRef (grandparent) to resolved_threads too.
+         if [ -n "$debate_name_to_parent" ] && [ -n "$resolved_threads" ]; then
+             local indirect_resolved=""
+             while IFS= read -r direct_resolved_id; do
+                 [ -z "$direct_resolved_id" ] && continue
+                 # Check if direct_resolved_id is itself the name of a debate thought
+                 grandparent=$(echo "$debate_name_to_parent" | awk -v name="$direct_resolved_id" 'BEGIN{FS="\t"} $1 == name {print $2}')
+                 if [ -n "$grandparent" ]; then
+                     [ -n "$indirect_resolved" ] \
+                         && indirect_resolved="${indirect_resolved}"$'\n'"${grandparent}" \
+                         || indirect_resolved="$grandparent"
+                 fi
+             done <<< "$resolved_threads"
+             # Merge indirect resolved into resolved_threads
+             if [ -n "$indirect_resolved" ]; then
+                 resolved_threads=$(printf '%s\n%s' "$resolved_threads" "$indirect_resolved" | sort -u)
+                 echo "[$(date -u +%H:%M:%S)] Issue #1899: resolved_threads extended with $(echo "$indirect_resolved" | grep -c . || echo 0) indirect (depth-2 synthesis) entries"
+             fi
+         fi
+ 
+         # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
+         # N individual kubectl get calls (one per disagree thread) for orphan detection.
+         local existing_thought_names_tda
+         existing_thought_names_tda=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+             -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+ 
+         # Build list of unresolved thread IDs (in disagree but not in resolved)
+         while IFS= read -r thread_id; do
+             [ -z "$thread_id" ] && continue
+             # Skip empty/null parentRefs
+             [ "$thread_id" = "null" ] && continue
+             # Issue #1667: Skip orphaned entries where the parent CM was already deleted.
+             # Uses pre-fetched batch list to avoid N individual kubectl get calls.
+             if ! echo " $existing_thought_names_tda " | grep -qF " $thread_id "; then
+                 echo "[$(date -u +%H:%M:%S)] Skipping orphaned debate thread: $thread_id (parent CM deleted)"
+                 continue
+             fi
+             # Check if this thread has a synthesis response (direct or indirect)
+             if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
+                 [ -n "$unresolved_threads" ] \
+                     && unresolved_threads="${unresolved_threads},${thread_id}" \
+                     || unresolved_threads="$thread_id"
+             fi
+         done <<< "$disagree_threads"
+     fi
 
     local unresolved_count=0
     [ -n "$unresolved_threads" ] && unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . || echo "0")
