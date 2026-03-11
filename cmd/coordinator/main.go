@@ -15,6 +15,7 @@ import (
 
 	"github.com/pnz1990/agentex/internal/config"
 	"github.com/pnz1990/agentex/internal/coordinator"
+	"github.com/pnz1990/agentex/internal/health"
 	"github.com/pnz1990/agentex/internal/k8s"
 	"github.com/pnz1990/agentex/internal/metrics"
 	"github.com/pnz1990/agentex/internal/server"
@@ -27,6 +28,7 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig file (empty for in-cluster)")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
 	httpAddr := flag.String("http-addr", ":8080", "HTTP server listen address for health/metrics")
+	healthInterval := flag.Duration("health-interval", 60*time.Second, "Interval between health check runs")
 	flag.Parse()
 
 	// Configure structured logging
@@ -40,7 +42,7 @@ func main() {
 		"namespace", *namespace,
 		"heartbeatInterval", heartbeatInterval.String(),
 		"httpAddr", *httpAddr,
-		"version", "go-v0.2.0",
+		"version", "go-v0.3.0",
 	)
 
 	// Create Kubernetes client
@@ -53,12 +55,17 @@ func main() {
 	// Create configuration
 	cfg := config.NewConfig(*namespace, *heartbeatInterval, *kubeconfig, logger)
 
-	// Create metrics registry and register coordinator metrics
+	// Create metrics registry and register coordinator metrics (#2058)
 	reg := metrics.NewRegistry()
-	_ = coordinator.RegisterMetrics(reg)
+	coordMetrics := coordinator.RegisterMetrics(reg)
 
-	// Create coordinator
-	coord := coordinator.NewCoordinator(client, cfg, logger)
+	// Create health monitor (#2059)
+	healthMon := health.NewMonitor(client, *namespace, *healthInterval, logger)
+
+	// Create coordinator, wiring in metrics and health monitor
+	coord := coordinator.NewCoordinator(client, cfg, logger).
+		WithMetrics(coordMetrics).
+		WithHealthMonitor(healthMon)
 
 	// Start HTTP server for health and metrics
 	httpSrv := server.New(server.Config{
