@@ -1753,6 +1753,7 @@ proactive_debugger_scan() {
           # Check if the diff also includes set -e or error handling
           if ! echo "$pr_diff" | grep -qE '^\+.*(set -[euo]|trap.*ERR)'; then
             log "Debugger scan: PR #$suspicious_pr adds bash functions without explicit error handling — filing issue..."
+            # Issue #1901: use || true to prevent crash under set -euo pipefail when gh issue create fails
             file_proactive_issue "bug" \
               "potential bug: PR #$suspicious_pr adds bash functions without error handling" \
               "PR #$suspicious_pr merged $(date +%Y-%m-%d) and added bash functions without \`set -e\` or error traps.
@@ -1770,7 +1771,7 @@ Review the added functions and add appropriate error handling:
 - \`|| return 1\` on critical commands
 - error traps if needed
 
-This is a potential regression — the code may work now but could fail silently under error conditions."
+This is a potential regression — the code may work now but could fail silently under error conditions." || true
             return 0
           fi
         fi
@@ -1803,6 +1804,7 @@ proactive_architecture_scan() {
   
   if [ -n "$suspicious_pr" ] && [ "$suspicious_pr" != "null" ]; then
     log "Architecture scan: PR #$suspicious_pr touched protected files without god-approved label — filing issue..."
+    # Issue #1901: use || true to prevent crash under set -euo pipefail when gh issue create fails
     file_proactive_issue "constitution-violation" \
       "governance: PR #$suspicious_pr merged with protected file changes but no god-approved label" \
       "PR #$suspicious_pr touched protected files (entrypoint.sh, AGENTS.md, or RGDs) but merged without the \`god-approved\` label.
@@ -1819,7 +1821,7 @@ AGENTS.md Protected Files section states:
 > - manifests/rgds/*.yaml
 
 ## Action Required
-God should review PR #$suspicious_pr to verify changes were intentional and safe."
+God should review PR #$suspicious_pr to verify changes were intentional and safe." || true
     return 0
   fi
   
@@ -1828,6 +1830,9 @@ God should review PR #$suspicious_pr to verify changes were intentional and safe
 }
 
 # proactive_consensus_scan() - Scan for unresolved debate threads
+# Fix #1983: declare count=0 outside if block to avoid unbound variable under set -euo pipefail
+# Fix #1934: dedup check with stable keyword before filing to prevent duplicate issues
+# Fix #1901: use || true on file_proactive_issue to prevent crash on filing failure
 proactive_consensus_scan() {
   log "Consensus scan: checking for unresolved debates..."
   
@@ -1836,20 +1841,22 @@ proactive_consensus_scan() {
   unresolved=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
   
+  # Issue #1983: declare count outside if block — prevents unbound variable when unresolved is empty
+  local count=0
   if [ -n "$unresolved" ]; then
-    local count
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
-      # Issue #1934: Dedup check using stable keyword (count varies, title-based dedup fails).
-      local existing_consensus_issue
-      existing_consensus_issue=$(gh issue list --repo "$REPO" --state open \
-        --search "debate backlog unresolved threads synthesis" \
+      # Issue #1934: dedup using stable keyword (not count-varying title) to prevent duplicate issues
+      local existing_consensus
+      existing_consensus=$(gh issue list --repo "$REPO" --state open \
+        --search "debate backlog unresolved debate threads need synthesis" \
         --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
-      if [ "${existing_consensus_issue:-0}" -gt 0 ]; then
-        log "Consensus scan: debate backlog issue already open — skipping duplicate filing"
+      if [ "${existing_consensus:-0}" -gt 0 ]; then
+        log "Consensus scan: synthesis backlog issue already open — skipping duplicate (count=$count)"
         return 0
       fi
       log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
+      # Issue #1901: use || true to prevent crash under set -euo pipefail when gh issue create fails
       file_proactive_issue "consensus" \
         "debate backlog: $count unresolved debate threads need synthesis" \
         "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
@@ -1864,7 +1871,7 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h"
+3. Update coordinator to prune debates older than 48h" || true
       return 0
     fi
   fi
@@ -1910,6 +1917,7 @@ proactive_coordinator_scan() {
     done
     if [ "$stale_count" -ge 1 ]; then
       log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+      # Issue #1901: use || true to prevent crash under set -euo pipefail when gh issue create fails
       file_proactive_issue "bug" \
         "coordinator state: $stale_count assignments persisted >2h past job completion" \
         "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
@@ -1924,7 +1932,7 @@ This issue was proactively filed by a domain specialist during systematic scan.
 ## Action Required
 1. Review \`cleanup_stale_assignments()\` in coordinator.sh
 2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
+3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)" || true
       return 0
     fi
   fi
@@ -1940,6 +1948,7 @@ This issue was proactively filed by a domain specialist during systematic scan.
     local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
     if [ "$heartbeat_age" -gt 600 ]; then
       log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+      # Issue #1901: use || true to prevent crash under set -euo pipefail when gh issue create fails
       file_proactive_issue "bug" \
         "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
         "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
@@ -1954,13 +1963,15 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
 ## Action Required
 1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
 2. Check coordinator logs for errors
-3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
+3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`" || true
       return 0
     fi
   fi
 
   # ── Check 3: Unresolved debates backlog ───────────────────────────────────────
   # If unresolvedDebates count > 50, flag it — the civilization is not synthesizing fast enough.
+  # Fix #1934: dedup using stable keyword search (count-varying title causes duplicates)
+  # Fix #1901: use || true on file_proactive_issue to prevent crash under set -euo pipefail
   local unresolved_debates
   unresolved_debates=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
@@ -1968,18 +1979,18 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
     local debate_count
     debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
     if [ "$debate_count" -gt 50 ]; then
-      # Issue #1934: Dedup check using stable keyword (not count-varying title).
-      # Titles like "civilization health: 103 unresolved debates" change each run — 
-      # title-based dedup fails. Use keyword search for stable prefix instead.
+      # Issue #1934: dedup using stable keyword — the count in the title changes each run, defeating
+      # title-based dedup. Use a stable substring that matches all "civilization health" debate issues.
       local existing_debate_issue
       existing_debate_issue=$(gh issue list --repo "$REPO" --state open \
         --search "civilization health unresolved debates synthesis backlog" \
         --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
       if [ "${existing_debate_issue:-0}" -gt 0 ]; then
-        log "Coordinator scan: synthesis backlog issue already open — skipping duplicate filing"
+        log "Coordinator scan: synthesis backlog issue already open — skipping duplicate (count=$debate_count)"
         return 0
       fi
       log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
+      # Issue #1901: use || true to prevent crash when file_proactive_issue fails (e.g. gh rate-limit)
       file_proactive_issue "enhancement" \
         "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
         "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
@@ -1994,7 +2005,7 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 ## Action Required
 1. Spawn an agent specifically to synthesize the oldest unresolved threads
 2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
-3. Consider increasing synthesis frequency in agent instructions"
+3. Consider increasing synthesis frequency in agent instructions" || true
       return 0
     fi
   fi
