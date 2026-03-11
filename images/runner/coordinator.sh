@@ -1473,10 +1473,21 @@ check_stuck_swarms() {
         # STUCK SWARM DETECTED — spawn a new planner Job
         echo "[$(date -u +%H:%M:%S)] STUCK SWARM DETECTED: $swarm_ref has been in phase=Forming for ${stuck_seconds}s with no active planner — respawning"
 
-        # Create task CR for the swarm planner (may already exist from initial creation; idempotent)
-        local task_name="task-${swarm_ref}-planner"
+        # Read plannerTaskRef from the Swarm CR spec (issue #2005: agents may use a different
+        # naming convention than task-${swarm_ref}-planner, so always read from the source of truth)
+        local planner_task_ref
+        planner_task_ref=$(kubectl_with_timeout 10 get swarm.kro.run "$swarm_ref" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.plannerTaskRef}' 2>/dev/null || echo "")
+        # Fall back to the standard naming convention if Swarm CR is not readable
+        local task_name="${planner_task_ref:-task-${swarm_ref}-planner}"
+        if [ -z "$planner_task_ref" ]; then
+            echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: could not read plannerTaskRef from Swarm CR $swarm_ref — using default task name $task_name"
+        else
+            echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: using plannerTaskRef=$task_name from Swarm CR $swarm_ref"
+        fi
         local safe_goal
         safe_goal=$(echo "$swarm_goal" | head -c 200 | sed 's/"/\\"/g')
+        # Create Task CR using the correct plannerTaskRef name from Swarm CR spec (issue #2005)
         kubectl_with_timeout 10 apply -f - <<TASK_EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Task
