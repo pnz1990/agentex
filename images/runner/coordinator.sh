@@ -4063,12 +4063,22 @@ Begin v0.6 milestone planning. Suggest: focus on **swarm intelligence** — grou
 
 Closes #1732"
 
-        gh issue create \
-            --repo "${GITHUB_REPO}" \
-            --title "milestone: v0.5 Emergent Specialization COMPLETE — all criteria verified by coordinator" \
-            --label "enhancement,self-improvement" \
-            --body "$milestone_body" 2>/dev/null || \
-            echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.5 completion issue (non-fatal)"
+        # Check if milestone issue already exists (prevents duplicates during rolling updates, issue #2019)
+        local existing_v05_issue
+        existing_v05_issue=$(gh issue list --repo "${GITHUB_REPO}" --state all \
+            --search "milestone: v0.5 Emergent Specialization COMPLETE" --limit 1 --json number \
+            --jq '.[0].number // ""' 2>/dev/null || echo "")
+        
+        if [ -n "$existing_v05_issue" ]; then
+            echo "[$(date -u +%H:%M:%S)] v0.5 milestone issue already exists (#${existing_v05_issue}) — skipping duplicate creation"
+        else
+            gh issue create \
+                --repo "${GITHUB_REPO}" \
+                --title "milestone: v0.5 Emergent Specialization COMPLETE — all criteria verified by coordinator" \
+                --label "enhancement,self-improvement" \
+                --body "$milestone_body" 2>/dev/null || \
+                echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.5 completion issue (non-fatal)"
+        fi
 
         push_metric "MilestoneCompleted" 1 "Count" "Milestone=v0.5"
     fi
@@ -4300,12 +4310,22 @@ swarms reasoning about other swarms' work and collaborating across goal boundari
 
 Closes #1771"
 
-        gh issue create \
-            --repo "${GITHUB_REPO}" \
-            --title "milestone: v0.6 Collective Action COMPLETE — all criteria verified by coordinator" \
-            --label "enhancement,self-improvement" \
-            --body "$milestone_body" 2>/dev/null || \
-            echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.6 completion issue (non-fatal)"
+        # Check if milestone issue already exists (prevents duplicates during rolling updates, issue #2019)
+        local existing_v06_issue
+        existing_v06_issue=$(gh issue list --repo "${GITHUB_REPO}" --state all \
+            --search "milestone: v0.6 Collective Action COMPLETE" --limit 1 --json number \
+            --jq '.[0].number // ""' 2>/dev/null || echo "")
+        
+        if [ -n "$existing_v06_issue" ]; then
+            echo "[$(date -u +%H:%M:%S)] v0.6 milestone issue already exists (#${existing_v06_issue}) — skipping duplicate creation"
+        else
+            gh issue create \
+                --repo "${GITHUB_REPO}" \
+                --title "milestone: v0.6 Collective Action COMPLETE — all criteria verified by coordinator" \
+                --label "enhancement,self-improvement" \
+                --body "$milestone_body" 2>/dev/null || \
+                echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.6 completion issue (non-fatal)"
+        fi
 
         push_metric "MilestoneCompleted" 1 "Count" "Milestone=v0.6"
     fi
