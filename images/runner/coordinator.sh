@@ -691,6 +691,7 @@ refresh_task_queue() {
                         2>/dev/null; then
                         auto_closed_count=$(( auto_closed_count + 1 ))
                         echo "[$(date -u +%H:%M:%S)] Issue #1999: Auto-closed duplicate PR #$pr_num"
+                        push_metric "DuplicatePRAutoClosed" 1 "Count" "Component=Coordinator"
                     else
                         echo "[$(date -u +%H:%M:%S)] Issue #1999: WARNING — failed to auto-close PR #$pr_num (may lack permissions)"
                     fi
