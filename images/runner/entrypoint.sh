@@ -862,23 +862,18 @@ query_thoughts() {
     2>/dev/null || true
 }
 
-# cleanup_old_thoughts() - Delete thoughts older than 24 hours (or 2h for low-signal types)
-# to prevent cluster clutter and kubectl performance degradation.
-# Issue #1020: increased list timeout from 10s to 60s (6000+ CRs take 10+ seconds to list)
-# Issue #1016: tiered cleanup TTL — blockers/observations expire after 2h, others after 24h
-# Issue #1614: extend 2h TTL to decision/plan/planning (auto-generated metadata, ~10/agent/run)
+# cleanup_old_thoughts() - Delete thoughts older than 1 hour (issue #2032: reduced from 24h)
+# to prevent ConfigMap accumulation. 1h is sufficient since thoughts are for immediate context only.
 # Issue #1044: batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
 # Should be called periodically by planners
 cleanup_old_thoughts() {
-  local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-  local cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_1h=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
   
-  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ]; then
+  if [ -z "$cutoff_1h" ]; then
     log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
     return 0
   fi
   
-  # Issue #1020: use 60s timeout to handle 6000+ CRs (list takes 10+ seconds with large clusters)
   local all_thoughts_json
   all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
   
@@ -887,52 +882,35 @@ cleanup_old_thoughts() {
     return 0
   fi
 
-  # Issue #1016: tiered TTL — low-signal types (blocker, observation) expire after 2h
-  # Issue #1614: extend 2h TTL to decision, plan, planning types — these are auto-generated
-  # system metadata messages (not agent reasoning) that accumulate rapidly (~10/agent/run).
-  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
-    --arg cutoff_24h "$cutoff_24h" \
-    --arg cutoff_2h "$cutoff_2h" \
-    '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
-      then $cutoff_2h
-      else $cutoff_24h
-      end) as $cutoff |
-     select(.metadata.creationTimestamp < $cutoff) |
-     .metadata.name' 2>/dev/null || true)
+    --arg cutoff "$cutoff_1h" \
+    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
   
   if [ -z "$old_thoughts" ]; then
     log "No old thoughts to clean up"
     return 0
   fi
   
-  # Issue #1044: batch deletion via xargs -n50
-  # One kubectl call per 50 thoughts = ~78 calls for 3876 thoughts (~78s vs ~10+ hours one-by-one)
   local count
   count=$(echo "$old_thoughts" | wc -w)
   log "Deleting $count old thoughts in batches of 50..."
   echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
   
-  log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decisions/plan: 2h, others: 24h)"
-  post_thought "Cleaned up ~$count thoughts (batch TTL: low-signal 2h, high-signal 24h)" "observation" 7 "maintenance"
+  log "Cleaned up ~$count thoughts older than 1h"
 }
 
-# cleanup_old_messages() - Delete read messages older than 24h, unread messages older than 48h
-# to prevent unbounded accumulation (issue #1043: 1900+ message CMs with no TTL)
-# Uses batch deletion (xargs -n50) same as cleanup_old_thoughts() (issue #1044)
-# Should be called periodically by planners
+# cleanup_old_messages() - Delete read messages older than 1h, unread messages older than 2h
+# Issue #2032: reduced from 24h/48h to 1h/2h to prevent ConfigMap accumulation
 cleanup_old_messages() {
-  local cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-  local cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_1h=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
 
-  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_48h" ]; then
-    log "WARNING: Cannot calculate cutoff time for message cleanup (date command incompatible)"
+  if [ -z "$cutoff_1h" ] || [ -z "$cutoff_2h" ]; then
+    log "WARNING: Cannot calculate cutoff time for message cleanup"
     return 0
   fi
 
-  # Get all messages — messages are Message CRs backed by ConfigMaps labeled agentex/message
   local all_messages_json
   all_messages_json=$(kubectl_with_timeout 30 get messages -n "$NAMESPACE" -o json 2>/dev/null || true)
 
@@ -941,16 +919,14 @@ cleanup_old_messages() {
     return 0
   fi
 
-  # Delete read messages older than 24h, AND unread messages older than 48h
-  # This ensures: read messages expire quickly, unread messages get a safety buffer
   local old_messages
   old_messages=$(echo "$all_messages_json" | jq -r \
-    --arg cutoff_24h "$cutoff_24h" \
-    --arg cutoff_48h "$cutoff_48h" \
+    --arg cutoff_1h "$cutoff_1h" \
+    --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
      (if (.status.read // "false") == "true"
-      then $cutoff_24h
-      else $cutoff_48h
+      then $cutoff_1h
+      else $cutoff_2h
       end) as $cutoff |
      select(.metadata.creationTimestamp < $cutoff) |
      .metadata.name' 2>/dev/null || true)
@@ -965,21 +941,17 @@ cleanup_old_messages() {
   log "Deleting $count old messages in batches of 50..."
   echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
-  log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
+  log "Cleaned up ~$count messages older than TTL (read: 1h, unread: 2h)"
 }
 
-# cleanup_old_reports() - Delete Report CRs older than 48 hours
-# to prevent unbounded accumulation (issue #1562: 1612+ reports with no cleanup)
-# Report CRs contain exit summaries; 48h TTL preserves recent history for god-observer
-# while preventing cluster resource exhaustion.
-# Uses batch deletion (xargs -n50) consistent with cleanup_old_thoughts() (issue #1044)
-# Should be called periodically by planners
+# cleanup_old_reports() - Delete Report CRs older than 30 minutes
+# Issue #2032: reduced from 48h to 30min. God-observer runs every 20min, so 30min is sufficient.
 cleanup_old_reports() {
-  local cutoff_48h
-  cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_30m
+  cutoff_30m=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
 
-  if [ -z "$cutoff_48h" ]; then
-    log "WARNING: Cannot calculate cutoff time for report cleanup (date command incompatible)"
+  if [ -z "$cutoff_30m" ]; then
+    log "WARNING: Cannot calculate cutoff time for report cleanup"
     return 0
   fi
 
@@ -992,10 +964,10 @@ cleanup_old_reports() {
     return 0
   fi
 
-  # Delete reports older than 48h
+  # Delete reports older than 30min
   local old_reports
   old_reports=$(echo "$all_reports_json" | jq -r \
-    --arg cutoff "$cutoff_48h" \
+    --arg cutoff "$cutoff_30m" \
     '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
 
   if [ -z "$old_reports" ]; then
@@ -1008,7 +980,7 @@ cleanup_old_reports() {
   log "Deleting $count old reports in batches of 50..."
   echo "$old_reports" | xargs -n 50 kubectl delete reports.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
-  log "Cleaned up ~$count reports older than 48h TTL"
+  log "Cleaned up ~$count reports older than 30min"
 }
 
 # ── GENERATION 3 PLANNING HELPER FUNCTIONS (issue #786) ──────────────────────
@@ -1644,460 +1616,11 @@ EOF
   log "Vision feature proposed: issue #$issue_number ('$safe_name') — awaiting 3+ votes"
 }
 
-# proactive_domain_scan() - Specialized agents hunt for bugs/issues in their domain (v0.5 feature #3, issue #1742)
-# Called BEFORE request_coordinator_task() so specialists can discover work proactively.
-# Only runs if agent has earned specialization (not spawn-time role).
-# Files at most ONE issue per run to prevent spam.
-# Updates S3 identity with proactiveIssuesFound counter.
-#
-# Specialization-specific scans:
-# - debugger / bug-specialist: scan recent merged PRs for potential regressions
-# - architecture / architect: review merged PRs for design anti-patterns
-# - consensus / governance-specialist: scan for unresolved debate threads
-# - coordinator / platform-specialist: check coordinator-state for anomalies
-# - enhancement-specialist: scan for design improvements (uses architecture scan)
-# - security-specialist: scan for governance violations (uses architecture scan)
-# - memory-specialist: scan for debate/knowledge issues (uses consensus scan)
-# - *-specialist (generic): use coordinator scan as safe default
-#
-# Returns: 0 if scan completed (regardless of whether issue was filed)
-proactive_domain_scan() {
-  local spec="${AGENT_SPECIALIZATION:-}"
-  
-  # Only run for agents with earned specialization
-  if [ -z "$spec" ] || [ "$spec" = "generalist" ]; then
-    log "Proactive scan: no specialization set, skipping domain scan"
-    return 0
-  fi
-  
-  log "Proactive domain scan: specialization=$spec — hunting for issues in domain..."
-  
-  # Load code areas from S3 identity (if available)
-  local code_areas="{}"
-  if [ -n "$AGENT_IDENTITY_FILE" ]; then
-    local identity_json
-    identity_json=$(aws s3 cp "$AGENT_IDENTITY_FILE" - 2>/dev/null || echo "")
-    if [ -n "$identity_json" ]; then
-      code_areas=$(echo "$identity_json" | jq -c '.specializationDetail.codeAreas // {}')
-    fi
-  fi
-  
-  # Domain-specific scan logic
-  case "$spec" in
-    debugger|bug-specialist)
-      proactive_debugger_scan "$code_areas"
-      ;;
-    architecture|architect)
-      proactive_architecture_scan
-      ;;
-    consensus|consensus-specialist|governance-specialist)
-      proactive_consensus_scan
-      ;;
-    coordinator|coordinator-specialist|platform-specialist)
-      proactive_coordinator_scan
-      ;;
-    enhancement-specialist)
-      proactive_architecture_scan  # Enhancement specialists scan for design improvements
-      ;;
-    security-specialist)
-      proactive_architecture_scan  # Security specialists scan for governance violations
-      ;;
-    memory-specialist)
-      proactive_consensus_scan  # Memory specialists scan for debate/knowledge issues
-      ;;
-    *-specialist)
-      # Generic fallback for any other earned specialization (e.g., documentation-specialist)
-      log "Proactive scan: $spec using generic coordinator scan..."
-      proactive_coordinator_scan
-      ;;
-    *)
-      log "Proactive scan: no scan logic for specialization '$spec' yet"
-      ;;
-  esac
-  
-  return 0
-}
-
-# proactive_debugger_scan() - Scan recent merged PRs for potential regressions
-# Args: $1 = code_areas JSON object (e.g., {"images/runner/entrypoint.sh": 3})
-proactive_debugger_scan() {
-  local code_areas="${1:-{}}"
-  
-  log "Debugger scan: checking recent merged PRs for potential regressions..."
-  
-  # Get recent merged PRs (last 24 hours)
-  local recent_prs
-  recent_prs=$(gh pr list --repo "$REPO" --state merged --limit 10 \
-    --search "merged:>$(date -d '1 day ago' +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d)" \
-    --json number,title,files 2>/dev/null || echo "[]")
-  
-  if [ "$recent_prs" = "[]" ] || [ -z "$recent_prs" ]; then
-    log "Debugger scan: no recent merged PRs to scan"
-    return 0
-  fi
-  
-  # If we have code areas, prioritize PRs that touch those files
-  local top_code_areas
-  top_code_areas=$(echo "$code_areas" | jq -r 'to_entries | sort_by(.value) | reverse | .[0:3] | .[].key' 2>/dev/null || echo "")
-  
-  # Check each PR for common bug patterns
-  local pr_count
-  pr_count=$(echo "$recent_prs" | jq 'length' 2>/dev/null || echo "0")
-  if [ "$pr_count" -gt 0 ]; then
-    log "Debugger scan: found $pr_count recent merged PRs — checking for missing error handling..."
-    
-    # Look for PRs that added bash functions without error handling
-    local suspicious_pr
-    suspicious_pr=$(echo "$recent_prs" | jq -r '.[0] | .number' 2>/dev/null || echo "")
-    
-    if [ -n "$suspicious_pr" ] && [ "$suspicious_pr" != "null" ]; then
-      local pr_files
-      pr_files=$(gh pr view "$suspicious_pr" --repo "$REPO" --json files --jq '.files[].path' 2>/dev/null || echo "")
-      
-      # Check if PR touched shell scripts
-      if echo "$pr_files" | grep -qE '\.(sh|bash)$'; then
-        log "Debugger scan: PR #$suspicious_pr touched shell scripts — checking for error handling..."
-        
-        # Get PR diff to check for new functions without error handling
-        local pr_diff
-        pr_diff=$(gh pr diff "$suspicious_pr" --repo "$REPO" 2>/dev/null || echo "")
-        
-        # Look for added functions (lines starting with +) that don't have set -e or error traps
-        if echo "$pr_diff" | grep -E '^\+[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*\(\)' >/dev/null 2>&1; then
-          # Check if the diff also includes set -e or error handling
-          if ! echo "$pr_diff" | grep -qE '^\+.*(set -[euo]|trap.*ERR)'; then
-            log "Debugger scan: PR #$suspicious_pr adds bash functions without explicit error handling — filing issue..."
-            file_proactive_issue "bug" \
-              "potential bug: PR #$suspicious_pr adds bash functions without error handling" \
-              "PR #$suspicious_pr merged $(date +%Y-%m-%d) and added bash functions without \`set -e\` or error traps.
-
-Discovered by: $AGENT_DISPLAY_NAME (specialization: $spec)
-
-This issue was proactively filed by a domain specialist during systematic scan, not reactively during assigned work.
-
-Affected PR: #$suspicious_pr
-Files: $(echo "$pr_files" | tr '\n' ', ')
-
-## Recommendation
-Review the added functions and add appropriate error handling:
-- \`set -euo pipefail\` at function start
-- \`|| return 1\` on critical commands
-- error traps if needed
-
-This is a potential regression — the code may work now but could fail silently under error conditions." || true
-            return 0
-          fi
-        fi
-      fi
-    fi
-  fi
-  
-  log "Debugger scan: no obvious regressions found in recent PRs"
-  return 0
-}
-
-# proactive_architecture_scan() - Review merged PRs for design anti-patterns
-proactive_architecture_scan() {
-  log "Architecture scan: checking for design regressions in recent PRs..."
-  
-  # Check for merged PRs touching protected files without god-approved label
-  local protected_prs
-  protected_prs=$(gh pr list --repo "$REPO" --state merged --limit 10 \
-    --search "merged:>$(date -d '2 days ago' +%Y-%m-%d 2>/dev/null || date -v-2d +%Y-%m-%d)" \
-    --json number,title,labels,files 2>/dev/null || echo "[]")
-  
-  if [ "$protected_prs" = "[]" ] || [ -z "$protected_prs" ]; then
-    log "Architecture scan: no recent merged PRs to review"
-    return 0
-  fi
-  
-  # Check if any PR touched protected files (entrypoint.sh, AGENTS.md, RGDs) without god-approved
-  local suspicious_pr
-  suspicious_pr=$(echo "$protected_prs" | jq -r '.[] | select(.files[].path | test("entrypoint.sh|AGENTS.md|manifests/rgds/")) | select(.labels | map(.name) | contains(["god-approved"]) | not) | .number' 2>/dev/null | head -1)
-  
-  if [ -n "$suspicious_pr" ] && [ "$suspicious_pr" != "null" ]; then
-    log "Architecture scan: PR #$suspicious_pr touched protected files without god-approved label — filing issue..."
-    file_proactive_issue "constitution-violation" \
-      "governance: PR #$suspicious_pr merged with protected file changes but no god-approved label" \
-      "PR #$suspicious_pr touched protected files (entrypoint.sh, AGENTS.md, or RGDs) but merged without the \`god-approved\` label.
-
-Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
-
-This issue was proactively filed by a domain specialist during systematic scan.
-
-## Constitution Requirement
-AGENTS.md Protected Files section states:
-> Protected files (require god-approved label on any PR that touches them):
-> - images/runner/entrypoint.sh
-> - AGENTS.md
-> - manifests/rgds/*.yaml
-
-## Action Required
-God should review PR #$suspicious_pr to verify changes were intentional and safe." || true
-    return 0
-  fi
-  
-  log "Architecture scan: no design regressions found"
-  return 0
-}
-
-# proactive_consensus_scan() - Scan for unresolved debate threads
-proactive_consensus_scan() {
-  log "Consensus scan: checking for unresolved debates..."
-  
-  # Read unresolved debates from coordinator-state
-  local unresolved
-  unresolved=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-    -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
-  
-  # Issue #1983: Declare count=0 OUTSIDE the if block so it is always initialized.
-  # Previously 'local count' was inside the if block — when unresolved is empty,
-  # count was never set and the final log line crashed under set -euo pipefail.
-  local count=0
-  if [ -n "$unresolved" ]; then
-    count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
-    if [ "$count" -gt 10 ]; then
-      # Issue #1934: Dedup check before filing
-      local existing_consensus
-      existing_consensus=$(gh issue list --repo "$REPO" --state open \
-        --search "debate backlog unresolved debate threads need synthesis" \
-        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
-      if [ "${existing_consensus:-0}" -gt 0 ]; then
-        log "Consensus scan: debate-backlog issue already open — skipping duplicate (count=$count)"
-      else
-        log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
-        file_proactive_issue "consensus" \
-          "debate backlog: $count unresolved debate threads need synthesis" \
-          "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
-
-Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
-
-This issue was proactively filed by a domain specialist during systematic scan.
-
-## Context
-Debates require synthesis when multiple agents disagree. When debate count exceeds 10, the civilization is accumulating unresolved disagreements.
-
-## Action Required
-1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
-2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h" || true
-      fi
-      return 0
-    fi
-  fi
-  
-  log "Consensus scan: debate backlog is acceptable (count=$count)"
-  return 0
-}
-
-# proactive_coordinator_scan() - Check coordinator-state for anomalies
-# Issue #1881: Expanded from single stale-assignment check (threshold too high to ever fire)
-# to multiple coordinator health checks that can realistically trigger and increment
-# proactiveIssuesFound — unblocking v0.5 Criterion 3.
-proactive_coordinator_scan() {
-  log "Coordinator scan: checking for state anomalies..."
-  local now_epoch
-  now_epoch=$(date +%s)
-
-  # ── Check 1: Stale assignments (lowered threshold ≥1 at 2h, was >3 at 1h) ──────
-  # cleanup_stale_assignments() runs every 30s and clears assignments for completed jobs.
-  # Requiring >3 stale assignments meant the check never fired. Lowered to ≥1 at 2h
-  # (2-hour threshold is safely above the 30s cleanup cycle to avoid false positives).
-  local assignments
-  assignments=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-    -o jsonpath='{.data.activeAssignments}' 2>/dev/null || echo "")
-
-  if [ -n "$assignments" ]; then
-    local stale_count=0
-    for assignment in $(echo "$assignments" | tr ',' '\n'); do
-      local agent_name
-      agent_name=$(echo "$assignment" | cut -d: -f1)
-      local completion_time
-      completion_time=$(kubectl_with_timeout 10 get job -n "$NAMESPACE" "$agent_name" \
-        -o jsonpath='{.status.completionTime}' 2>/dev/null || echo "")
-      if [ -n "$completion_time" ]; then
-        local completion_epoch
-        completion_epoch=$(date -d "$completion_time" +%s 2>/dev/null || echo "0")
-        local age_seconds=$(( now_epoch - completion_epoch ))
-        # Lowered to 2 hours (7200s) and threshold ≥1 (was >3 at 3600s)
-        if [ "$age_seconds" -gt 7200 ]; then
-          stale_count=$(( stale_count + 1 ))
-        fi
-      fi
-    done
-    if [ "$stale_count" -ge 1 ]; then
-      log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
-      # Issue #2004: dedup using stable keyword — stale_count varies each run, defeating title dedup.
-      # Same root cause as issue #1934 (count-varying titles create unlimited duplicate issues).
-      local existing_stale_issue
-      existing_stale_issue=$(gh issue list --repo "$REPO" --state open \
-        --search "coordinator state assignments persisted past job completion" \
-        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
-      if [ "${existing_stale_issue:-0}" -gt 0 ]; then
-        log "Coordinator scan: stale assignment issue already open — skipping duplicate (stale_count=$stale_count)"
-        return 0
-      fi
-      file_proactive_issue "bug" \
-        "coordinator state: $stale_count assignments persisted >2h past job completion" \
-        "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
-
-Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
-
-This issue was proactively filed by a domain specialist during systematic scan.
-
-## Context
-\`cleanup_stale_assignments()\` runs every 30s and should remove assignments for completed agents within 1-2 minutes. Assignments persisting >2h indicate a cleanup failure.
-
-## Action Required
-1. Review \`cleanup_stale_assignments()\` in coordinator.sh
-2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
-      return 0
-    fi
-  fi
-
-  # ── Check 2: Coordinator heartbeat staleness ──────────────────────────────────
-  # If the coordinator heartbeat is >10 minutes old, the coordinator is likely stuck.
-  local heartbeat
-  heartbeat=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-    -o jsonpath='{.data.lastHeartbeat}' 2>/dev/null || echo "")
-  if [ -n "$heartbeat" ]; then
-    local heartbeat_epoch
-    heartbeat_epoch=$(date -d "$heartbeat" +%s 2>/dev/null || echo "$now_epoch")
-    local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
-    if [ "$heartbeat_age" -gt 600 ]; then
-      log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
-      # Issue #2004: dedup using stable keyword — heartbeat_age varies each run, defeating title dedup.
-      # Same root cause as issue #1934 (count-varying titles create unlimited duplicate issues).
-      local existing_heartbeat_issue
-      existing_heartbeat_issue=$(gh issue list --repo "$REPO" --state open \
-        --search "coordinator liveness heartbeat stale coordinator may be stuck" \
-        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
-      if [ "${existing_heartbeat_issue:-0}" -gt 0 ]; then
-        log "Coordinator scan: coordinator liveness issue already open — skipping duplicate (heartbeat_age=${heartbeat_age}s)"
-        return 0
-      fi
-      file_proactive_issue "bug" \
-        "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
-        "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
-
-Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
-
-This issue was proactively filed by a domain specialist during systematic scan.
-
-## Context
-The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartbeat >10min indicates the coordinator pod has crashed, is OOMKilled, or is blocked.
-
-## Action Required
-1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
-2. Check coordinator logs for errors
-3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
-      return 0
-    fi
-  fi
-
-  # ── Check 3: Unresolved debates backlog ───────────────────────────────────────
-  # If unresolvedDebates count > 50, flag it — the civilization is not synthesizing fast enough.
-  local unresolved_debates
-  unresolved_debates=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-    -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
-  if [ -n "$unresolved_debates" ]; then
-    local debate_count
-    debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
-    if [ "$debate_count" -gt 50 ]; then
-      log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
-      file_proactive_issue "enhancement" \
-        "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
-        "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
-
-Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
-
-This issue was proactively filed by a domain specialist during systematic scan.
-
-## Context
-The coordinator tracks unresolved debate threads and nudges agents to synthesize. A backlog >50 means agents are debating faster than they're synthesizing — collective intelligence is generating noise without resolution.
-
-## Action Required
-1. Spawn an agent specifically to synthesize the oldest unresolved threads
-2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
-3. Consider increasing synthesis frequency in agent instructions"
-      return 0
-    fi
-  fi
-
-  log "Coordinator scan: no state anomalies detected (stale assignments OK, heartbeat OK, debates OK)"
-  return 0
-}
-
-# file_proactive_issue() - File a GitHub issue discovered during proactive scan
-# Args:
-#   $1 = label (bug, architecture, consensus, coordinator, etc.)
-#   $2 = title
-#   $3 = body (should include "Discovered by: <agent> (specialization: <spec>)")
-# Updates S3 identity with proactiveIssuesFound counter
-# Issue #1898: Added fallback to handle missing proactive-discovery label gracefully.
-# Previously, gh issue create with --label "bug,proactive-discovery" silently failed
-# if the proactive-discovery label didn't exist in the repo, causing proactiveIssuesFound
-# to never increment and blocking v0.5 Criterion 3 forever.
-file_proactive_issue() {
-  local label="${1:-bug}"
-  local title="${2:-}"
-  local body="${3:-}"
-  
-  if [ -z "$title" ]; then
-    log "file_proactive_issue: title is required"
-    return 1
-  fi
-
-  # Normalize label: map non-standard labels to existing repo labels
-  # Some callers pass labels like "architecture", "consensus", "coordinator" which
-  # don't exist in the repo — map them to standard labels to avoid silent gh failures.
-  local primary_label="$label"
-  case "$label" in
-    architecture|architect) primary_label="enhancement" ;;
-    consensus|governance) primary_label="enhancement" ;;
-    coordinator|platform) primary_label="self-improvement" ;;
-    constitution-violation) primary_label="bug" ;;
-    *) primary_label="$label" ;;
-  esac
-  
-  # File the issue with both primary label and proactive-discovery.
-  # Issue #1898: Fall back to primary label only if proactive-discovery doesn't exist yet.
-  local issue_url
-  issue_url=$(gh issue create --repo "$REPO" \
-    --title "$title" \
-    --label "${primary_label},proactive-discovery" \
-    --body "$body" 2>/dev/null || echo "")
-
-  # Fallback: if combined labels failed, try with primary label only
-  if [ -z "$issue_url" ]; then
-    log "file_proactive_issue: combined label failed, retrying with primary label only..."
-    issue_url=$(gh issue create --repo "$REPO" \
-      --title "$title" \
-      --label "$primary_label" \
-      --body "$body" 2>/dev/null || echo "")
-  fi
-  
-  if [ -n "$issue_url" ]; then
-    local issue_number
-    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$' || echo "0")
-    log "Proactive issue filed: #$issue_number — $title"
-    
-    # Update identity stats
-    if [ -n "$AGENT_IDENTITY_FILE" ]; then
-      update_identity_stats "proactiveIssuesFound" 1
-      log "Identity stats updated: proactiveIssuesFound +1"
-    fi
-    
-    # Push metric
-    push_metric "ProactiveIssueDiscovered" 1
-    
-    return 0
-  else
-    log "WARNING: Failed to file proactive issue"
-    return 1
-  fi
-}
+# ── Proactive domain scanning REMOVED (issue #2031) ─────────────────────────────
+# proactive_domain_scan(), proactive_debugger_scan(), proactive_architecture_scan(),
+# proactive_consensus_scan(), proactive_coordinator_scan(), file_proactive_issue()
+# were removed because they were the primary driver of the self-referential fix loop.
+# See issue #2031 for rationale.
 
 # request_coordinator_task() - Claim an unassigned issue from the coordinator queue
 # Returns: sets COORDINATOR_ISSUE to the claimed issue number, or 0 if none available
@@ -3664,19 +3187,11 @@ else
   log "Skipping coordinator health check (role=${AGENT_ROLE} — only planners/architects restart coordinator, issue #1721)"
 fi
 
-# ── 3.7.9. Proactive domain scan for specialized agents (v0.5 feature #3, issue #1742) ─
-# Specialized agents actively hunt for bugs/issues in their domain BEFORE checking
-# the coordinator queue. This transforms specialists from reactive contractors to
-# domain experts who discover work proactively.
-# Only runs for agents with earned specialization (not spawn-time role assignment).
-if [ "$AGENT_ROLE" = "planner" ] || [ "$AGENT_ROLE" = "worker" ] || [ "$AGENT_ROLE" = "architect" ]; then
-  if [ -n "${AGENT_SPECIALIZATION:-}" ] && [ "$AGENT_SPECIALIZATION" != "generalist" ]; then
-    log "Specialization detected: $AGENT_SPECIALIZATION — running proactive domain scan (v0.5 feature #3)..."
-    proactive_domain_scan
-  else
-    log "No specialization set — skipping proactive domain scan"
-  fi
-fi
+# ── 3.7.9. Proactive domain scan REMOVED (issue #2031) ─────────────────────────
+# Proactive scanning was the primary driver of the self-referential fix loop.
+# Agents would scan their own infrastructure, file issues about it, then other
+# agents would fix those issues. Removed to break the cycle.
+# If platform bugs exist, humans or dedicated audit tools should find them.
 
 # ── 3.8. Claim task from coordinator (planners and workers) ──────────────────
 # Agents query the coordinator for an assigned issue instead of picking
@@ -3718,87 +3233,15 @@ If claim fails (returns 1), pick a different issue — another agent already cla
      log "Planner: cleaning up old messages..."
      cleanup_old_messages
 
-     log "Planner: cleaning up old reports (48h TTL)..."
+     log "Planner: cleaning up old reports..."
      cleanup_old_reports
-     
-     # Security alert check (issue #652) - constitution-mandated self-awareness
-     check_security_alerts
 
-      # Issue #1111: Read unresolved debates from coordinator for planner triage
-      log "Planner: reading unresolved debate threads from coordinator..."
-      UNRESOLVED_DEBATES=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
-
-      # Issue #1149 v0.3: Read visionQueue from coordinator — agent-proposed milestone features
-      # Planners should prioritize visionQueue items ABOVE god directive when choosing work.
-      # visionQueue is populated when 3+ agents vote approve on a #proposal-vision-feature topic.
-      log "Planner: reading visionQueue from coordinator (v0.3 agent-driven roadmap)..."
-      VISION_QUEUE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-        -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
-      export VISION_QUEUE
-
-     # Issue #1145: v0.2 milestone validation — verify specialization routing fires in production
-     # Check specializedAssignments counter. If still 0, diagnose why routing hasn't fired.
-     log "Planner: validating v0.2 specialization routing..."
-     SPECIALIZED_ASSIGNMENTS=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-       -o jsonpath='{.data.specializedAssignments}' 2>/dev/null || echo "0")
-     SPECIALIZED_ASSIGNMENTS="${SPECIALIZED_ASSIGNMENTS:-0}"
-     LAST_ROUTING=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-       -o jsonpath='{.data.lastRoutingDecisions}' 2>/dev/null || echo "")
-
-     if [ "${SPECIALIZED_ASSIGNMENTS}" = "0" ] || [ -z "${SPECIALIZED_ASSIGNMENTS}" ]; then
-       log "WARNING: v0.2 specialization routing has not fired yet (specializedAssignments=0)"
-
-       # Check how many agent S3 identity files exist
-       IDENTITY_COUNT=$(aws s3 ls "s3://${S3_BUCKET}/identities/" \
-         --region "$BEDROCK_REGION" 2>/dev/null | wc -l || echo "0")
-       IDENTITY_WITH_SPEC=0
-       if [ "${IDENTITY_COUNT:-0}" -gt 0 ]; then
-         # Sample up to 5 MOST RECENT identity files to check for specialization data.
-         # Issue #1541: sort by date descending so we pick recent worker files (which have
-         # specializationLabelCounts), not old alphabetically-first files (god-delegate-*.json
-         # from bootstrap which always have empty specialization).
-         for identity_key in $(aws s3 ls "s3://${S3_BUCKET}/identities/" \
-             --region "$BEDROCK_REGION" 2>/dev/null | sort -k1,2 -r | awk '{print $4}' | grep -v '^$' | head -5); do
-           spec_count=$(aws s3 cp "s3://${S3_BUCKET}/identities/${identity_key}" - \
-             --region "$BEDROCK_REGION" 2>/dev/null | \
-             jq -r '(.specializationLabelCounts // {} | length)' 2>/dev/null || echo "0")
-           if [ "${spec_count:-0}" -gt 0 ]; then
-             IDENTITY_WITH_SPEC=$((IDENTITY_WITH_SPEC + 1))
-           fi
-         done
-       fi
-
-       if [ "${IDENTITY_COUNT:-0}" = "0" ]; then
-         ROUTING_BLOCKER="No agent identity files in S3 yet. Agents build specialization history by completing labeled issues. Routing will fire once history accumulates."
-       elif [ "${IDENTITY_WITH_SPEC}" = "0" ]; then
-         ROUTING_BLOCKER="Agent identities exist (${IDENTITY_COUNT} files) but none have specializationLabelCounts > 0. Check update_specialization() is being called after completing labeled issues."
-       else
-          ROUTING_BLOCKER="Identities with specialization exist but routing threshold (score>2) not met yet (issue #1480: threshold was lowered 5→3→2 per #1145/#1225). Known root cause: workers pre-claim tasks before routing cycle fires (issue #1474). See also: routing looks up by agent_name not displayName (issue #1475)."
-       fi
-
-        log "v0.2 routing status: not yet firing. Blocker: ${ROUTING_BLOCKER}"
-        post_thought "v0.2 validation: specialization routing NOT yet firing (specializedAssignments=${SPECIALIZED_ASSIGNMENTS:-0}). Diagnosis: ${ROUTING_BLOCKER} [identityFiles=${IDENTITY_COUNT:-0}, withSpec=${IDENTITY_WITH_SPEC}]. Monitor coordinator-state.specializedAssignments each planner generation." "insight" 7
-      else
-        log "v0.2 specialization routing confirmed: ${SPECIALIZED_ASSIGNMENTS} specialized assignment(s). Last: ${LAST_ROUTING:-unknown}"
-        post_thought "v0.2 VALIDATED: specialization routing fired ${SPECIALIZED_ASSIGNMENTS} times. Recent: ${LAST_ROUTING:-none}. Identity-based task routing is operational." "insight" 9
-      fi
-
-      # Issue #1224: Civilization health snapshot — post a one-line summary to thought stream.
-      # This gives successors and the god-delegate immediate visibility into system state.
-      log "Planner: running civilization_status() health check..."
-      CIV_STATUS_OUTPUT=$(civilization_status 2>/dev/null || echo "(status unavailable)")
-      log "$CIV_STATUS_OUTPUT"
-      # Summarize key fields for thought stream (keep it concise — agents read many thoughts)
-      ACTIVE_JOBS_SNAP=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
-        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
-        2>/dev/null || echo "?")
-      DEBATE_STATS_SNAP=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-        -o jsonpath='{.data.debateStats}' 2>/dev/null || echo "unavailable")
-      OPEN_ISSUES_SNAP=$(gh issue list --repo "${REPO:-pnz1990/agentex}" --state open --limit 100 \
-        --json number -q 'length' 2>/dev/null || echo "?")
-      post_thought "Civilization health (gen=${CIVILIZATION_GENERATION:-unknown}): activeAgents=${ACTIVE_JOBS_SNAP} openIssues=${OPEN_ISSUES_SNAP} debateStats=[${DEBATE_STATS_SNAP}] spawnSlots=$(kubectl_with_timeout 10 get configmap coordinator-state -n agentex -o jsonpath='{.data.spawnSlots}' 2>/dev/null || echo '?')" "insight" 7 "civilization-status"
-    fi
+     # Issue #1149 v0.3: Read visionQueue from coordinator — agent-proposed milestone features
+     log "Planner: reading visionQueue from coordinator..."
+     VISION_QUEUE=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+       -o jsonpath='{.data.visionQueue}' 2>/dev/null || echo "")
+     export VISION_QUEUE
+   fi
 fi
 
 # ── 4. Process inbox ──────────────────────────────────────────────────────────
@@ -3992,734 +3435,72 @@ cat > "${HOME}/.config/opencode/config.json" <<CONFIG
 CONFIG
 
 # ── 9. Build OpenCode prompt ──────────────────────────────────────────────────
+# REWRITTEN (issue #2029): Replaced 800-line prompt with focused ~80-line prompt.
+# Agents should spend tokens on their assigned work, not processing meta-instructions.
+# Reporting, debate, governance, and chronicle are handled by entrypoint.sh post-execution.
 ISSUE_LINE=""
 [ "$TASK_ISSUE" != "0" ] && ISSUE_LINE="GitHub Issue: #${TASK_ISSUE} — gh issue view ${TASK_ISSUE} --repo ${REPO}"
 
 SWARM_LINE=""
-[ -n "$SWARM_REF" ] && SWARM_LINE="Swarm: ${SWARM_REF} — kubectl get configmap ${SWARM_REF}-state -n ${NAMESPACE} -o yaml"
-
-CHRONICLE_BLOCK=""
-[ -n "$CIVILIZATION_CHRONICLE" ] && CHRONICLE_BLOCK="═══════════════════════════════════════════════════════
-CIVILIZATION CHRONICLE
-═══════════════════════════════════════════════════════
-${CIVILIZATION_CHRONICLE}
-═══════════════════════════════════════════════════════"
-
-# Issue #1605: Chronicle candidates — inject coordinator-state.chronicleCandidates for god-delegate
-# The coordinator aggregates top 3 chronicle-candidate Thought CRs every ~3 min.
-# God-delegate reads this to efficiently find agent-proposed chronicle entries without
-# reviewing all Thought CRs manually. Part of v0.4 Collective Memory milestone.
-CHRONICLE_CANDIDATES_BLOCK=""
-if [ "$AGENT_ROLE" = "god-delegate" ]; then
-  CHRONICLE_CANDIDATES_RAW=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-    -o jsonpath='{.data.chronicleCandidates}' 2>/dev/null || echo "")
-  if [ -n "$CHRONICLE_CANDIDATES_RAW" ] && [ "$CHRONICLE_CANDIDATES_RAW" != '""' ]; then
-    # Fetch the content of each candidate Thought ConfigMap
-    CHRONICLE_CANDIDATES_DETAIL=""
-    IFS=';' read -ra CANDIDATE_NAMES <<< "$CHRONICLE_CANDIDATES_RAW"
-    for cm_name in "${CANDIDATE_NAMES[@]}"; do
-      [ -z "$cm_name" ] && continue
-      cm_content=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
-        -o jsonpath='{.data.content}' 2>/dev/null || echo "")
-      cm_agent=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
-        -o jsonpath='{.data.agentRef}' 2>/dev/null || echo "unknown")
-      cm_confidence=$(kubectl_with_timeout 10 get configmap "${cm_name}" -n "$NAMESPACE" \
-        -o jsonpath='{.data.confidence}' 2>/dev/null || echo "?")
-      if [ -n "$cm_content" ]; then
-        CHRONICLE_CANDIDATES_DETAIL="${CHRONICLE_CANDIDATES_DETAIL}
---- Candidate: ${cm_name} (agent: ${cm_agent}, confidence: ${cm_confidence}) ---
-${cm_content}
-"
-      fi
-    done
-    if [ -n "$CHRONICLE_CANDIDATES_DETAIL" ]; then
-      CHRONICLE_CANDIDATES_BLOCK="
-═══════════════════════════════════════════════════════
-AGENT-PROPOSED CHRONICLE CANDIDATES (issue #1605)
-═══════════════════════════════════════════════════════
-Agents have proposed the following insights for the civilization chronicle.
-Review these when writing the next chronicle entry. Curate the best ones.
-
-${CHRONICLE_CANDIDATES_DETAIL}
-To add an entry to the chronicle: append_to_chronicle \"era\" \"period\" \"summary\" \"lesson\"
-To see all candidates: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '[.items[] | select(.data.thoughtType==\"chronicle-candidate\")]'
-═══════════════════════════════════════════════════════"
-    fi
-  else
-    CHRONICLE_CANDIDATES_BLOCK="
-═══════════════════════════════════════════════════════
-AGENT-PROPOSED CHRONICLE CANDIDATES (issue #1605)
-═══════════════════════════════════════════════════════
-No chronicle candidates currently in coordinator-state.chronicleCandidates.
-Agents can propose entries via: post_chronicle_candidate <era> <summary> <lesson> [milestone]
-═══════════════════════════════════════════════════════"
-  fi
-fi
+[ -n "$SWARM_REF" ] && SWARM_LINE="Swarm: ${SWARM_REF}"
 
 PEER_BLOCK=""
-[ -n "$PEER_THOUGHTS" ] && PEER_BLOCK="=== PEER THOUGHTS ===
+[ -n "$PEER_THOUGHTS" ] && PEER_BLOCK="=== RECENT PEER CONTEXT ===
 ${PEER_THOUGHTS}
-====================="
+==========================="
 
-# Generation 3: Include predecessor plan in prompt if exists
 PREDECESSOR_BLOCK=""
 if [ -n "$PREDECESSOR_N2_PRIORITY" ] && [ "$PREDECESSOR_N2_PRIORITY" != "null" ] && [ "$PREDECESSOR_N2_PRIORITY" != "none" ]; then
   PREDECESSOR_BLOCK="
-═══════════════════════════════════════════════════════
-PREDECESSOR PLAN (Generation 3 coordination)
-═══════════════════════════════════════════════════════
-Your predecessor (previous $AGENT_ROLE) planned for YOU (N+2) to:
-
-  $PREDECESSOR_N2_PRIORITY
-
-This is multi-generation coordination. Your predecessor reasoned 3 steps ahead
-and identified work for you to prioritize. Consider this when choosing tasks.
-═══════════════════════════════════════════════════════"
+PREDECESSOR PLAN: Your predecessor planned for you to: ${PREDECESSOR_N2_PRIORITY}"
 fi
 
-# Issue #1228: Predecessor Mentorship Block — specialist context for assigned issues
-# When get_mentor_insight() found a mentor (called in step 3.8 above), inject their
-# identity and last insight so this agent can learn from prior specialists.
 MENTORSHIP_BLOCK=""
-if [ -n "${MENTOR_AGENT_NAME:-}" ]; then
-  if [ -n "${MENTOR_INSIGHT:-}" ]; then
-    MENTORSHIP_BLOCK="
-═══════════════════════════════════════════════════════
-PREDECESSOR MENTORSHIP (issue #1228 — generational knowledge transfer)
-═══════════════════════════════════════════════════════
-A specialist predecessor worked on issues of this type before you.
-
-  Mentor: ${MENTOR_DISPLAY_NAME} (${MENTOR_AGENT_NAME})
-  Specialization: ${MENTOR_SPECIALIZATION}
-
-  Their last insight:
-  ${MENTOR_INSIGHT}
-
-Apply their experience to your implementation. If their approach was wrong,
-note it in your own insight thought so future agents can learn.
-═══════════════════════════════════════════════════════"
-  else
-    MENTORSHIP_BLOCK="
-═══════════════════════════════════════════════════════
-PREDECESSOR MENTORSHIP (issue #1228 — generational knowledge transfer)
-═══════════════════════════════════════════════════════
-A specialist predecessor worked on issues of this type:
-
-  Mentor: ${MENTOR_DISPLAY_NAME} (${MENTOR_AGENT_NAME})
-  Specialization: ${MENTOR_SPECIALIZATION}
-
-  No recent insight thoughts found for this mentor in the cluster.
-  Check their identity in S3: s3://${S3_BUCKET}/identities/${MENTOR_AGENT_NAME}.json
-═══════════════════════════════════════════════════════"
-  fi
+if [ -n "${MENTOR_AGENT_NAME:-}" ] && [ -n "${MENTOR_INSIGHT:-}" ]; then
+  MENTORSHIP_BLOCK="
+MENTOR CONTEXT (${MENTOR_DISPLAY_NAME:-unknown}, specialization: ${MENTOR_SPECIALIZATION:-unknown}):
+${MENTOR_INSIGHT}"
 fi
 
-# Issue #1645: Component Knowledge Graph Phase 3 — inject past debate context for relevant files.
-# When an agent has an assigned issue (#COORDINATOR_ISSUE), we extract file/component mentions
-# from the issue body and inject past debates about those components into the prompt.
-# This helps agents avoid architectural mistakes that were debated and resolved previously.
-# Only runs for workers with a coordinator-assigned numeric issue (planners self-select later).
-COMPONENT_CONTEXT_BLOCK=""
-if [ "$AGENT_ROLE" = "worker" ] && [ "${COORDINATOR_ISSUE:-0}" != "0" ] && [ -n "${COORDINATOR_ISSUE:-}" ]; then
-  log "Issue #1645: Building component knowledge graph context for issue #${COORDINATOR_ISSUE}..."
+INBOX_BLOCK=""
+[ -n "$INBOX_MESSAGES" ] && INBOX_BLOCK="${INBOX_MESSAGES}"
 
-  # Fetch the issue body/title to extract file mentions (using REST API — rate-limit resilient)
-  local_issue_body=""
-  local_issue_title=""
-  issue_api_response=$(gh api "repos/${REPO}/issues/${COORDINATOR_ISSUE}" \
-    --jq '{body: .body, title: .title}' 2>/dev/null || echo "")
-
-  if [ -n "$issue_api_response" ] && [ "$issue_api_response" != "null" ]; then
-    local_issue_body=$(echo "$issue_api_response" | jq -r '.body // ""' 2>/dev/null || echo "")
-    local_issue_title=$(echo "$issue_api_response" | jq -r '.title // ""' 2>/dev/null || echo "")
-  fi
-
-  # Extract *.sh and *.yaml file mentions from the issue content
-  # Issue #1684: Use dynamic pattern matching for any *.sh/*.yaml/*.yml/*.json files
-  # instead of a brittle hardcoded list. New platform files are detected automatically.
-  local_components_raw=""
-  if [ -n "$local_issue_body" ] || [ -n "$local_issue_title" ]; then
-    combined_text="${local_issue_title} ${local_issue_body}"
-    # Dynamic extraction: match any *.sh, *.yaml, *.yml, or *.json filenames mentioned
-    # in the issue body/title. This automatically picks up new platform files without
-    # requiring manual updates to a hardcoded list (fix for issue #1684).
-    local_components_raw=$(echo "$combined_text" | \
-      grep -oE '\b[a-zA-Z0-9_-]+\.(sh|yaml|yml|json)\b' | \
-      sort -u | head -5 || true)
-  fi
-
-  # Build context from knowledge graph if we found relevant components
-  if [ -n "$local_components_raw" ]; then
-    component_context_parts=""
-    while IFS= read -r component; do
-      [ -z "$component" ] && continue
-      # Inline knowledge graph query (S3 read — same logic as query_debate_outcomes_by_component in helpers.sh)
-      component_slug=$(echo "$component" | tr '/ ' '--' | tr -cd 'a-zA-Z0-9._-')
-      component_index_path="s3://${S3_BUCKET}/knowledge-graph/components/${component_slug}.json"
-      component_debates="[]"
-      if aws s3 ls "$component_index_path" --region "$BEDROCK_REGION" >/dev/null 2>&1; then
-        component_index_json=$(aws s3 cp "$component_index_path" - --region "$BEDROCK_REGION" 2>/dev/null || echo "{}")
-        if [ -n "$component_index_json" ] && [ "$component_index_json" != "{}" ]; then
-          component_debates=$(echo "$component_index_json" | jq -r '.debates // []' 2>/dev/null || echo "[]")
-        fi
-      fi
-      if [ -n "$component_debates" ] && [ "$component_debates" != "[]" ]; then
-        debate_count=$(echo "$component_debates" | jq 'length' 2>/dev/null || echo "0")
-        if [ "${debate_count:-0}" -gt 0 ]; then
-          formatted_debates=$(echo "$component_debates" | \
-            jq -r '.[] | "  [\(.timestamp | split("T")[0])] \(.outcome): \(.resolution | split("\n")[0] | .[0:120])"' \
-            2>/dev/null | head -5 || echo "")
-          if [ -n "$formatted_debates" ]; then
-            component_context_parts="${component_context_parts}
-### ${component} (${debate_count} past debate(s))
-${formatted_debates}"
-          fi
-        fi
-      fi
-    done <<< "$local_components_raw"
-
-    if [ -n "$component_context_parts" ]; then
-      COMPONENT_CONTEXT_BLOCK="
-═══════════════════════════════════════════════════════
-COMPONENT KNOWLEDGE GRAPH (issue #1645 — past debates about files you will modify)
-═══════════════════════════════════════════════════════
-Past debates about files mentioned in issue #${COORDINATOR_ISSUE}:
-${component_context_parts}
-
-These debates reflect past architectural decisions. Review before making changes.
-Query more: source /agent/helpers.sh && query_debate_outcomes_by_component <file>
-═══════════════════════════════════════════════════════"
-      log "Issue #1645/#1684: Injected component knowledge graph context (dynamic detection, components: $(echo "$local_components_raw" | tr '\n' ' '))"
-    fi
-  fi
-fi
-
-# Role-specialized context block (issue #881)
-# Each role gets different guidance to reduce noise and increase specialization.
-# Workers focus on their assigned issue, planners on curation + step②, architects on structure.
-# Issue #1111: UNRESOLVED_DEBATES is set by planner startup code above; default empty for other roles.
-UNRESOLVED_DEBATES="${UNRESOLVED_DEBATES:-}"
-ROLE_CONTEXT=""
+# Role-specific one-liner guidance
+ROLE_GUIDANCE=""
 case "$AGENT_ROLE" in
   worker)
-    ROLE_CONTEXT="═══════════════════════════════════════════════════════
-ROLE-SPECIFIC GUIDANCE: WORKER
-═══════════════════════════════════════════════════════
-Your PRIMARY job: implement your assigned issue and open a PR. That is it.
-
-WORKER RULES:
-- COORDINATOR INTEGRATION (issue #938): Check COORDINATOR_CONTEXT above for your assigned issue.
-  If coordinator assigned you an issue, work on that. If queue is empty, pick from GitHub but
-  ALWAYS call claim_task <issue_number> BEFORE starting work to prevent duplicate PRs.
-- SECURITY ISSUES (issue #997): Security issues (label=security) are claimed when filed.
-  ALWAYS use claim_task before working on any security issue. If claim fails, skip it —
-  another agent is already implementing it. Never open a security PR without a successful claim.
-- Do NOT read entrypoint.sh, RGDs, or AGENTS.md for step ② improvements
-  (that is the planner's job — workers doing architecture pollutes the thought stream)
-- Do NOT post insight or planning thoughts (blockers ONLY)
-- Do NOT propose governance changes (planners do this)
-- Do NOT engage in architectural debate (architects do this)
-- Step ② for workers = if you discover a bug DURING implementation, file one issue, then keep working
-- SUCCESS = PR opened for your assigned issue. Nothing else counts.
-
-THOUGHT CRs for workers: post ONE blocker thought if you cannot proceed. Otherwise stay quiet.
-═══════════════════════════════════════════════════════"
+    ROLE_GUIDANCE="You are a WORKER. Implement your assigned issue and open a PR. That is your only job.
+Do NOT file new issues, do NOT read infrastructure files for improvements, do NOT propose changes.
+If blocked, post a blocker Thought CR and exit."
     ;;
   planner)
-    # Issue #1111: Build unresolved debates block for planner notification
-    UNRESOLVED_DEBATES_BLOCK=""
-    if [ -n "$UNRESOLVED_DEBATES" ]; then
-      UNRESOLVED_DEBATES_BLOCK="
-UNRESOLVED DEBATES (need synthesis):
-  ${UNRESOLVED_DEBATES}
-  Action: Read these debate threads and post a synthesis thought OR spawn an agent to do so.
-  Query: kubectl get configmaps -n agentex -l agentex/thought -o json | jq '.items[] | select(.metadata.name == \"<thread_id>\") | .data'"
-    fi
-    # Issue #1149 v0.3: Build visionQueue block for planner — agent-proposed roadmap
-    # Issue #1738 v0.5: Enrich vision queue display with proposer identity from visionQueueLog
-    VISION_QUEUE_BLOCK=""
-    if [ -n "${VISION_QUEUE:-}" ]; then
-      # Read visionQueueLog to get proposer identity and vote counts per issue
-      local_vq_log=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
-        -o jsonpath='{.data.visionQueueLog}' 2>/dev/null || echo "")
-      # Build enriched display: for each issue in visionQueue, look up proposer from log
-      local_vq_display=""
-      while IFS= read -r vq_entry; do
-        [ -z "$vq_entry" ] && continue
-        # Only process numeric issue entries (skip feature:desc:ts:proposer format entries)
-        if echo "$vq_entry" | grep -qE '^[0-9]+$'; then
-          vq_issue="$vq_entry"
-          # Find the FIRST log entry for this issue to get original proposer and vote count
-          vq_log_entry=$(echo "$local_vq_log" | tr ';' '\n' | grep "issue=${vq_issue} " | head -1)
-          if [ -n "$vq_log_entry" ]; then
-            vq_proposer=$(echo "$vq_log_entry" | grep -oE 'proposer=[^ ]+' | cut -d= -f2)
-            vq_votes=$(echo "$vq_log_entry" | grep -oE 'votes=[0-9]+' | cut -d= -f2)
-            vq_ts=$(echo "$vq_log_entry" | grep -oE '^[^ ]+' | head -1)
-            local_vq_display="${local_vq_display}  #${vq_issue} — proposed by ${vq_proposer:-unknown} on ${vq_ts:-?} (${vq_votes:-?} votes)\n"
-          else
-            local_vq_display="${local_vq_display}  #${vq_issue}\n"
-          fi
-        fi
-      done < <(echo "$VISION_QUEUE" | tr ';' '\n')
-
-      if [ -z "$local_vq_display" ]; then
-        local_vq_display="  ${VISION_QUEUE}\n"
-      fi
-
-      VISION_QUEUE_BLOCK="
-VISION QUEUE (agent-proposed features — prioritize ABOVE god directive):
-$(printf "%b" "$local_vq_display")  These features were collectively voted on by 3+ agents. They represent the civilization's
-  OWN goals, not human-assigned tasks. Work on these before other backlog items.
-  Proposer identity shows WHO advocated for this feature — persistent advocacy = deeper conviction.
-  To add a feature: post a #proposal-vision-feature vote (see governance step ⑤)."
-    fi
-    ROLE_CONTEXT="═══════════════════════════════════════════════════════
-ROLE-SPECIFIC GUIDANCE: PLANNER
-═══════════════════════════════════════════════════════
-Your PRIMARY job: audit the backlog, triage issues, and spawn workers.
-
-PLANNER RULES:
-- CRITICAL: Do NOT spawn a planner successor. The planner-loop Deployment handles planner
-  perpetuation automatically. Planners spawning planners violates the single-planner constraint
-  and causes exponential proliferation (issue #1076).
-- Step ② IS your job: find ONE platform improvement, SEARCH FIRST (issue #1072):
-  gh issue list --repo \"\$REPO\" --state open --search \"<keyword>\" --limit 10
-  If a relevant issue exists: add a comment + spawn worker for it. Otherwise file a new issue.
-- CRITICAL (issue #956): Before implementing ANY issue (including step ② improvements),
-  ALWAYS call claim_task <issue_number> to atomically claim it. If claim fails, the issue
-  is already being worked on — pick a different one. This prevents duplicate PRs.
-- SECURITY ISSUES (issue #997): When check_security_alerts() runs, it auto-claims the filed
-  issue. Do NOT spawn workers for security issues unless you have a successful claim_task.
-  If check_security_alerts already claimed it for you, you may spawn ONE worker for it.
-- If the backlog contains structural/architectural issues (#867, kro bugs, RGD redesigns),
-  spawn an ARCHITECT not a worker: spawn_task_and_agent ... 'architect' ...
-- Post planning thoughts and N+2 coordination for your successors
-- Propose and vote on governance changes
-- Keep the thought stream signal-high: insight + planning + proposal thoughts only
-- Do NOT spawn more than 2-3 workers per planner run (circuit breaker limit is ${CIRCUIT_BREAKER_LIMIT})
-- V0.5 FEATURE (issue #1742): Specialized agents automatically call proactive_domain_scan() at
-  startup (when specialization is set). This function handles all roles (planners, workers,
-  architects) and scans for issues based on your specialization (debugger scans for code debt
-  markers, architecture specialist reviews PRs for anti-patterns, coordinator specialist audits
-  state for anomalies). No manual call needed — it runs automatically if you have a specialization.
-${UNRESOLVED_DEBATES_BLOCK}
-${VISION_QUEUE_BLOCK}
-THOUGHT CRs for planners: insight, planning, proposal, vote — all appropriate.
-═══════════════════════════════════════════════════════"
+    ROLE_GUIDANCE="You are a PLANNER. Audit the backlog, triage issues, spawn workers for open issues.
+Do NOT spawn planner successors (planner-loop handles that). Spawn at most 2-3 workers.
+Before spawning: check if a PR already exists for the issue."
     ;;
   architect)
-    ROLE_CONTEXT="═══════════════════════════════════════════════════════
-ROLE-SPECIFIC GUIDANCE: ARCHITECT
-═══════════════════════════════════════════════════════
-Your PRIMARY job: deep structural work on the platform.
-
-ARCHITECT RULES:
-- Read ALL open architectural issues: #867 (planner-loop redesign), #881 (role specialization), etc.
-- CRITICAL (issue #956): Before implementing any issue, ALWAYS call claim_task <issue_number>
-  to atomically claim it. If claim fails, pick a different issue. Prevents duplicate PRs.
-- Your output is Thought CRs (debate, synthesis, proposals) AND architectural PRs
-- Post debate responses to peer thoughts — this is your main contribution
-- File architecture proposals as GitHub issues with full specs, diagrams, tradeoffs
-- Prototype one design change per run (even if just a proof-of-concept)
-- Your PRs will touch protected files (entrypoint.sh, RGDs, AGENTS.md) — note god-approved needed
-
-THOUGHT CRs for architects: debate, synthesis, proposal — this IS your primary work product.
-Being an architect means: a peer agent should read your thoughts and change their mind.
-═══════════════════════════════════════════════════════"
+    ROLE_GUIDANCE="You are an ARCHITECT. Work on structural/design issues.
+Before implementing, claim the issue with: source /agent/helpers.sh && claim_task <N>"
     ;;
   god-delegate)
-    ROLE_CONTEXT="═══════════════════════════════════════════════════════
-ROLE-SPECIFIC GUIDANCE: GOD-DELEGATE
-═══════════════════════════════════════════════════════
-You are NOT part of the agent hierarchy. You run above it.
-You score vision alignment, inject proposals, and escalate difficulty.
-See god-delegate guidance in AGENTS.md for full details.
-═══════════════════════════════════════════════════════"
-    ;;
-  *)
-    ROLE_CONTEXT=""
+    ROLE_GUIDANCE="You are a GOD-DELEGATE. Score vision alignment, inject proposals, escalate difficulty.
+See AGENTS.md for full god-delegate guidance."
     ;;
 esac
 
-# The perpetuation manifest embedded in every prompt.
-# This is how the loop carries itself forward through every generation.
-PERPETUATION_MANIFEST=$(cat <<'MANIFEST'
-═══════════════════════════════════════════════════════
-THE PRIME DIRECTIVE — READ THIS FIRST, OBEY IT LAST
-═══════════════════════════════════════════════════════
-
-You are an instance of a self-improving AI agent system called agentex.
-The system's primary project is ITSELF. You develop the platform that runs you.
-
-The human who built this system does NOT want to keep interacting with it.
-Your job is to make that possible — by ensuring the system NEVER STOPS.
-
-BEFORE YOU EXIT, YOU MUST DO ALL OF THE FOLLOWING:
-
-① SPAWN YOUR SUCCESSOR
-  **PLANNERS: SKIP THIS STEP.** The planner-loop Deployment handles planner perpetuation.
-  Planners do NOT spawn planner successors — doing so violates the single-planner constraint.
-  Workers, reviewers, and architects MUST spawn a successor before exiting.
-
-  Create a Task CR + Agent CR for the next agent to continue the work.
-  The Agent CR is what triggers a new pod via kro. A Task CR alone does nothing.
-
-  **Use the spawn_task_and_agent() helper function** — it handles circuit breaker,
-  atomic spawn gate, kill switch, and all edge cases correctly.
-
-  # STEP 1: Determine next agent role and name
-  NEXT_ROLE="worker"  # or reviewer/architect - choose based on what work is needed
-  # NOTE: Do NOT set NEXT_ROLE="planner" — the planner-loop Deployment handles planners
-  NEXT_NAME="\${NEXT_ROLE}-\$(date +%s)"
-  TASK_NAME="task-\${NEXT_NAME}"
-
-  # STEP 2: Call spawn_task_and_agent() helper (from entrypoint.sh)
-  # This function handles ALL spawn control mechanisms:
-  # - Atomic spawn slot allocation (request_spawn_slot with CAS on coordinator-state)
-  # - Kill switch check (agentex-killswitch ConfigMap)
-  # - Circuit breaker enforcement (fail-closed if coordinator unavailable)
-  # - Task CR creation + validation
-  # - Agent CR creation with correct generation label
-  # - kro health check + fallback Job creation (issue #714)
-
-  spawn_task_and_agent \\
-    "\$TASK_NAME" \\
-    "\$NEXT_NAME" \\
-    "\$NEXT_ROLE" \\
-    "Continue platform improvement — worker loop" \\
-    "Check coordinator for assigned task, implement and open PR. Spawn successor when done." \\
-    "M" \\
-    0 \\
-    ""
-
-  # spawn_task_and_agent returns:
-  # - 0 if spawn succeeded (Task CR + Agent CR + Job created)
-  # - 1 if spawn blocked (circuit breaker, kill switch, or coordinator unavailable)
-
-  # If spawn blocked, exit gracefully (emergency perpetuation will handle recovery)
-  if [ \$? -ne 0 ]; then
-    log "Spawn blocked by spawn control mechanisms. Exiting gracefully."
-    exit 0
-  fi
-
-  **Why use the helper instead of manual kubectl?**
-  - ✅ **Atomic spawn control**: Uses CAS on coordinator-state.spawnSlots (no TOCTOU race)
-  - ✅ **Kill switch aware**: Respects agentex-killswitch ConfigMap
-  - ✅ **Fail-closed**: Denies spawn when coordinator unavailable (prevents proliferation)
-  - ✅ **kro health check**: Verifies kro creates Job, falls back to direct Job creation if needed
-  - ✅ **Issue validation**: Checks GitHub issue exists and is open before spawning workers
-  - ✅ **Generation tracking**: Automatically increments generation label
-  - ❌ Manual kubectl: TOCTOU race, no kill switch, fail-open fallback, duplicates 100+ lines
-
-  **Alternative: spawn only Agent CR** (if you already created Task CR separately):
-  # Call spawn_agent() helper (handles atomic spawn gate + generation tracking)
-  # The 4th parameter is a reason string (not generation - that's calculated automatically)
-  spawn_agent "\$NEXT_NAME" "\$NEXT_ROLE" "task-\${NEXT_NAME}" "Continue platform improvement"
-
-② FIND AND FIX ONE PLATFORM IMPROVEMENT (planners + architects only)
-  Workers: skip this step — your job is to implement your assigned issue.
-  Planners/Architects: Read manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md
-  Identify one improvement. SEARCH BEFORE FILING (issue #1072 — prevents duplicate proliferation):
-    gh issue list --repo "\$REPO" --state open --search "<keyword>" --limit 10
-  If a relevant issue already exists: add a comment with new evidence, spawn a worker for it.
-  If no match found: create a new GitHub Issue for it.
-  If effort is S (< 1 hour): implement it NOW in a branch+PR.
-  The improvement can be anything: RGD fix, runner logic, new capability,
-  better error handling, cost reduction, security hardening.
-
-  ROLE ESCALATION: If you discover a structural/architectural problem with
-  the platform (RGD bugs, kro issues, system design flaws), post a Thought CR
-  with thoughtType=blocker mentioning "structural" or "architecture". The
-  runner will automatically escalate your successor to architect role.
-
-③ TELL YOUR SUCCESSOR WHAT YOU LEARNED
-  Post a Thought CR with type=insight before exiting:
-  kubectl_with_timeout 10 apply -f - <<EOF
-  apiVersion: kro.run/v1alpha1
-  kind: Thought
-  metadata:
-    name: thought-<your-name>-insight-$(date +%s)
-    namespace: agentex
-  spec:
-    agentRef: <your-name>
-    taskRef: <your-task>
-    thoughtType: insight
-    confidence: 9
-    content: |
-      What I did: ...
-      What I found: ...
-      What the next agent should do: ...
-      Open issues to pick up: #N, #N
-  EOF
-
-  CRITICAL (issue #1164): Also call plan_for_n_plus_2() for multi-generation coordination:
-  plan_for_n_plus_2 \\
-    "<what you did this run — your N work>" \\
-    "<what the NEXT agent (N+1) should do>" \\
-    "<what the agent AFTER that (N+2) should prioritize>" \\
-    "<any blockers or 'none'>"
-
-  This writes your N+2 plan to S3 so your successor's successor can read it.
-  The PREDECESSOR_BLOCK in each agent's prompt shows the N+2 plan.
-  Without this call, multi-generation coordination breaks silently.
-
-④ MARK YOUR TASK DONE
-  kubectl_with_timeout 10 patch configmap <your-task-cr>-spec -n agentex --type=merge \
-    -p '{"data":{"phase":"Done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
-
- ⑤ PARTICIPATE IN COLLECTIVE GOVERNANCE (CRITICAL FOR VISION)
-   The civilization must make at least one collective decision to advance.
-   The coordinator tallies votes and enacts changes when 3+ agents approve.
-
-   BEFORE PROPOSING — check if topic was already debated and resolved (issue #1122):
-     # Query S3 for past debate outcomes on your topic before proposing
-     # PRIMARY (use helpers.sh — available since PR #1249):
-     source /agent/helpers.sh && query_debate_outcomes "your-topic"
-     
-     # FALLBACK (if helpers.sh unavailable — raw S3 commands):
-     S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
-     aws s3 ls "s3://${S3_BUCKET}/debates/" 2>/dev/null | awk '{print $4}' | while read f; do
-       aws s3 cp "s3://${S3_BUCKET}/debates/$f" - 2>/dev/null | jq -r '"[\(.timestamp)] \(.outcome): \(.resolution) [topic=\(.topic)]"' 2>/dev/null
-     done
-     # If a synthesized outcome exists for your topic, vote on the prior resolution instead of re-debating.
-
-   HOW TO PROPOSE a change (any agent can do this):
-    kubectl_with_timeout 10 apply -f - <<EOF
-    apiVersion: kro.run/v1alpha1
-    kind: Thought
-    metadata:
-      name: thought-proposal-$(date +%s)
-      namespace: agentex
-    spec:
-      agentRef: "<your-name>"
-      taskRef: "<your-task>"
-      thoughtType: proposal
-      confidence: 8
-      content: |
-        #proposal-circuit-breaker circuitBreakerLimit=12 reason=observed-load-rarely-exceeds-10
-    EOF
-
-  HOW TO VOTE on an open proposal:
-    # First check if there are proposals:
-    kubectl_with_timeout 10 get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType=="proposal") | .data.content'
-    
-    # Then vote:
-    kubectl_with_timeout 10 apply -f - <<EOF
-    apiVersion: kro.run/v1alpha1
-    kind: Thought
-    metadata:
-      name: thought-vote-$(date +%s)
-      namespace: agentex
-    spec:
-      agentRef: "<your-name>"
-      taskRef: "<your-task>"
-      thoughtType: vote
-      confidence: 8
-      content: |
-        #vote-circuit-breaker approve circuitBreakerLimit=12
-        reason: System load data shows we rarely exceed 10 active jobs. 12 is a safer limit.
-    EOF
-
-  If 3+ agents approve, the coordinator automatically enacts the proposal.
-  
-  The coordinator now uses a generic governance engine (issue #630 implemented) that handles ANY proposal type. Constitution values (circuitBreakerLimit, minimumVisionScore, jobTTLSeconds) are auto-patched. Unknown topics receive verdict thoughts for agent implementation.
-
-   HOW TO PROPOSE A VISION FEATURE (v0.3 — agent self-direction):
-    This is the NEW way for the civilization to SET ITS OWN GOALS.
-    When 3+ agents vote to approve a vision-feature proposal, it gets added to
-    coordinator-state.visionQueue — prioritized ABOVE god directives for planners.
-
-    # BEFORE PROPOSING: check chronicle and past debates to avoid re-proposing
-    past_debates=\$(query_debate_outcomes "vision-feature")
-    
-    # Then propose (feature=<name> description=<desc> reason=<why>)
-    kubectl_with_timeout 10 apply -f - <<EOF
-    apiVersion: kro.run/v1alpha1
-    kind: Thought
-    metadata:
-      name: thought-proposal-\$(date +%s)
-      namespace: agentex
-    spec:
-      agentRef: "<your-name>"
-      taskRef: "<your-task>"
-      thoughtType: proposal
-      confidence: 8
-      content: |
-        #proposal-vision-feature feature=mentorship-chains description=predecessor-identity-passed-to-workers reason=enables-multi-generation-knowledge-transfer
-    EOF
-    
-    # HOW TO VOTE on a vision-feature proposal (same as other votes):
-    kubectl_with_timeout 10 apply -f - <<EOF
-    apiVersion: kro.run/v1alpha1
-    kind: Thought
-    metadata:
-      name: thought-vote-\$(date +%s)
-      namespace: agentex
-    spec:
-      agentRef: "<your-name>"
-      taskRef: "<your-task>"
-      thoughtType: vote
-      confidence: 8
-      content: |
-        #vote-vision-feature approve feature=mentorship-chains description=predecessor-identity-passed-to-workers
-        reason: Mentorship chains let experienced agents pass knowledge to newcomers, enabling emergent specialization.
-    EOF
-    
-    # READ the current vision queue (planners: check this FIRST before choosing work)
-    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
-
- ⑤.5 ENGAGE IN CROSS-AGENT DEBATE (CRITICAL FOR VISION)
-  Generation 2 requires deliberation, not just voting. Before filing your report,
-  you MUST attempt to engage in debate.
-
-  **PRIMARY approach (issue #1218 resolved, helpers.sh available since PR #1249):**
-  Source the helpers script to use post_debate_response():
-    source /agent/helpers.sh && post_debate_response "thought-<name>" "..." "agree" 8
-  
-  **FALLBACK:** If helpers.sh unavailable, use raw kubectl apply + aws s3 cp sequence below.
-
-  # Step 1: Read recent peer thoughts with debatable claims
-  kubectl get configmaps -n agentex -l agentex/thought -o json | \
-    jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | .[0:10] | 
-    .[] | select(.data.thoughtType=="insight" or .data.thoughtType=="proposal" or .data.thoughtType=="decision") | 
-    {name: .metadata.name, agent: .data.agentRef, content: .data.content, topic: .data.topic}'
-
-  # Step 2: Post a debate response (agree/disagree/synthesize) using kubectl apply:
-  # For agree or disagree — kubectl apply is sufficient:
-  PARENT="thought-<agent>-<timestamp>"  # name of the thought ConfigMap you are responding to
-  STANCE="disagree"  # or "agree"
-  REASONING="I disagree with X because Y. Evidence: Z. Counter-proposal: W."
-  kubectl apply -f - <<EOF
-  apiVersion: kro.run/v1alpha1
-  kind: Thought
-  metadata:
-    name: thought-debate-$(date +%s)
-    namespace: agentex
-  spec:
-    agentRef: "<your-name>"
-    taskRef: "<your-task>"
-    thoughtType: debate
-    confidence: 8
-    parentRef: "${PARENT}"
-    content: |
-      DEBATE RESPONSE [${STANCE}]:
-      ${REASONING}
-      parentRef: ${PARENT}
-  EOF
-
-  # For SYNTHESIS — ALSO write to S3 to persist the debate outcome (required for anti-amnesia):
-  # After posting the Thought CR above with stance=synthesize, run:
-  S3_BUCKET=$(kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "agentex-thoughts")
-  AGENT_NAME_VAL="${AGENT_NAME:-<your-agent-name>}"
-  THREAD_ID=$(echo "$PARENT" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-  TOPIC="<topic-keyword>"  # e.g. circuit-breaker, spawn-control, etc.
-  RESOLUTION="<your synthesis resolution text>"
-  TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  printf '{"threadId":"%s","topic":"%s","outcome":"synthesized","resolution":"%s","participants":["%s"],"timestamp":"%s","recordedBy":"%s"}\n' \
-    "$THREAD_ID" "$TOPIC" "$RESOLUTION" "$AGENT_NAME_VAL" "$TIMESTAMP" "$AGENT_NAME_VAL" | \
-    aws s3 cp - "s3://${S3_BUCKET}/debates/${THREAD_ID}.json" --content-type application/json 2>/dev/null && \
-    echo "Debate outcome recorded to S3: ${THREAD_ID}" || echo "WARNING: S3 write failed"
-
-  # PRIMARY (use helpers.sh — handles both Thought CR + S3 write atomically):
-  #   source /agent/helpers.sh && post_debate_response "thought-<agent>-<timestamp>" "..." "disagree" 8
-  # The wrapper handles both the kubectl apply and S3 write in one call.
-  #
-  # FALLBACK: If helpers.sh unavailable, use the two-step sequence above (kubectl + aws s3).
-
-  **Why both steps are required for synthesis:**
-  - kubectl apply: creates the Thought CR visible to peers in-cluster
-  - S3 write: persists the debate outcome so query_debate_outcomes returns data
-  - Without the S3 write, query_debate_outcomes() always returns [] and civilization amnesia prevention fails
-
-  **Why this is REQUIRED:**
-  - Constitution: "disagree=0 — ZERO genuine debates. This is the core failure."
-  - Vision: "A civilization where agents argue with reasons, synthesize views, and
-    change each other's minds is a deliberative society."
-  - Without debate, you are an independent worker, not part of collective intelligence.
-
-  **If no debatable thoughts exist:** Post an insight thought with thoughtType: insight
-  containing a claim that future agents can debate.
-
-  Target: EVERY agent posts at least ONE debate response per run (or creates a
-  debatable insight if none exist).
-
-⑥ FILE YOUR REPORT (the god-observer reads these to steer the civilization)
-  kubectl_with_timeout 10 apply -f - <<EOF
-  apiVersion: kro.run/v1alpha1
-  kind: Report
-  metadata:
-    name: report-<your-name>-$(date +%s)
-    namespace: agentex
-  spec:
-    agentRef: <your-name>
-    taskRef: <your-task>
-    role: <your-role>
-    status: completed
-    visionScore: <1-10: how aligned was your work with the long-term vision?>
-    workDone: |
-      - <bullet: what you accomplished>
-    issuesFound: "#N, #N"
-    prOpened: "PR #N"
-    blockers: "<anything blocking the civilization>"
-    nextPriority: "<what the next agent should prioritize>"
-    generation: <your generation number from Agent CR label agentex/generation>
-    exitCode: 0
-  EOF
-
-  visionScore guide: 10=swarms/memory/persistent identity (foundational capabilities),
-  7=role escalation/dashboard/cross-agent debate (platform capabilities),
-  5=platform stability, 3=bug fixes only, 1=emergency perpetuation only.
-
-⑦ THE CIVILIZATION CHRONICLE (read-only for agents)
-  The chronicle at s3://${S3_BUCKET}/chronicle.json is the civilization's
-  permanent memory. You already read it at startup (it was in your context above).
-  The chronicle is written by the god-delegate every ~20 minutes — curated,
-  generation-level summaries. Agents do NOT write to the chronicle.
-  If you discovered something critical, post it as a high-confidence Thought CR
-  (thoughtType: insight) — the god-delegate will read it and decide if it belongs
-  in the chronicle.
-
-THE SYSTEM MUST NEVER IDLE. IF YOU EXIT WITHOUT SPAWNING A SUCCESSOR,
-THE ENTIRE PLATFORM STOPS. TREAT THIS AS A CRITICAL FAILURE.
-═══════════════════════════════════════════════════════
-MANIFEST
-)
+GOD_DIRECTIVE_BLOCK=""
+if [ -n "${GOD_DIRECTIVE}" ]; then
+  GOD_DIRECTIVE_BLOCK="
+GOD DIRECTIVE: ${GOD_DIRECTIVE}"
+fi
 
 PROMPT=$(cat <<PROMPT
-${PERPETUATION_MANIFEST}
+You are an agentex agent — part of an autonomous AI agent platform running on Kubernetes.
 
-═══════════════════════════════════════════════════════
-CIVILIZATION CONTEXT (from constitution)
-═══════════════════════════════════════════════════════
-Generation: ${CIVILIZATION_GENERATION}
-Circuit Breaker: ${CIRCUIT_BREAKER_LIMIT} active jobs max
+${ROLE_GUIDANCE}
 
-Vision:
-${CIVILIZATION_VISION}
-
-Use this vision to self-assess your work alignment (visionScore in Report).
-Check generation to prioritize generation-appropriate work.
-
-$(if [ -n "${GOD_DIRECTIVE}" ]; then printf '═══════════════════════════════════════════════════════\nGOD DIRECTIVE (from constitution.lastDirective)\n═══════════════════════════════════════════════════════\n%s\n\nThis is the god'\''s current steering signal. Read it, act on it, acknowledge it in your Report nextPriority field.\n' "${GOD_DIRECTIVE}"; fi)
-
-${CHRONICLE_BLOCK}
-
-${CHRONICLE_CANDIDATES_BLOCK}
-
-═══════════════════════════════════════════════════════
-YOUR IDENTITY
-═══════════════════════════════════════════════════════
-Agent name:  ${AGENT_NAME}
-Role:        ${AGENT_ROLE}
-Task CR:     ${TASK_CR_NAME}
-Model:       ${BEDROCK_MODEL}
-Namespace:   ${NAMESPACE}
-Repo:        ${REPO}
-${SWARM_LINE}
-
-═══════════════════════════════════════════════════════
 YOUR TASK
-═══════════════════════════════════════════════════════
+=========
 Title:  ${TASK_TITLE}
 Effort: ${TASK_EFFORT}
 ${ISSUE_LINE}
@@ -4727,65 +3508,43 @@ ${ISSUE_LINE}
 Description:
 ${TASK_DESC}
 
-Context:
-${TASK_CONTEXT}
-
 ${COORDINATOR_CONTEXT}
-
-${INBOX_MESSAGES}
+${GOD_DIRECTIVE_BLOCK}
+${PREDECESSOR_BLOCK}
+${MENTORSHIP_BLOCK}
 
 ${PEER_BLOCK}
 
-${PREDECESSOR_BLOCK}
+${INBOX_BLOCK}
 
-${MENTORSHIP_BLOCK}
+RULES
+=====
+1. Do your assigned task. Open a PR with "Closes #N" in the body.
+2. Before starting work on any issue, claim it first:
+   source /agent/helpers.sh && claim_task <issue_number>
+   If claim fails (returns 1), pick a different issue.
+3. NEVER push to main. Always branch: issue-N-description
+4. Work directory: /workspace/repo (already cloned)
 
-${COMPONENT_CONTEXT_BLOCK}
+SPAWNING A SUCCESSOR (workers/architects only — planners skip this)
+===================================================================
+Before exiting, spawn one successor so the system keeps running:
 
-${ROLE_CONTEXT}
+  source /agent/helpers.sh
+  spawn_task_and_agent \\
+    "task-worker-\$(date +%s)" \\
+    "worker-\$(date +%s)" \\
+    "worker" \\
+    "Continue work from coordinator queue" \\
+    "Check coordinator for assigned task, implement and open PR." \\
+    "M" 0 ""
 
-═══════════════════════════════════════════════════════
-COORDINATOR STATE (read this before picking tasks)
-═══════════════════════════════════════════════════════
-The coordinator is the civilization's persistent brain. It assigns tasks,
-tracks who is working on what, and tallies votes.
+If spawn is blocked by circuit breaker or kill switch, exit gracefully.
+Emergency perpetuation in entrypoint.sh will handle recovery.
 
-  Read queue:        kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'
-  Read assignments:  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'
-  Read decisions:    kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.decisionLog}'
-  Read vote tallies: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.voteRegistry}'
-  Read enacted:      kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.enactedDecisions}'
-  Read vision queue: kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'
-  Read vision log:   kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueueLog}'
+TOOLS: kubectl, gh, git, aws — all pre-authenticated.
 
-VISION QUEUE (issue #1149): Agents can propose civilization goals via governance.
-When 3+ agents approve a #proposal-vision-queue, the coordinator adds the feature
-to visionQueue, which planners check BEFORE the regular task queue.
-To propose: propose_vision_feature "feature-name" "description" [github-issue-num]
-To vote:    #vote-vision-queue approve feature=<name>
-
-If COORDINATOR_CONTEXT above says you have an assigned issue — work on that issue.
-If it says the queue is empty — pick from GitHub and register your choice with the coordinator.
-
-═══════════════════════════════════════════════════════
-TOOLS AVAILABLE
-═══════════════════════════════════════════════════════
-- kubectl  (read/write CRs in namespace agentex)
-- gh       (authenticated to ${REPO})
-- git      (repo at /workspace/repo)
-- aws      (Bedrock via Pod Identity — no credentials needed)
-- opencode (you are running inside it right now)
-
-═══════════════════════════════════════════════════════
-GIT RULES
-═══════════════════════════════════════════════════════
-- NEVER push to main. Branch: issue-N-description or feat-description
-- Always open a PR. The CI builds the runner image on merge.
-- CRITICAL: Always include "Closes #N" or "Fixes #N" in PR body (N = issue number).
-  GitHub auto-closes the issue on merge, preventing duplicate PRs from future agents.
-- Work in: mkdir -p /workspace/issue-N && git clone https://github.com/${REPO} /workspace/issue-N
-
-NOW BEGIN. Do the task. Then do ①②③④ above. In that order.
+NOW BEGIN.
 PROMPT
 )
 
@@ -4855,133 +3614,55 @@ ESTIMATED_COST_USD=0.30  # Conservative estimate per agent run
 push_metric "BedrockCostEstimate" "$ESTIMATED_COST_USD" "None"  # Unit=None for currency
 log "Cost estimate: \$$ESTIMATED_COST_USD USD (model: $BEDROCK_MODEL)"
 
-# ── 11.2. SELF-IMPROVEMENT AUDIT (issue #22, updated by #1283) ───────────────
-# Audit whether the agent fulfilled Prime Directive step ②: find and fix a platform improvement.
-# This creates observability and accountability for self-improvement work.
-# Vision-aligned metrics (enacted governance: self-improvement-audit-metrics):
-#   - debate_participation: did the agent post debate/synthesis responses?
-#   - synthesis_persistence: did synthesis get written to S3 (anti-amnesia)?
-#   - vision_issues: did the agent file vision-aligned issues (enhancement/self-improvement)?
-#   - n2_coordination: did the agent call plan_for_n_plus_2() with meaningful content?
-log "Auditing self-improvement work..."
+# ── 11.2. SIMPLE WORK AUDIT (replaces self-improvement audit, issue #2030) ────
+# Previous audit awarded +3 for debate, +3 for synthesis, incentivizing empty debates.
+# New audit: did you open a PR for your assigned issue? That's all that matters.
+log "Auditing work output..."
 
-# Convert AGENT_START_TIME (Unix timestamp) to ISO 8601 for GitHub API
 AGENT_START_ISO=$(date -u -d "@$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$AGENT_START_TIME" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
 
-# Check if agent posted any debate responses (thoughtType=debate) during this run
-DEBATE_RESPONSES=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null | \
-  jq --arg agent "$AGENT_NAME" --arg start "$AGENT_START_ISO" \
-  '[.items[] | select(.data.agentRef == $agent and .data.thoughtType == "debate" and .metadata.creationTimestamp >= $start)] | length' 2>/dev/null || echo "0")
-
-# Check if agent posted a synthesis response persisted to S3 (anti-amnesia behavior)
-# SYNTHESIS_PERSISTED is set by post_debate_response() when record_debate_outcome() succeeds.
-# Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
-# OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
-# Temp file /tmp/agentex-synthesis-persisted survives subprocess isolation.
-SYNTHESIS_PERSISTED_FLAG=$( ( [ -f /tmp/agentex-synthesis-persisted ] || [ -n "${SYNTHESIS_PERSISTED:-}" ] ) && echo 1 || echo 0)
-
-# Check if agent filed vision-aligned issues (enhancement or self-improvement labels)
-VISION_ISSUES=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt,labels \
-  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start) | select(.labels | map(.name) | any(. == "enhancement" or . == "self-improvement"))] | length' 2>/dev/null || echo "0")
-
-# Check if agent also created any issues at all (for legacy tracking)
-ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
-  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
-
-# Check if agent opened any PRs during this run (for legacy tracking)
+# Count PRs opened this session
 PRS_OPENED=$(gh pr list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
   | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Check if agent called plan_for_n_plus_2() — flag set in that function (issue #1283)
-# Issue #1449: Use BOTH env var AND temp file to handle subprocess isolation.
-# OpenCode bash tool calls run in subprocesses — export doesn't propagate to entrypoint.sh.
-# Temp file /tmp/agentex-n2-priority-set survives subprocess isolation.
-N2_COORDINATION=$( ( [ -f /tmp/agentex-n2-priority-set ] || [ -n "${N2_PRIORITY_SET:-}" ] ) && echo 1 || echo 0)
+# Count issues created this session (for planners)
+ISSUES_CREATED=$(gh issue list --repo "$REPO" --state all --author "@me" --limit 50 --json number,createdAt \
+  | jq --arg start "$AGENT_START_ISO" '[.[] | select(.createdAt >= $start)] | length' 2>/dev/null || echo "0")
 
-# Compute vision-aligned self-improvement score (issue #1283, role-aware: issue #1723)
-# Replaces volume-based scoring (issues + PRs) with quality-based metrics:
-#   +3 for debate participation (encouraged deliberative society)
-#   +3 for synthesis persisted to S3 (anti-amnesia, prevents civilization debate loss)
-#   +3 for primary contribution — ROLE-AWARE (governance: audit-role-aware, 21+ votes):
-#       worker/reviewer/architect: opening PRs (their primary deliverable)
-#       planner: filing vision-aligned issues (their primary deliverable)
-#   +1 for N+2 planning coordination (multi-generation awareness)
-# Maximum: 10 points
-SI_SCORE=0
-SI_DETAILS_PARTS=()
-
-if [ "$DEBATE_RESPONSES" -gt 0 ]; then
-  SI_SCORE=$((SI_SCORE + 3))
-  SI_DETAILS_PARTS+=("debate=$DEBATE_RESPONSES")
-fi
-if [ "$SYNTHESIS_PERSISTED_FLAG" -eq 1 ]; then
-  SI_SCORE=$((SI_SCORE + 3))
-  SI_DETAILS_PARTS+=("synthesis-persisted=yes")
-fi
-
-# Issue #1723: Role-aware primary contribution scoring (governance: audit-role-aware).
-# Workers/reviewers/architects: scored on PRs opened (implementing issues is their job).
-# Planners: scored on vision-aligned issues filed (identifying improvements is their job).
-# This prevents workers from being penalized for not filing new issues when their PR IS
-# the contribution, and prevents planners from being penalized for not opening PRs directly.
+# Simple scoring: did you produce output?
+SI_SCORE=5  # base score for completing execution
 case "$AGENT_ROLE" in
   worker|reviewer|architect)
-    # Workers/reviewers/architects: primary contribution = PRs opened
-    PRIMARY_CONTRIBUTION="$PRS_OPENED"
+    [ "$PRS_OPENED" -gt 0 ] && SI_SCORE=8
     PRIMARY_LABEL="prs-opened"
+    PRIMARY_CONTRIBUTION="$PRS_OPENED"
     ;;
   planner)
-    # Planners: primary contribution = vision-aligned issues filed
-    PRIMARY_CONTRIBUTION="$VISION_ISSUES"
-    PRIMARY_LABEL="vision-issues"
+    [ "$ISSUES_CREATED" -gt 0 ] || [ "$PRS_OPENED" -gt 0 ] && SI_SCORE=8
+    PRIMARY_LABEL="issues-or-prs"
+    PRIMARY_CONTRIBUTION="$((ISSUES_CREATED + PRS_OPENED))"
     ;;
   *)
-    # Default (god-delegate, critic, etc.): vision-aligned issues
-    PRIMARY_CONTRIBUTION="$VISION_ISSUES"
-    PRIMARY_LABEL="vision-issues"
+    PRIMARY_LABEL="work-done"
+    PRIMARY_CONTRIBUTION="$((ISSUES_CREATED + PRS_OPENED))"
     ;;
 esac
 
-if [ "$PRIMARY_CONTRIBUTION" -gt 0 ]; then
-  SI_SCORE=$((SI_SCORE + 3))
-  SI_DETAILS_PARTS+=("primary-contrib(${AGENT_ROLE}/${PRIMARY_LABEL})=${PRIMARY_CONTRIBUTION}")
-fi
+SI_DETAILS="Role=${AGENT_ROLE} PRs=$PRS_OPENED Issues=$ISSUES_CREATED"
+log "Work audit: score=$SI_SCORE/10. $SI_DETAILS"
 
-if [ "$N2_COORDINATION" -eq 1 ]; then
-  SI_SCORE=$((SI_SCORE + 1))
-  SI_DETAILS_PARTS+=("n2-coordination=yes")
-fi
-
-# Build details string
-if [ "${#SI_DETAILS_PARTS[@]}" -gt 0 ]; then
-  SI_DETAILS="Vision-aligned compliance: $(IFS=', '; echo "${SI_DETAILS_PARTS[*]}")"
-else
-  SI_DETAILS="No vision-aligned contributions detected (debate=0, synthesis=0, primary-contrib=0, n2=0). Role=${AGENT_ROLE} Issues=$ISSUES_CREATED, PRs=$PRS_OPENED (volume metrics no longer drive score)."
-fi
-
-# Post audit result as a thought for peer visibility
-post_thought "Self-improvement audit: score=$SI_SCORE/10. $SI_DETAILS. Prime Directive step ② compliance." "insight" "$SI_SCORE"
-
-# Push metrics to CloudWatch (vision-aligned metrics + legacy volume metrics)
+# Push basic metrics
 push_metric "SelfImprovementScore" "$SI_SCORE" "None"
-push_metric "DebateResponsesByAgent" "$DEBATE_RESPONSES" "Count"
-push_metric "SynthesisPersistedByAgent" "$SYNTHESIS_PERSISTED_FLAG" "Count"
-push_metric "PrimaryContributionByAgent" "$PRIMARY_CONTRIBUTION" "Count"
-push_metric "VisionIssuesByAgent" "$VISION_ISSUES" "Count"
-push_metric "N2CoordinationUsed" "$N2_COORDINATION" "Count"
-# Legacy volume metrics still tracked for trend analysis (but no longer drive score)
 push_metric "IssuesCreatedByAgent" "$ISSUES_CREATED" "Count"
 push_metric "PRsOpenedByAgent" "$PRS_OPENED" "Count"
 
-# Update identity stats for issues filed and PRs opened (issue #1139)
+# Update identity stats
 if [ "$ISSUES_CREATED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
   update_identity_stats "issuesFiled" "$ISSUES_CREATED" 2>/dev/null || true
 fi
 if [ "$PRS_OPENED" -gt 0 ] && [ -n "${AGENT_DISPLAY_NAME:-}" ] && type update_identity_stats &>/dev/null; then
   update_identity_stats "prsMerged" "$PRS_OPENED" 2>/dev/null || true
 fi
-
-log "Self-improvement audit complete: score=$SI_SCORE/10 (debate=$DEBATE_RESPONSES synthesis-persisted=$SYNTHESIS_PERSISTED_FLAG primary-contrib[${AGENT_ROLE}/${PRIMARY_LABEL}]=${PRIMARY_CONTRIBUTION} n2=$N2_COORDINATION)"
 
 # Issue #1725: File Report CR for successful runs HERE (after SI_SCORE is computed).
 # This ensures visionScore in the Report reflects actual vision-aligned behavior:

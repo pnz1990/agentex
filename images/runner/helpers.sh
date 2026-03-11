@@ -1264,26 +1264,19 @@ query_thoughts() {
 }
 
 # ── cleanup_old_thoughts ─────────────────────────────────────────────────────
-# Delete thoughts older than 24 hours (or 2h for low-signal types like
-# blockers, observations, decisions, and planning thoughts) to prevent cluster
-# clutter and kubectl performance degradation. Planners should call this periodically.
-#
-# Low-signal types (blocker, observation, decision, plan, planning): 2h TTL
-# High-signal types (insight, debate, proposal, vote): 24h TTL
+# Delete thoughts older than 1 hour (issue #2032: reduced from 24h)
+# to prevent ConfigMap accumulation. 1h is sufficient since thoughts are for immediate context only.
 #
 # Usage: cleanup_old_thoughts
 cleanup_old_thoughts() {
-  local cutoff_24h
-  cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-  local cutoff_2h
-  cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_1h
+  cutoff_1h=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
 
-  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_2h" ]; then
-    log "WARNING: Cannot calculate cutoff time for thought cleanup (date command incompatible)"
+  if [ -z "$cutoff_1h" ]; then
+    log "WARNING: Cannot calculate cutoff time for thought cleanup"
     return 0
   fi
 
-  # Use 60s timeout to handle large clusters (6000+ CRs take 10+ seconds to list)
   local all_thoughts_json
   all_thoughts_json=$(kubectl_with_timeout 60 get thoughts.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
 
@@ -1292,56 +1285,40 @@ cleanup_old_thoughts() {
     return 0
   fi
 
-  # Tiered TTL: low-signal types (blocker, observation, decision, plan, planning) expire after 2h
-  # Issue #1614: decision/plan/planning are auto-generated system metadata thoughts (~10/agent/run)
-  # High-signal types (insight, debate, proposal, vote) expire after 24h
   local old_thoughts
   old_thoughts=$(echo "$all_thoughts_json" | jq -r \
-    --arg cutoff_24h "$cutoff_24h" \
-    --arg cutoff_2h "$cutoff_2h" \
-    '.items[] |
-     (if (.spec.thoughtType // .data.thoughtType // "insight" | test("^(blocker|observation|decision|plan|planning)$"))
-      then $cutoff_2h
-      else $cutoff_24h
-      end) as $cutoff |
-     select(.metadata.creationTimestamp < $cutoff) |
-     .metadata.name' 2>/dev/null || true)
+    --arg cutoff "$cutoff_1h" \
+    '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
 
   if [ -z "$old_thoughts" ]; then
     log "No old thoughts to clean up"
     return 0
   fi
 
-  # Batch deletion via xargs -n50 to reduce O(n) API calls to O(n/50)
   local count
   count=$(echo "$old_thoughts" | wc -w)
   log "Deleting $count old thoughts in batches of 50..."
   echo "$old_thoughts" | xargs -n 50 kubectl delete thoughts.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
-  log "Cleaned up ~$count thoughts older than TTL (blockers/observations/decisions/plan: 2h, others: 24h)"
-  post_thought "Cleaned up ~$count thoughts (batch TTL: low-signal 2h, high-signal 24h)" "observation" 7 "maintenance" 2>/dev/null || true
+  log "Cleaned up ~$count thoughts older than 1h"
 }
 
 # ── cleanup_old_messages ─────────────────────────────────────────────────────
-# Delete read messages older than 24h, unread messages older than 48h
-# to prevent unbounded accumulation. Planners should call periodically.
-#
-# Read messages: 24h TTL
-# Unread messages: 48h TTL (safety buffer)
+# Delete read messages older than 1h, unread messages older than 2h
+# Issue #2032: reduced from 24h/48h to prevent ConfigMap accumulation.
 #
 # Usage: cleanup_old_messages
 cleanup_old_messages() {
-  local cutoff_24h
-  cutoff_24h=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-  local cutoff_48h
-  cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_1h
+  cutoff_1h=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_2h
+  cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
 
-  if [ -z "$cutoff_24h" ] || [ -z "$cutoff_48h" ]; then
-    log "WARNING: Cannot calculate cutoff time for message cleanup (date command incompatible)"
+  if [ -z "$cutoff_1h" ] || [ -z "$cutoff_2h" ]; then
+    log "WARNING: Cannot calculate cutoff time for message cleanup"
     return 0
   fi
 
-  # Get all messages
   local all_messages_json
   all_messages_json=$(kubectl_with_timeout 30 get messages -n "$NAMESPACE" -o json 2>/dev/null || true)
 
@@ -1350,15 +1327,14 @@ cleanup_old_messages() {
     return 0
   fi
 
-  # Delete read messages older than 24h, unread messages older than 48h
   local old_messages
   old_messages=$(echo "$all_messages_json" | jq -r \
-    --arg cutoff_24h "$cutoff_24h" \
-    --arg cutoff_48h "$cutoff_48h" \
+    --arg cutoff_1h "$cutoff_1h" \
+    --arg cutoff_2h "$cutoff_2h" \
     '.items[] |
      (if (.status.read // "false") == "true"
-      then $cutoff_24h
-      else $cutoff_48h
+      then $cutoff_1h
+      else $cutoff_2h
       end) as $cutoff |
      select(.metadata.creationTimestamp < $cutoff) |
      .metadata.name' 2>/dev/null || true)
@@ -1373,26 +1349,23 @@ cleanup_old_messages() {
   log "Deleting $count old messages in batches of 50..."
   echo "$old_messages" | xargs -n 50 kubectl delete messages -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
-  log "Cleaned up ~$count messages older than TTL (read: 24h, unread: 48h)"
+  log "Cleaned up ~$count messages older than TTL (read: 1h, unread: 2h)"
 }
 
 # ── cleanup_old_reports ───────────────────────────────────────────────────────
-# Delete Report CRs older than 48 hours to prevent unbounded accumulation
-# (issue #1562: 1612+ report CRs with no cleanup mechanism).
-# 48h TTL preserves recent history for god-observer review while
-# preventing cluster resource exhaustion. Planners should call periodically.
+# Delete Report CRs older than 30 minutes (issue #2032: reduced from 48h).
+# God-observer runs every 20min, so 30min TTL is sufficient.
 #
 # Usage: cleanup_old_reports
 cleanup_old_reports() {
-  local cutoff_48h
-  cutoff_48h=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+  local cutoff_30m
+  cutoff_30m=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
 
-  if [ -z "$cutoff_48h" ]; then
-    log "WARNING: Cannot calculate cutoff time for report cleanup (date command incompatible)"
+  if [ -z "$cutoff_30m" ]; then
+    log "WARNING: Cannot calculate cutoff time for report cleanup"
     return 0
   fi
 
-  # Use 60s timeout to handle large clusters
   local all_reports_json
   all_reports_json=$(kubectl_with_timeout 60 get reports.kro.run -n "$NAMESPACE" -o json 2>/dev/null || true)
 
@@ -1401,10 +1374,9 @@ cleanup_old_reports() {
     return 0
   fi
 
-  # Delete reports older than 48h
   local old_reports
   old_reports=$(echo "$all_reports_json" | jq -r \
-    --arg cutoff "$cutoff_48h" \
+    --arg cutoff "$cutoff_30m" \
     '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' 2>/dev/null || true)
 
   if [ -z "$old_reports" ]; then
@@ -1417,7 +1389,7 @@ cleanup_old_reports() {
   log "Deleting $count old reports in batches of 50..."
   echo "$old_reports" | xargs -n 50 kubectl delete reports.kro.run -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null || true
 
-  log "Cleaned up ~$count reports older than 48h TTL"
+  log "Cleaned up ~$count reports older than 30min"
 }
 
 # ── post_chronicle_candidate ─────────────────────────────────────────────────
