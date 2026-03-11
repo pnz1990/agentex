@@ -1,0 +1,52 @@
+name: Build & Test Go Coordinator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/coordinator-go/**'
+  pull_request:
+    paths:
+      - 'images/coordinator-go/**'
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # go-sqlite3 requires CGO; gcc is pre-installed on ubuntu-latest
+      - name: Install gcc (CGO dependency for go-sqlite3)
+        run: sudo apt-get install -y gcc
+
+      - name: go mod tidy (verify go.sum is up-to-date)
+        working-directory: images/coordinator-go
+        run: |
+          go mod tidy
+          git diff --exit-code go.sum || (echo "go.sum is out of date — run 'go mod tidy'" && exit 1)
+
+      - name: go vet
+        working-directory: images/coordinator-go
+        run: go vet ./...
+
+      - name: go build (coordinator binary)
+        working-directory: images/coordinator-go
+        run: go build -v ./...
+
+      - name: go build (migrate binary)
+        working-directory: images/coordinator-go
+        run: go build -v ./cmd/migrate/
+
+      - name: go test
+        working-directory: images/coordinator-go
+        run: go test -v -race ./...
+        env:
+          # CGO required for go-sqlite3
+          CGO_ENABLED: "1"
