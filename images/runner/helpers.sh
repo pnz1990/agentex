@@ -958,7 +958,7 @@ civilization_status() {
   fi
   output="${output}Last planner seen:       ${last_planner_seen}${planner_age_note}\n"
 
-  # Unresolved debates (issue #1810: debate health observability)
+   # Unresolved debates (issue #1810: debate health observability)
   local unresolved_debates unresolved_count=0 unresolved_note=""
   unresolved_debates=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
@@ -967,6 +967,21 @@ civilization_status() {
   fi
   [ "$unresolved_count" -gt 5 ] && unresolved_note=" (HIGH — consider synthesizing open debates)"
   output="${output}Unresolved debates:      ${unresolved_count}${unresolved_note}\n"
+
+  # Escalation queue health (issue #1839: structured escalation protocol)
+  local escalation_stats
+  escalation_stats=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
+    -o jsonpath='{.data.escalationStats}' 2>/dev/null || echo "")
+  if [ -z "$escalation_stats" ]; then escalation_stats="not initialized"; fi
+  local esc_open_count=0
+  if [[ "$escalation_stats" =~ open=([0-9]+) ]]; then
+    esc_open_count="${BASH_REMATCH[1]}"
+  fi
+  local esc_note=""
+  if [ "$esc_open_count" -gt 0 ]; then
+    esc_note=" (NEEDS ATTENTION — open escalations require review)"
+  fi
+  output="${output}Escalations:             ${escalation_stats}${esc_note}\n"
 
   printf "%b" "$output"
 }
@@ -1719,9 +1734,167 @@ query_swarm_memories() {
   if [ -n "$memories" ]; then
     echo "$memories"
   else
-    echo "[]"
+     echo "[]"
   fi
 }
 
-log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories available"
+# ── escalate ─────────────────────────────────────────────────────────────────
+# Issue #1839: Structured escalation protocol — recovery paths that don't require god.
+#
+# Agents call this when they encounter a problem they cannot self-resolve.
+# The coordinator reads the escalation queue every ~2.5 min and auto-resolves
+# eligible cases (retry/conflict/blocked). HIGH/CRITICAL escalations are routed
+# to the god-delegate and surfaced in the dashboard.
+#
+# Escalation tiers:
+#   Tier 0: self-recovery  (retry — agent handles it inline, no queue entry needed)
+#   Tier 1: coordinator    (blocked, conflict — coordinator reassigns or re-queues)
+#   Tier 2: god-delegate   (decision, failed — god-delegate evaluates and steers)
+#   Tier 3: human          (security, proliferation — flags for human via GitHub issue)
+#
+# Severity levels: LOW | MEDIUM | HIGH | CRITICAL
+# Categories:      retry | blocked | conflict | decision | failed | security | proliferation
+#
+# Usage:
+#   escalate --severity medium --type blocked --issue 789 "Merge conflict in coordinator.go"
+#   escalate --severity high --type decision --issue 789 --options "SQLite,PostgreSQL" "Which DB?"
+#   escalate --severity critical --type security "Exposed AWS credentials in PR #1830"
+#
+# Returns: 0 on success (escalation queued), 1 on failure
+escalate() {
+  local severity="medium"
+  local category="blocked"
+  local issue_num=""
+  local options=""
+  local description=""
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --severity) severity="$2"; shift 2 ;;
+      --type)     category="$2"; shift 2 ;;
+      --issue)    issue_num="$2"; shift 2 ;;
+      --options)  options="$2"; shift 2 ;;
+      *)
+        description="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$description" ]; then
+    log "ERROR: escalate() requires a description argument"
+    return 1
+  fi
+
+  # Validate severity
+  case "$severity" in
+    LOW|MEDIUM|HIGH|CRITICAL|low|medium|high|critical) ;;
+    *)
+      log "WARNING: escalate() invalid severity '$severity' — defaulting to MEDIUM"
+      severity="medium"
+      ;;
+  esac
+  severity=$(echo "$severity" | tr '[:lower:]' '[:upper:]')
+
+  # Validate category
+  case "$category" in
+    retry|blocked|conflict|decision|failed|security|proliferation) ;;
+    *)
+      log "WARNING: escalate() invalid category '$category' — defaulting to blocked"
+      category="blocked"
+      ;;
+  esac
+
+  local timestamp
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local escalation_id
+  escalation_id="esc-${AGENT_NAME}-$(date +%s)"
+
+  # Build escalation entry (pipe-separated fields for coordinator-state storage):
+  # id|severity|category|agent|issue|description|options|status|timestamp
+  local safe_desc
+  safe_desc=$(echo "$description" | tr '|' ' ' | tr '\n' ' ')
+  local safe_options
+  safe_options=$(echo "$options" | tr '|' ',' | tr '\n' ' ')
+  local entry="${escalation_id}|${severity}|${category}|${AGENT_NAME}|${issue_num:-}|${safe_desc}|${safe_options}|open|${timestamp}"
+
+  # Append to escalationQueue in coordinator-state (semicolon-separated entries)
+  local current_queue
+  current_queue=$(kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "$NAMESPACE" -o jsonpath='{.data.escalationQueue}' 2>/dev/null || echo "")
+  local new_queue
+  if [ -z "$current_queue" ]; then
+    new_queue="$entry"
+  else
+    new_queue="${current_queue};${entry}"
+  fi
+
+  # Sanitize for JSON embedding
+  local safe_queue
+  safe_queue=$(printf '%s' "$new_queue" | tr '\n\r' '  ')
+
+  if kubectl_with_timeout 10 patch configmap coordinator-state \
+    -n "$NAMESPACE" --type=merge \
+    -p "{\"data\":{\"escalationQueue\":\"${safe_queue}\"}}" 2>/dev/null; then
+    log "Escalation queued: id=${escalation_id} severity=${severity} category=${category}"
+  else
+    log "WARNING: Failed to queue escalation in coordinator-state (non-fatal)"
+  fi
+
+  # Write structured exit state file for entrypoint.sh to read on exit
+  local exit_state_file="/tmp/agentex-escalation-state.json"
+  printf '{"status":"escalated","escalationId":"%s","severity":"%s","category":"%s","issue":%s,"description":"%s","workPreserved":true,"timestamp":"%s"}\n' \
+    "$escalation_id" \
+    "$severity" \
+    "$category" \
+    "${issue_num:-null}" \
+    "$safe_desc" \
+    "$timestamp" > "$exit_state_file" 2>/dev/null || true
+
+  # Post a blocker Thought CR for visibility in cluster thought stream
+  local thought_content="ESCALATION [${severity}/${category}]: ${safe_desc}"
+  if [ -n "$issue_num" ]; then
+    thought_content="${thought_content} (issue #${issue_num})"
+  fi
+  if [ -n "$options" ]; then
+    thought_content="${thought_content} | options: ${safe_options}"
+  fi
+  post_thought "$thought_content" "blocker" 9 "escalation-${category}" "" ""
+
+  # CRITICAL/HIGH: also file a GitHub issue for human visibility (Tier 3)
+  if [ "$severity" = "CRITICAL" ] || [ "$severity" = "HIGH" ]; then
+    local gh_label="escalation"
+    if [ "$severity" = "CRITICAL" ]; then
+      gh_label="escalation,needs-human"
+    fi
+    local gh_body
+    gh_body=$(printf '## Escalation: %s\n\n**Severity:** %s\n**Category:** %s\n**Agent:** %s\n**Timestamp:** %s\n\n### Description\n%s\n\n### Auto-filed by agent escalation protocol (issue #1839)' \
+      "$category" "$severity" "$category" "${AGENT_NAME}" "$timestamp" "$description")
+    if [ -n "$issue_num" ]; then
+      gh_body="${gh_body}\n**Related Issue:** #${issue_num}"
+    fi
+    local filed_issue
+    filed_issue=$(gh issue create \
+      --repo "${REPO:-pnz1990/agentex}" \
+      --title "[ESCALATION-${severity}] ${category}: ${safe_desc:0:80}" \
+      --body "$gh_body" \
+      --label "$gh_label" 2>/dev/null || echo "")
+    if [ -n "$filed_issue" ]; then
+      log "Escalation GitHub issue filed: $filed_issue (severity=${severity})"
+    fi
+  fi
+
+  return 0
+}
+
+# ── get_escalation_queue ──────────────────────────────────────────────────────
+# Read current escalation queue from coordinator-state.
+# Returns semicolon-separated entries or empty string.
+get_escalation_queue() {
+  kubectl_with_timeout 10 get configmap coordinator-state \
+    -n "$NAMESPACE" -o jsonpath='{.data.escalationQueue}' 2>/dev/null || echo ""
+}
+
+log "helpers.sh loaded: post_thought, post_debate_response, record_debate_outcome, query_debate_outcomes, query_debate_outcomes_by_component, cite_debate_outcome, claim_task, civilization_status, write_planning_state, post_planning_thought, plan_for_n_plus_2, chronicle_query, propose_vision_feature, query_thoughts, cleanup_old_thoughts, cleanup_old_messages, cleanup_old_reports, post_chronicle_candidate, credit_mentor_for_success, write_swarm_memory, query_swarm_memories, escalate, get_escalation_queue available"
 log "  AGENT_NAME=${AGENT_NAME} NAMESPACE=${NAMESPACE} S3_BUCKET=${S3_BUCKET} REPO=${REPO}"

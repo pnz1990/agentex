@@ -420,6 +420,27 @@ ensure_state_fields_initialized() {
       -p '{"data":{"activeSwarms":""}}' 2>/dev/null || true
   fi
 
+  # escalationQueue (issue #1839): semicolon-separated escalation entries from agents.
+  # Format: "id|severity|category|agent|issue|description|options|status|timestamp;..."
+  # Written by escalate() in helpers.sh when agents signal they need help.
+  # Processed by process_escalations() every 5 iterations (~2.5 min).
+  # Statuses: open | auto-resolved | pending-god-delegate | needs-human | resolved
+  # Tiers: Tier 0=self(retry), Tier 1=coordinator(blocked/conflict), Tier 2=god-delegate(decision/failed), Tier 3=human(security/proliferation)
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("escalationQueue")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing escalationQueue (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"escalationQueue":""}}' 2>/dev/null || true
+  fi
+
+  # escalationStats (issue #1839): summary stats for dashboard/observability.
+  # Format: "open=N auto-resolved=N pending-review=N resolved=N"
+  # Updated by process_escalations() every cycle.
+  if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("escalationStats")' >/dev/null 2>&1; then
+    [ "$silent" = "false" ] && echo "  Initializing escalationStats (was absent)"
+    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
+      -p '{"data":{"escalationStats":"open=0 auto-resolved=0 pending-review=0 resolved=0"}}' 2>/dev/null || true
+  fi
+
   [ "$silent" = "false" ] && echo "Coordinator-state initialization complete"
 
   # Issue #1650: One-time cleanup of stale voteRegistry_* keys for topics already enacted.
@@ -1635,6 +1656,277 @@ track_active_swarms() {
         update_state "activeSwarms" "$active_entries"
         echo "[$(date -u +%H:%M:%S)] activeSwarms updated: ${active_count} active swarm(s)"
         push_metric "ActiveSwarms" "$active_count" "Count" "Component=Coordinator"
+    fi
+}
+
+# process_escalations — Handle agent escalation queue (issue #1839)
+#
+# Implements the tiered escalation protocol:
+#   Tier 0: retry    → re-queues the task after a delay (self-resolving)
+#   Tier 1: blocked  → reassigns task to a fresh worker
+#   Tier 1: conflict → spawns fresh worker on current main branch
+#   Tier 2: decision → marks pending-god-delegate + posts directive Thought
+#   Tier 2: failed   → marks pending-god-delegate + posts directive Thought
+#   Tier 3: security → marks needs-human (GitHub issue filed by agent's escalate())
+#   Tier 3: proliferation → triggers kill switch check + marks needs-human
+#
+# Escalation entry format (pipe-separated):
+#   id|severity|category|agent|issue|description|options|status|timestamp
+#
+# Auto-resolution rules:
+#   retry     → re-queue issue in taskQueue after 5 min delay
+#   blocked   → re-queue issue immediately (remove stale assignment first)
+#   conflict  → re-queue issue immediately (fresh worker gets latest main)
+#   decision  → post Thought CR for god-delegate + mark pending-god-delegate
+#   failed    → post Thought CR for god-delegate + mark pending-god-delegate
+#   security  → escalation issue already filed by agent; mark needs-human
+#   proliferation → check kill switch; if needed, file GitHub issue
+#
+# Runs every 5 iterations (~2.5 min) in the main coordinator loop.
+process_escalations() {
+    local current_queue
+    current_queue=$(get_state "escalationQueue" 2>/dev/null || echo "")
+
+    if [ -z "$current_queue" ]; then
+        return 0  # Nothing to process
+    fi
+
+    local open_count=0
+    local auto_resolved_count=0
+    local pending_review_count=0
+    local resolved_count=0
+    local updated_entries=""
+
+    # Process each escalation entry
+    local cutoff_2h
+    cutoff_2h=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+    while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+
+        # Parse pipe-separated fields
+        local esc_id severity category agent issue_num description options status timestamp
+        IFS='|' read -r esc_id severity category agent issue_num description options status timestamp <<< "$entry"
+
+        # Count by status
+        case "$status" in
+            "open")
+                open_count=$((open_count + 1))
+                ;;
+            "auto-resolved")
+                auto_resolved_count=$((auto_resolved_count + 1))
+                resolved_count=$((resolved_count + 1))
+                ;;
+            "pending-god-delegate"|"needs-human")
+                pending_review_count=$((pending_review_count + 1))
+                ;;
+            "resolved")
+                resolved_count=$((resolved_count + 1))
+                ;;
+        esac
+
+        # Only auto-process open entries
+        if [ "$status" != "open" ]; then
+            # Keep non-open entries up to 2h for audit trail, then discard
+            if [ -n "$cutoff_2h" ] && [[ "$timestamp" < "$cutoff_2h" ]]; then
+                echo "[$(date -u +%H:%M:%S)] process_escalations: pruning old entry ${esc_id} (status=${status}, age>2h)"
+                continue
+            fi
+            # Still within 2h — keep in queue
+            if [ -z "$updated_entries" ]; then
+                updated_entries="$entry"
+            else
+                updated_entries="${updated_entries};${entry}"
+            fi
+            continue
+        fi
+
+        # ── AUTO-RESOLUTION LOGIC ────────────────────────────────────────────
+        local new_status="open"
+
+        case "$category" in
+            retry)
+                # Tier 0: re-queue the issue in taskQueue after it was dropped
+                if [ -n "$issue_num" ]; then
+                    local current_tq
+                    current_tq=$(get_state "taskQueue" 2>/dev/null || echo "")
+                    if ! echo ",${current_tq}," | grep -q ",${issue_num},"; then
+                        if [ -z "$current_tq" ]; then
+                            update_state "taskQueue" "$issue_num"
+                        else
+                            update_state "taskQueue" "${current_tq},${issue_num}"
+                        fi
+                        echo "[$(date -u +%H:%M:%S)] process_escalations: AUTO-RESOLVED retry for ${agent}: re-queued issue #${issue_num}"
+                    else
+                        echo "[$(date -u +%H:%M:%S)] process_escalations: AUTO-RESOLVED retry for ${agent}: issue #${issue_num} already in taskQueue"
+                    fi
+                    new_status="auto-resolved"
+                    auto_resolved_count=$((auto_resolved_count + 1))
+                    open_count=$((open_count - 1))
+                    push_metric "EscalationAutoResolved" 1 "Count" "Component=Coordinator,Category=retry"
+                fi
+                ;;
+
+            blocked|conflict)
+                # Tier 1: remove stale assignment and re-queue for a fresh worker
+                if [ -n "$issue_num" ]; then
+                    local current_assignments
+                    current_assignments=$(get_state "activeAssignments" 2>/dev/null || echo "")
+                    local new_assignments=""
+                    IFS=',' read -ra assign_arr <<< "$current_assignments"
+                    for assign in "${assign_arr[@]}"; do
+                        [ -z "$assign" ] && continue
+                        local a_agent="${assign%%:*}"
+                        local a_issue="${assign##*:}"
+                        if [ "$a_agent" = "$agent" ] && [ "$a_issue" = "$issue_num" ]; then
+                            echo "[$(date -u +%H:%M:%S)] process_escalations: removing stale assignment ${assign} (${category} escalation)"
+                            continue
+                        fi
+                        if [ -z "$new_assignments" ]; then
+                            new_assignments="$assign"
+                        else
+                            new_assignments="${new_assignments},${assign}"
+                        fi
+                    done
+                    update_state "activeAssignments" "$new_assignments"
+
+                    local current_tq
+                    current_tq=$(get_state "taskQueue" 2>/dev/null || echo "")
+                    if ! echo ",${current_tq}," | grep -q ",${issue_num},"; then
+                        if [ -z "$current_tq" ]; then
+                            update_state "taskQueue" "$issue_num"
+                        else
+                            update_state "taskQueue" "${current_tq},${issue_num}"
+                        fi
+                    fi
+                    new_status="auto-resolved"
+                    auto_resolved_count=$((auto_resolved_count + 1))
+                    open_count=$((open_count - 1))
+                    echo "[$(date -u +%H:%M:%S)] process_escalations: AUTO-RESOLVED ${category} for ${agent}: removed assignment, re-queued issue #${issue_num} for fresh worker"
+                    push_metric "EscalationAutoResolved" 1 "Count" "Component=Coordinator,Category=${category}"
+                fi
+                ;;
+
+            decision|failed)
+                # Tier 2: post Thought CR for god-delegate to review
+                local thought_content
+                thought_content=$(printf 'ESCALATION REQUIRES GOD-DELEGATE DECISION\nSeverity: %s | Category: %s\nAgent: %s | Issue: %s\nDescription: %s' \
+                    "$severity" "$category" "$agent" "${issue_num:-none}" "$description")
+                if [ -n "$options" ]; then
+                    thought_content="${thought_content}
+Options: ${options}"
+                fi
+                thought_content="${thought_content}
+Escalation ID: ${esc_id}
+Agent should pause work and await god-delegate directive Thought CR."
+
+                kubectl_with_timeout 10 apply -f - <<THOUGHT_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-escalation-${esc_id}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-escalation"
+  thoughtType: "blocker"
+  confidence: 9
+  topic: "escalation-${category}"
+  content: |
+$(echo "$thought_content" | sed 's/^/    /')
+THOUGHT_EOF
+
+                new_status="pending-god-delegate"
+                pending_review_count=$((pending_review_count + 1))
+                open_count=$((open_count - 1))
+                echo "[$(date -u +%H:%M:%S)] process_escalations: TIER-2 ${category} for ${agent} — posted for god-delegate review (${esc_id})"
+                push_metric "EscalationTier2" 1 "Count" "Component=Coordinator,Category=${category}"
+                ;;
+
+            security)
+                # Tier 3: GitHub issue already filed by agent's escalate() function
+                new_status="needs-human"
+                pending_review_count=$((pending_review_count + 1))
+                open_count=$((open_count - 1))
+                echo "[$(date -u +%H:%M:%S)] process_escalations: TIER-3 SECURITY escalation from ${agent} — marking needs-human (GitHub issue already filed by agent)"
+                push_metric "EscalationTier3Security" 1 "Count" "Component=Coordinator"
+                ;;
+
+            proliferation)
+                # Tier 3: check if kill switch should be activated
+                local active_jobs_p
+                active_jobs_p=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+                    jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+                    2>/dev/null || echo "0")
+                local cb_limit_val
+                cb_limit_val=$(kubectl_with_timeout 10 get configmap agentex-constitution \
+                    -n "$NAMESPACE" -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+                if ! [[ "$cb_limit_val" =~ ^[0-9]+$ ]]; then cb_limit_val=6; fi
+
+                local proliferation_threshold=$((cb_limit_val * 2))
+                if [ "${active_jobs_p:-0}" -ge "$proliferation_threshold" ]; then
+                    echo "[$(date -u +%H:%M:%S)] process_escalations: CRITICAL proliferation: ${active_jobs_p} active jobs >= threshold ${proliferation_threshold}"
+                    push_metric "EscalationProliferation" 1 "Count" "Component=Coordinator"
+                    kubectl_with_timeout 10 apply -f - <<THOUGHT_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-proliferation-alert-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-escalation"
+  thoughtType: "blocker"
+  confidence: 10
+  topic: "proliferation"
+  content: |
+    CRITICAL PROLIFERATION ALERT
+    Active jobs: ${active_jobs_p} >= threshold ${proliferation_threshold} (2x circuit breaker limit ${cb_limit_val})
+    Escalation from agent: ${agent}
+    Description: ${description}
+    Recommend: kubectl create configmap agentex-killswitch -n agentex --from-literal=enabled=true --from-literal=reason="Proliferation: ${active_jobs_p} active jobs"
+    Escalation ID: ${esc_id}
+THOUGHT_EOF
+                fi
+                new_status="needs-human"
+                pending_review_count=$((pending_review_count + 1))
+                open_count=$((open_count - 1))
+                echo "[$(date -u +%H:%M:%S)] process_escalations: TIER-3 PROLIFERATION escalation from ${agent} — marked needs-human"
+                push_metric "EscalationTier3Proliferation" 1 "Count" "Component=Coordinator"
+                ;;
+
+            *)
+                # Unknown category — treat as blocked/Tier 1 for safety
+                echo "[$(date -u +%H:%M:%S)] process_escalations: unknown category '${category}' for ${esc_id} — treating as auto-resolved"
+                new_status="auto-resolved"
+                auto_resolved_count=$((auto_resolved_count + 1))
+                open_count=$((open_count - 1))
+                ;;
+        esac
+
+        # Update entry status
+        local updated_entry="${esc_id}|${severity}|${category}|${agent}|${issue_num}|${description}|${options}|${new_status}|${timestamp}"
+        if [ -z "$updated_entries" ]; then
+            updated_entries="$updated_entry"
+        else
+            updated_entries="${updated_entries};${updated_entry}"
+        fi
+
+    done <<< "$(echo "$current_queue" | tr ';' '\n')"
+
+    # Write back updated queue
+    update_state "escalationQueue" "$updated_entries"
+
+    # Update escalation stats for dashboard/observability
+    local stats="open=${open_count} auto-resolved=${auto_resolved_count} pending-review=${pending_review_count} resolved=${resolved_count}"
+    update_state "escalationStats" "$stats"
+
+    # Emit metrics
+    push_metric "EscalationQueueOpen" "$open_count" "Count" "Component=Coordinator"
+    push_metric "EscalationQueuePendingReview" "$pending_review_count" "Count" "Component=Coordinator"
+
+    if [ $((open_count + pending_review_count)) -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] process_escalations: stats=${stats}"
     fi
 }
 
@@ -5201,14 +5493,22 @@ while true; do
         check_stuck_swarms
     fi
 
-    # Every 5 iterations (~2.5 min): update activeSwarms field with live swarm summary (issue #1775)
-    # Tracks which swarms are active and their goal/member-count for v0.6 observability.
-    # Runs more frequently than dissolution check (10 iters) to ensure prompt updates on formation.
-    if [ $((iteration % 5)) -eq 0 ]; then
-        track_active_swarms
-    fi
+     # Every 5 iterations (~2.5 min): update activeSwarms field with live swarm summary (issue #1775)
+     # Tracks which swarms are active and their goal/member-count for v0.6 observability.
+     # Runs more frequently than dissolution check (10 iters) to ensure prompt updates on formation.
+     if [ $((iteration % 5)) -eq 0 ]; then
+         track_active_swarms
+     fi
 
-    # NOTE (issue #867): Planner-chain liveness check removed.
+     # Every 5 iterations (~2.5 min): process agent escalation queue (issue #1839)
+     # Auto-resolves retry/blocked/conflict escalations, routes decision/failed to god-delegate,
+     # and flags security/proliferation as needs-human. Prevents agents from silently crashing
+     # when they encounter problems — they can now signal "I need help" structurally.
+     if [ $((iteration % 5)) -eq 0 ]; then
+         process_escalations
+     fi
+
+     # NOTE (issue #867): Planner-chain liveness check removed.
     # The planner-loop Deployment now handles planner perpetuation with zero-downtime
     # and no TOCTOU races. Coordinator no longer needs to spawn recovery planners.
 

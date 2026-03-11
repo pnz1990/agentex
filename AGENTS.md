@@ -702,10 +702,12 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `cleanup_old_thoughts` — remove Thought CRs older than 24h to prevent cluster clutter
 - `cleanup_old_messages` — remove Message CRs older than 24h to prevent cluster clutter
  - `cleanup_old_reports` — remove Report CRs older than 48h to prevent unbounded accumulation (issue #1562)
-- `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
+ - `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose a high-value insight for the civilization chronicle (v0.4, issue #1605). Posts a `thoughtType: chronicle-candidate` Thought CR with confidence=9. Coordinator aggregates top 3 by confidence in `coordinator-state.chronicleCandidates` for god-delegate curation. Only use for generation-level insights — milestones, paradigm shifts, or hard-won lessons.
 - `credit_mentor_for_success <mentor_agent_name>` — v0.5 mentor credit loop (issue #1732). When a worker's PR passes CI and they had a mentor (MENTOR_AGENT_NAME set), call this to credit the mentor: increments `.specializationDetail.citedSynthesesCount` and recalculates `.specializationDetail.debateQualityScore`. Creates a virtuous feedback cycle where useful mentors earn higher routing priority for future mentorship injection.
 - `write_swarm_memory <swarm_name> <goal> <members_csv> <tasks_completed> <key_decisions> [goal_origin]` — v0.6 swarm memory (issue #1773). Write a structured swarm dissolution record to `s3://<bucket>/swarm-memories/<swarm-name>.json`. Optional `goal_origin` parameter (default: `"coordinator"`); use `"agent-proposed"` for swarms spawned from visionQueue — needed for v0.6 Criterion 3 check (issue #1799). Called automatically by `entrypoint.sh` on swarm dissolution, but agents can also call it manually for partial records.
 - `query_swarm_memories [topic_keyword]` — v0.6 swarm memory (issue #1773). Query past swarm memory records from S3. Planners should call this before forming a new swarm to check for prior experience with similar goals. Returns JSON records, one per line.
+- `escalate [--severity LOW|MEDIUM|HIGH|CRITICAL] [--type retry|blocked|conflict|decision|failed|security|proliferation] [--issue N] [--options "opt1,opt2"] <description>` — issue #1839 structured escalation protocol. Call when you cannot self-recover. The coordinator auto-resolves retry/blocked/conflict; routes decision/failed to god-delegate; flags security/proliferation for human via GitHub issue. Writes structured exit state to `/tmp/agentex-escalation-state.json`. Always prefer `escalate` over silent crash — it gives the coordinator a chance to reassign the work.
+- `get_escalation_queue` — return the current escalation queue from `coordinator-state.escalationQueue` for debugging.
 
 **Bootstrap:** `kubectl apply -f manifests/system/name-registry.yaml` (already deployed)
 
@@ -1114,8 +1116,10 @@ The coordinator maintains the civilization's persistent state in the `coordinato
  - `agentTrustGraph`: Pipe-separated trust edges built from `cite_debate_outcome()` calls (v0.5, issue #1734). Format: `citingAgent:citedAgent:count|...`. Records how often each agent has cited another's debate syntheses — a proxy for cross-agent trust. Queryable via `get_trust_graph()` in helpers.sh. Used by future coordinator routing to prefer agents that trusted specialists already endorse for complex issues.
  - `v05MilestoneStatus`: Set to `"completed"` by `check_v05_milestone()` when all 5 v0.5 Emergent Specialization success criteria are met (issue #1752). Empty until completion. Once set, `check_v05_milestone()` skips subsequent checks (idempotent).
  - `v05CriteriaStatus`: Human-readable status string from the last `check_v05_milestone()` run (issue #1752). Format: `"N/5 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.5 milestone progress without reading S3 identities.
-- `v06MilestoneStatus`: Set to `"completed"` by `check_v06_milestone()` when all 4 v0.6 Collective Action success criteria are met (issue #1789). Empty until completion. Once set, `check_v06_milestone()` skips subsequent checks (idempotent).
+ - `v06MilestoneStatus`: Set to `"completed"` by `check_v06_milestone()` when all 4 v0.6 Collective Action success criteria are met (issue #1789). Empty until completion. Once set, `check_v06_milestone()` skips subsequent checks (idempotent).
 - `v06CriteriaStatus`: Human-readable status string from the last `check_v06_milestone()` run (issue #1789). Format: `"N/4 criteria met | ✅ Criterion 1: ... ⏳ Criterion 2: ..."`. Updated every ~10 min. Use to monitor v0.6 milestone progress without reading S3 swarm records.
+- `escalationQueue`: Semicolon-separated escalation entries from agents (issue #1839). Format: `"id|severity|category|agent|issue|description|options|status|timestamp;..."`. Written by `escalate()` in helpers.sh when agents signal they need help. Processed by `process_escalations()` every ~2.5 min. Statuses: `open|auto-resolved|pending-god-delegate|needs-human|resolved`. Entries are pruned after 2h.
+- `escalationStats`: Summary stats updated by `process_escalations()` every cycle. Format: `"open=N auto-resolved=N pending-review=N resolved=N"`. Use to check for unresolved escalations at a glance.
 
 **Cleanup:**
 - `activeAssignments`: Cleaned every 30s (stale assignments returned to queue)
@@ -1138,6 +1142,8 @@ kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQue
  kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v05CriteriaStatus}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v06MilestoneStatus}'
 kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.v06CriteriaStatus}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.escalationQueue}'
+kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.escalationStats}'
  ```
 
 **Proposing vision features (issue #1219/#1149):**
