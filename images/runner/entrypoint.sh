@@ -1770,7 +1770,7 @@ Review the added functions and add appropriate error handling:
 - \`|| return 1\` on critical commands
 - error traps if needed
 
-This is a potential regression — the code may work now but could fail silently under error conditions."
+This is a potential regression — the code may work now but could fail silently under error conditions." || true
             return 0
           fi
         fi
@@ -1819,7 +1819,7 @@ AGENTS.md Protected Files section states:
 > - manifests/rgds/*.yaml
 
 ## Action Required
-God should review PR #$suspicious_pr to verify changes were intentional and safe."
+God should review PR #$suspicious_pr to verify changes were intentional and safe." || true
     return 0
   fi
   
@@ -1855,7 +1855,7 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h"
+3. Update coordinator to prune debates older than 48h" || true
       return 0
     fi
   fi
@@ -1900,10 +1900,10 @@ proactive_coordinator_scan() {
       fi
     done
     if [ "$stale_count" -ge 1 ]; then
-      log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
-      file_proactive_issue "bug" \
-        "coordinator state: $stale_count assignments persisted >2h past job completion" \
-        "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
+       log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+       file_proactive_issue "bug" \
+         "coordinator state: $stale_count assignments persisted >2h past job completion" \
+         "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1915,9 +1915,9 @@ This issue was proactively filed by a domain specialist during systematic scan.
 ## Action Required
 1. Review \`cleanup_stale_assignments()\` in coordinator.sh
 2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
-      return 0
-    fi
+3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)" || true
+       return 0
+     fi
   fi
 
   # ── Check 2: Coordinator heartbeat staleness ──────────────────────────────────
@@ -1930,10 +1930,10 @@ This issue was proactively filed by a domain specialist during systematic scan.
     heartbeat_epoch=$(date -d "$heartbeat" +%s 2>/dev/null || echo "$now_epoch")
     local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
     if [ "$heartbeat_age" -gt 600 ]; then
-      log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
-      file_proactive_issue "bug" \
-        "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
-        "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
+       log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+       file_proactive_issue "bug" \
+         "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
+         "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1945,9 +1945,9 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
 ## Action Required
 1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
 2. Check coordinator logs for errors
-3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
-      return 0
-    fi
+3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`" || true
+       return 0
+     fi
   fi
 
   # ── Check 3: Unresolved debates backlog ───────────────────────────────────────
@@ -1959,10 +1959,10 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
     local debate_count
     debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
     if [ "$debate_count" -gt 50 ]; then
-      log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
-      file_proactive_issue "enhancement" \
-        "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
-        "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
+       log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
+       file_proactive_issue "enhancement" \
+         "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
+         "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1974,9 +1974,9 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 ## Action Required
 1. Spawn an agent specifically to synthesize the oldest unresolved threads
 2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
-3. Consider increasing synthesis frequency in agent instructions"
-      return 0
-    fi
+3. Consider increasing synthesis frequency in agent instructions" || true
+       return 0
+     fi
   fi
 
   log "Coordinator scan: no state anomalies detected (stale assignments OK, heartbeat OK, debates OK)"
