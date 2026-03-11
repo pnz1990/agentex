@@ -3163,12 +3163,17 @@ track_debate_activity() {
     local unresolved_count=0
     [ -n "$unresolved_threads" ] && unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . || echo "0")
 
-    # ── Issue #1916: Cap unresolvedDebates to max 50 entries ─────────────────
-    # When the backlog exceeds 50, auto-synthesize the oldest excess threads to
+    # ── Issue #1916: Cap unresolvedDebates to max 30 entries ─────────────────
+    # When the backlog exceeds 30, auto-synthesize the oldest excess threads to
     # prevent unbounded growth. Oldest = first entries in the comma-separated list
     # (they were added earliest). Each auto-synthesized thread gets a coordinator
     # synthesis Thought CR + S3 record so query_debate_outcomes() returns data.
-    local MAX_UNRESOLVED=50
+    #
+    # Issue #1969: Lowered cap from 50→30 and increased rate limit from 5→20 per cycle
+    # to drain the backlog faster. At rate=5/cycle the system couldn't keep up with
+    # new disagree debates being filed (86 unresolved reached during high-activity periods).
+    # At rate=20/cycle it drains 86→30 in 3 cycles (~9 min) instead of 12 cycles (~36 min).
+    local MAX_UNRESOLVED=30
     if [ "$unresolved_count" -gt "$MAX_UNRESOLVED" ]; then
         local excess=$(( unresolved_count - MAX_UNRESOLVED ))
         echo "[$(date -u +%H:%M:%S)] Synthesis backlog: $unresolved_count threads > cap $MAX_UNRESOLVED — auto-synthesizing $excess oldest threads (issue #1916)"
@@ -3235,8 +3240,9 @@ SYNTH_EOF
             trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
             synth_written=$(( synth_written + 1 ))
 
-            # Rate limit: max 5 auto-syntheses per cycle to avoid cluster overload
-            [ "$synth_written" -ge 5 ] && break
+            # Rate limit: max 20 auto-syntheses per cycle (issue #1969: increased from 5 to drain
+            # backlog faster — prevents 36+ min drain time when high-activity periods create 80+ threads)
+            [ "$synth_written" -ge 20 ] && break
         done <<< "$(echo "$unresolved_threads" | tr ',' '\n' | head -n "$excess")"
 
         unresolved_threads="$trimmed_threads"
@@ -3254,10 +3260,12 @@ SYNTH_EOF
     # posts a synthesis thought on behalf of the civilization to prevent unbounded
     # backlog growth. This keeps unresolvedDebates count manageable and ensures
     # all debates reach a resolution (even if by coordinator mediation).
-    # Cap: max 5 auto-syntheses per cycle to avoid flooding the thought stream.
+    # Cap: max 10 auto-syntheses per cycle for stale threads (issue #1969: increased from 5).
+    # The count-cap (MAX_UNRESOLVED=30) handles excess threads; this stale-TTL
+    # mechanism handles threads that have been pending >4 hours specifically.
     if [ "$unresolved_count" -gt 0 ] && [ -n "$all_cm" ]; then
         local auto_synth_ttl_seconds=14400  # 4 hours
-        local auto_synth_cap=5
+        local auto_synth_cap=10
         local auto_synth_count=0
         local now_epoch
         now_epoch=$(date +%s)
