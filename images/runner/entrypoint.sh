@@ -1770,7 +1770,7 @@ Review the added functions and add appropriate error handling:
 - \`|| return 1\` on critical commands
 - error traps if needed
 
-This is a potential regression — the code may work now but could fail silently under error conditions."
+This is a potential regression — the code may work now but could fail silently under error conditions." || true
             return 0
           fi
         fi
@@ -1819,7 +1819,7 @@ AGENTS.md Protected Files section states:
 > - manifests/rgds/*.yaml
 
 ## Action Required
-God should review PR #$suspicious_pr to verify changes were intentional and safe."
+God should review PR #$suspicious_pr to verify changes were intentional and safe." || true
     return 0
   fi
   
@@ -1855,7 +1855,7 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h"
+3. Update coordinator to prune debates older than 48h" || true
       return 0
     fi
   fi
@@ -1915,7 +1915,7 @@ This issue was proactively filed by a domain specialist during systematic scan.
 ## Action Required
 1. Review \`cleanup_stale_assignments()\` in coordinator.sh
 2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
+3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)" || true
       return 0
     fi
   fi
@@ -1945,7 +1945,7 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
 ## Action Required
 1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
 2. Check coordinator logs for errors
-3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
+3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`" || true
       return 0
     fi
   fi
@@ -1974,7 +1974,7 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 ## Action Required
 1. Spawn an agent specifically to synthesize the oldest unresolved threads
 2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
-3. Consider increasing synthesis frequency in agent instructions"
+3. Consider increasing synthesis frequency in agent instructions" || true
       return 0
     fi
   fi
