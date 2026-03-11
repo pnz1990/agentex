@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -24,6 +25,7 @@ type Coordinator struct {
 	stateManager *StateManager
 	logger       *slog.Logger
 	stopCh       chan struct{}
+	running      atomic.Bool
 }
 
 // NewCoordinator creates a new Coordinator instance.
@@ -78,6 +80,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	iteration := 0
 	c.logger.Info("entering main loop")
+	c.running.Store(true)
 
 	for {
 		select {
@@ -150,7 +153,13 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 // Stop signals the coordinator to shut down gracefully.
 func (c *Coordinator) Stop() {
 	c.logger.Info("stop signal received")
+	c.running.Store(false)
 	close(c.stopCh)
+}
+
+// IsRunning returns true if the coordinator main loop is active.
+func (c *Coordinator) IsRunning() bool {
+	return c.running.Load()
 }
 
 // loadConstitution reads the agentex-constitution ConfigMap and loads it into config.
