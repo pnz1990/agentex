@@ -212,6 +212,20 @@ func (c *Client) GetJob(ctx context.Context, namespace, name string) (*batchv1.J
 	return job, nil
 }
 
+// DeleteJob deletes a Job by name. If the Job does not exist, the error is
+// silently ignored (returns nil). This makes it safe to call even when unsure
+// if the Job exists.
+func (c *Client) DeleteJob(ctx context.Context, namespace, name string) error {
+	ctx, cancel := withTimeout(ctx, DefaultTimeout)
+	defer cancel()
+
+	err := c.Clientset.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("deleting job %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
 // WatchJobs starts a watch on Jobs in the given namespace.
 func (c *Client) WatchJobs(ctx context.Context, namespace string, opts metav1.ListOptions) (watch.Interface, error) {
 	return c.Clientset.BatchV1().Jobs(namespace).Watch(ctx, opts)

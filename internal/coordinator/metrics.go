@@ -28,6 +28,7 @@ type Metrics struct {
 	HealthCheckTotal  *metrics.Counter // Total health checks run
 	HealthCheckErrors *metrics.Counter // Health checks that found issues
 	HealthStatus      *metrics.Gauge   // 1 = healthy, 0 = degraded, -1 = critical
+	RemediationsTotal *metrics.Counter // Total automated remediation actions taken
 
 	// Circuit breaker
 	CircuitBreakerLimit *metrics.Gauge   // Current circuit breaker limit
@@ -57,6 +58,7 @@ func RegisterMetrics(r *metrics.Registry) *Metrics {
 		HealthCheckTotal:  r.NewCounter("agentex_health_checks_total", "Total health checks run"),
 		HealthCheckErrors: r.NewCounter("agentex_health_check_errors_total", "Health checks that found issues"),
 		HealthStatus:      r.NewGauge("agentex_health_status", "System health: 1=healthy 0=degraded -1=critical"),
+		RemediationsTotal: r.NewCounter("agentex_remediations_total", "Total automated remediation actions taken"),
 
 		CircuitBreakerLimit: r.NewGauge("agentex_circuit_breaker_limit", "Current circuit breaker limit"),
 		SpawnSlots:          r.NewGauge("agentex_spawn_slots_available", "Available spawn slots"),

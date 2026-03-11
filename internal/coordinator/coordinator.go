@@ -164,7 +164,7 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		}
 	}
 
-	// Every 4 ticks: reconcile spawn slots + cleanup active agents
+	// Every 4 ticks: reconcile spawn slots + cleanup active agents + remediate
 	if iteration%4 == 0 {
 		if err := c.reconcileSpawnSlots(ctx); err != nil {
 			c.logger.Error("spawn slot reconciliation failed", "error", err)
@@ -172,6 +172,10 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		}
 		if err := c.cleanupActiveAgents(ctx); err != nil {
 			c.logger.Error("cleanup active agents failed", "error", err)
+			tickErr = true
+		}
+		if err := c.runRemediation(ctx); err != nil {
+			c.logger.Error("remediation cycle failed", "error", err)
 			tickErr = true
 		}
 	}
