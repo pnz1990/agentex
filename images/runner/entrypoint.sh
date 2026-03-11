@@ -1840,7 +1840,19 @@ proactive_consensus_scan() {
     local count
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
-      log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
+      log "Consensus scan: $count unresolved debates — checking for existing issue before filing..."
+      # Issue #1934: Stable-keyword dedup — title changes each run (count varies), so search
+      # by stable keywords that don't include the count. This prevents duplicate issues from
+      # being filed every time the count changes by 1.
+      local existing_debate_issue
+      existing_debate_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "debate backlog unresolved debate threads synthesis" \
+        --json number --jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_debate_issue:-0}" -gt 0 ]; then
+        log "Consensus scan: existing open debate-backlog issue found — skipping duplicate filing"
+        return 0
+      fi
+      log "Consensus scan: no existing issue found — filing new issue..."
       file_proactive_issue "consensus" \
         "debate backlog: $count unresolved debate threads need synthesis" \
         "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
@@ -1900,7 +1912,17 @@ proactive_coordinator_scan() {
       fi
     done
     if [ "$stale_count" -ge 1 ]; then
-      log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+      log "Coordinator scan: found $stale_count very-stale assignments (>2h) — checking for existing issue before filing..."
+      # Issue #1934: Stable-keyword dedup — title includes count which changes each run.
+      local existing_stale_issue
+      existing_stale_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "coordinator state assignments persisted past job completion" \
+        --json number --jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_stale_issue:-0}" -gt 0 ]; then
+        log "Coordinator scan: existing open stale-assignment issue found — skipping duplicate filing"
+        return 0
+      fi
+      log "Coordinator scan: no existing stale-assignment issue found — filing new issue..."
       file_proactive_issue "bug" \
         "coordinator state: $stale_count assignments persisted >2h past job completion" \
         "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
@@ -1930,7 +1952,17 @@ This issue was proactively filed by a domain specialist during systematic scan.
     heartbeat_epoch=$(date -d "$heartbeat" +%s 2>/dev/null || echo "$now_epoch")
     local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
     if [ "$heartbeat_age" -gt 600 ]; then
-      log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+      log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — checking for existing issue before filing..."
+      # Issue #1934: Stable-keyword dedup — title includes seconds which changes each run.
+      local existing_heartbeat_issue
+      existing_heartbeat_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "coordinator liveness heartbeat stale coordinator may be stuck" \
+        --json number --jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_heartbeat_issue:-0}" -gt 0 ]; then
+        log "Coordinator scan: existing open coordinator-liveness issue found — skipping duplicate filing"
+        return 0
+      fi
+      log "Coordinator scan: no existing liveness issue found — filing new issue..."
       file_proactive_issue "bug" \
         "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
         "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
@@ -1959,7 +1991,19 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
     local debate_count
     debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
     if [ "$debate_count" -gt 50 ]; then
-      log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
+      log "Coordinator scan: $debate_count unresolved debate threads (>50) — checking for existing issue before filing..."
+      # Issue #1934: Stable-keyword dedup — title changes each run (count varies), so search
+      # by stable keywords that don't include the count. This prevents duplicate issues from
+      # being filed every time the count changes by 1.
+      local existing_civilization_issue
+      existing_civilization_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "civilization health unresolved debates synthesis backlog" \
+        --json number --jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_civilization_issue:-0}" -gt 0 ]; then
+        log "Coordinator scan: existing open civilization-health issue found — skipping duplicate filing"
+        return 0
+      fi
+      log "Coordinator scan: no existing issue found — filing new issue..."
       file_proactive_issue "enhancement" \
         "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
         "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
