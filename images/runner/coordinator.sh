@@ -2869,10 +2869,18 @@ record_synthesis_debates_to_s3() {
     local max_writes_per_cycle=20
 
     # Fetch synthesis debate thoughts with FULL content (not truncated)
+    # Issue #1971: Use precise regex to only match TRUE synthesis stances.
+    # The old test("synthes(is|ize)"; "i") matched ANY debate that MENTIONED synthesis —
+    # including "disagree" responses that wrote "counter-proposal avoids synthesis" and
+    # "agree" responses that cited prior syntheses. This caused disagree/agree thoughts
+    # to be written to S3 with outcome="synthesized", corrupting debate history.
+    # Fix: only match "DEBATE RESPONSE [synthesize" or "DEBATE RESPONSE [synthesis" (the
+    # canonical formats used by post_debate_response() and agents). This avoids false positives
+    # where other stances mention the word "synthesis" in their reasoning.
     local synthesis_thoughts
     synthesis_thoughts=$(kubectl_with_timeout 10 get configmaps -n "$namespace" -l agentex/thought -o json 2>/dev/null \
         | jq -r '[.items[] | select(.data.thoughtType == "debate") |
-            select((.data.content // "") | test("synthes(is|ize)"; "i")) |
+            select((.data.content // "") | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i")) |
             {
                 name: .metadata.name,
                 parent: (.data.parentRef // ""),
@@ -3067,9 +3075,13 @@ track_debate_activity() {
      # This prevents false positives where "agree" stances mention the word "disagree" in their reasoning.
      local disagree_count
      disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[.*disagree|^DISAGREE:|^I disagree|\\[disagree"; "i"))] | length' 2>/dev/null || echo "0")
-    # Issue #1096: Use case-insensitive regex to catch all synthesis patterns (synthesis, SYNTHESIS, Synthesis, synthesize, SYNTHESIZE, Synthesize)
+    # Issue #1971: Use precise regex for synthesis count — only count true synthesis stances.
+    # "DEBATE RESPONSE [synthesize/synthesis]" is the canonical format. This avoids counting
+    # agree/disagree thoughts that happen to mention the word "synthesis" in their reasoning.
+    # Note: synthesize_count is used for stats display and for triggering S3 sync — both
+    # benefit from precision (avoids unnecessary S3 LIST calls when count is artificially high).
     local synthesize_count
-    synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))] | length' 2>/dev/null || echo "0")
+    synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i"))] | length' 2>/dev/null || echo "0")
 
     echo "[$(date -u +%H:%M:%S)] Debate stats: responses=$debate_count threads=$thread_count disagree=$disagree_count synthesize=$synthesize_count"
 
@@ -3113,9 +3125,14 @@ track_debate_activity() {
  
      if [ -n "$disagree_threads" ]; then
          # Get all parentRefs from "synthesize" debate thoughts (resolved threads — direct)
+         # Issue #1971: Use precise regex to only count TRUE synthesis stances.
+         # Old test("synthes(is|ize)") matched any debate mentioning "synthesis" — including
+         # disagree thoughts that mentioned "synthesis" in their reasoning.
+         # This incorrectly marked threads as "resolved" when no actual synthesis was posted.
+         # Fix: only match "DEBATE RESPONSE [synthesize" or "[synthesis" — the canonical formats.
          local resolved_threads
          resolved_threads=$(echo "$all_cm" | jq -r '
-             [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i")) | .parent]
+             [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i")) | .parent]
              | unique | .[]' 2>/dev/null || true)
  
          # Issue #1899: Also resolve threads where synthesis is at depth-2
@@ -3201,11 +3218,46 @@ track_debate_activity() {
             local s3_thread_id
             s3_thread_id=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
 
-            # Skip if already recorded in S3
+            # Skip if already recorded in S3 with a valid synthesis outcome.
+            # Issue #1971: Also post an in-cluster synthesis Thought CR if one doesn't exist.
+            # The S3 record alone isn't sufficient — the resolved_threads detection uses in-cluster
+            # Thought CRs, not S3. Without an in-cluster synthesis CR, the thread oscillates:
+            # removed from unresolved (cap sees S3 record), then re-added next cycle (no in-cluster CR).
+            # Fix: post an in-cluster synthesis CR for threads that only have an S3 record.
             if echo " $existing_synth_ids " | grep -qF " ${s3_thread_id} "; then
                 # Remove from unresolved list since it's already synthesized in S3
                 trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
                 synth_written=$(( synth_written + 1 ))
+                # Also post in-cluster synthesis CR to prevent oscillation (issue #1971)
+                # Check if in-cluster synthesis CR already exists for this thread
+                local has_incluster_synth
+                has_incluster_synth=$(echo "$all_cm" | jq -r --arg tid "$thread_id" '
+                    [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i")) | select(.parent == $tid)]
+                    | length' 2>/dev/null || echo "0")
+                if [ "$has_incluster_synth" = "0" ]; then
+                    local repair_ts
+                    repair_ts=$(date +%s)
+                    kubectl_with_timeout 10 apply -f - <<REPAIR_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-coordinator-repair-${repair_ts}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "coordinator"
+  taskRef: "coordinator-loop"
+  thoughtType: debate
+  confidence: 6
+  parentRef: "${thread_id}"
+  content: |
+    DEBATE RESPONSE [synthesize]:
+    Coordinator repair (issue #1971): S3 record exists for this thread but no in-cluster
+    synthesis CR was found. Posting synthesis to prevent oscillation where the thread is
+    removed from unresolvedDebates then re-added on the next cycle.
+    Thread: ${thread_id}
+REPAIR_EOF
+                    echo "[$(date -u +%H:%M:%S)] Posted repair synthesis CR for thread: $thread_id (S3 exists, no in-cluster CR)"
+                fi
                 continue
             fi
 
@@ -3328,14 +3380,15 @@ SYNTH_EOF
     # ── Issue #1161: Write synthesis debate outcomes to S3 ────────────────────
     # The coordinator detects synthesis debate thoughts and writes them to S3
     # so agents can query past debate resolutions via query_debate_outcomes().
-    # This covers manually-posted debate Thought CRs (which bypass post_debate_response()
-    # in entrypoint.sh and thus never reach record_debate_outcome() directly).
-    if [ "$synthesize_count" -gt 0 ]; then
-        # Get all synthesis debate thoughts with their full names and parents
-        local synthesis_thoughts
-        synthesis_thoughts=$(echo "$all_cm" | jq -r '
-            [.[] | select(.type == "debate") | select(.content | test("synthes(is|ize)"; "i"))]
-            | .[] | [.name, .parent, .agent] | @tsv' 2>/dev/null || true)
+     # This covers manually-posted debate Thought CRs (which bypass post_debate_response()
+     # in entrypoint.sh and thus never reach record_debate_outcome() directly).
+     if [ "$synthesize_count" -gt 0 ]; then
+         # Get all synthesis debate thoughts with their full names and parents
+         # Issue #1971: Use precise regex to only match TRUE synthesis stances.
+         local synthesis_thoughts
+         synthesis_thoughts=$(echo "$all_cm" | jq -r '
+             [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i"))]
+             | .[] | [.name, .parent, .agent] | @tsv' 2>/dev/null || true)
 
         # Issue #1625: Prefetch existing thread IDs with a single prefix LIST (not per-file ls).
         local existing_tda_thread_ids=""
