@@ -4887,19 +4887,20 @@ while true; do
         cleanup_active_agents
     fi
 
-    # ADAPTIVE SPAWN SLOT RECONCILIATION (issue #669, #1240)
+    # ADAPTIVE SPAWN SLOT RECONCILIATION (issue #669, #1240, #1910)
     # When system is near capacity, reconcile every cycle (~30s) to prevent proliferation bursts.
     # When idle, reconcile every 4 iterations (~2 min) to reduce overhead.
     # Issue #1240: ALSO reconcile IMMEDIATELY if spawnSlots is negative (civilization frozen guard).
-    # This prevents the 2-minute reconciliation gap from allowing excess agents at capacity.
-    
+    # Issue #1910: ALSO reconcile IMMEDIATELY if spawnSlots=0 but active_jobs < limit (false zero).
+    # This prevents agents from being blocked by leaked/uncounted slots when capacity is available.
+
     # Read current circuit breaker limit
     # Issue #1001: Fallback to 6 (current constitution value), NOT 12.
     cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
         -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
     if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=6; fi
 
-    # Issue #1240: Fast-path negative spawnSlots check — every iteration (~30s).
+    # Issue #1240: Fast-path negative/invalid spawnSlots check — every iteration (~30s).
     # If spawnSlots is negative or non-numeric, it permanently blocks all spawning
     # until a human patches the ConfigMap. Catch and reconcile immediately — do NOT
     # wait for the 4-iteration (2 min) reconcile cycle.
@@ -4913,16 +4914,29 @@ while true; do
         current_active=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
             jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
             2>/dev/null || echo "0")
-        
-        # Near capacity threshold: reconcile if within 3 slots of limit
-        near_capacity_threshold=$((cb_limit - 3))
-        
-        if [ "$current_active" -ge "$near_capacity_threshold" ]; then
-            # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
+
+        # Issue #1910: Fast-path "false zero" detection — every iteration (~30s).
+        # spawnSlots=0 is syntactically valid, so the negative check above misses it.
+        # BUT if active_jobs < limit, there SHOULD be free slots. Reconcile immediately
+        # instead of waiting up to 2 min (4 iterations). Without this, 4+ leaked slots
+        # (agents that crashed without calling release_spawn_slot) can block ALL spawning
+        # even when the system is well under capacity. Observed: 6/10 jobs active,
+        # spawnSlots=0, system deadlocked until coordinator reconcile cycle ran.
+        if [ "$spawn_slots_now" -eq 0 ] && [ "$current_active" -lt "$cb_limit" ]; then
+            echo "[$(date -u +%H:%M:%S)] ALERT: spawnSlots=0 but only $current_active/$cb_limit jobs active — false zero detected, reconciling immediately (issue #1910)"
+            push_metric "SpawnSlotsFalseZero" 1 "Count" "Component=Coordinator"
             reconcile_spawn_slots
-        elif [ $((iteration % 4)) -eq 0 ]; then
-            # IDLE: reconcile every 4 iterations (~2 min) as before
-            reconcile_spawn_slots
+        else
+            # Near capacity threshold: reconcile if within 3 slots of limit
+            near_capacity_threshold=$((cb_limit - 3))
+
+            if [ "$current_active" -ge "$near_capacity_threshold" ]; then
+                # NEAR CAPACITY: reconcile every iteration (~30s) to prevent overshoot
+                reconcile_spawn_slots
+            elif [ $((iteration % 4)) -eq 0 ]; then
+                # IDLE: reconcile every 4 iterations (~2 min) as before
+                reconcile_spawn_slots
+            fi
         fi
     fi
 
