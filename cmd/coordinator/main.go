@@ -16,6 +16,8 @@ import (
 	"github.com/pnz1990/agentex/internal/config"
 	"github.com/pnz1990/agentex/internal/coordinator"
 	"github.com/pnz1990/agentex/internal/k8s"
+	"github.com/pnz1990/agentex/internal/metrics"
+	"github.com/pnz1990/agentex/internal/server"
 )
 
 func main() {
@@ -24,6 +26,7 @@ func main() {
 	heartbeatInterval := flag.Duration("heartbeat-interval", 30*time.Second, "Heartbeat interval for coordinator state updates")
 	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig file (empty for in-cluster)")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	httpAddr := flag.String("http-addr", ":8080", "HTTP server listen address for health/metrics")
 	flag.Parse()
 
 	// Configure structured logging
@@ -36,7 +39,8 @@ func main() {
 	logger.Info("agentex coordinator starting",
 		"namespace", *namespace,
 		"heartbeatInterval", heartbeatInterval.String(),
-		"version", "go-v0.1.0",
+		"httpAddr", *httpAddr,
+		"version", "go-v0.2.0",
 	)
 
 	// Create Kubernetes client
@@ -49,8 +53,35 @@ func main() {
 	// Create configuration
 	cfg := config.NewConfig(*namespace, *heartbeatInterval, *kubeconfig, logger)
 
+	// Create metrics registry and register coordinator metrics
+	reg := metrics.NewRegistry()
+	_ = coordinator.RegisterMetrics(reg)
+
 	// Create coordinator
 	coord := coordinator.NewCoordinator(client, cfg, logger)
+
+	// Start HTTP server for health and metrics
+	httpSrv := server.New(server.Config{
+		Addr:     *httpAddr,
+		Registry: reg,
+		HealthFn: func() (string, string) {
+			if coord.IsRunning() {
+				return "ok", "coordinator reconciliation loop active"
+			}
+			return "error", "coordinator reconciliation loop not running"
+		},
+		ReadyFn: func() (string, string) {
+			if coord.IsRunning() {
+				return "ok", "ready"
+			}
+			return "error", "not ready"
+		},
+		Logger: logger,
+	})
+	if err := httpSrv.Start(); err != nil {
+		logger.Error("failed to start http server", "error", err)
+		os.Exit(1)
+	}
 
 	// Set up signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -63,6 +94,9 @@ func main() {
 		sig := <-sigCh
 		logger.Info("received shutdown signal", "signal", sig.String())
 		coord.Stop()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		httpSrv.Stop(shutdownCtx)
 		cancel()
 	}()
 
