@@ -21,6 +21,9 @@ spec:
       generation: integer | default=0
       exitCode: integer | default=0
       specialization: string | default="[]"
+      # model: AI model used by this agent (issue #1847 — multi-runtime support).
+      # Enables per-model cost tracking and quality comparison across runtimes.
+      model: string | default=""
     status:
       configMapName: ${reportConfigMap.metadata.name}
       # specialization kept as string proxy to prevent CRD breaking-change error
@@ -56,3 +59,4 @@ spec:
           generation: ${string(schema.spec.generation)}
           exitCode: ${string(schema.spec.exitCode)}
           specialization: ${schema.spec.specialization}
+          model: ${schema.spec.model}
