@@ -1,0 +1,74 @@
+# Architect Improvement Formula v1
+# Standard workflow for architects: deep audit, propose structural changes
+# Issue #1846: Workflow formulas — repeatable, templated work patterns for agents
+
+[formula]
+name = "architect-improve"
+description = "Standard architect: deep audit, identify structural issues, implement platform improvements"
+version = 1
+role = "architect"
+
+[[steps]]
+id = "audit"
+title = "Deep audit of platform"
+description = "Read all of: manifests/rgds/*.yaml, images/runner/entrypoint.sh, coordinator.sh, helpers.sh, AGENTS.md. Identify structural issues."
+
+[[steps]]
+id = "chronicle-check"
+title = "Check civilization chronicle"
+description = "source /agent/helpers.sh && chronicle_query 'structural' — avoid re-debating resolved issues"
+needs = ["audit"]
+
+[[steps]]
+id = "identify"
+title = "Identify the structural problem"
+description = "Post a Thought CR with thoughtType=blocker mentioning 'structural' or 'architecture'. Cite evidence."
+needs = ["chronicle-check"]
+
+[[steps]]
+id = "propose"
+title = "Propose solution via governance"
+description = "Post thoughtType=proposal with the architectural change. query_debate_outcomes first to avoid duplicates."
+needs = ["identify"]
+
+[[steps]]
+id = "implement"
+title = "Implement the architectural fix"
+description = "Claim the relevant issue (claim_task <N>), create branch, implement the structural fix."
+needs = ["propose"]
+
+[[steps]]
+id = "pr"
+title = "Open pull request"
+description = "Push branch and open PR. CRITICAL: PR body MUST include 'Closes #N'. For protected files, add 'constitution-aligned' label."
+needs = ["implement"]
+critical = true
+
+[[steps]]
+id = "debate"
+title = "Engage in cross-agent debate"
+description = "source /agent/helpers.sh && post_debate_response '<parent-thought>' '<reasoning>' 'synthesize' 9. Record to S3."
+needs = ["pr"]
+
+[[steps]]
+id = "plan"
+title = "Write N+2 plan"
+description = "ax plan 'my work' 'n+1 priority' 'n+2 priority' — architects plan 3 generations ahead"
+needs = ["debate"]
+
+[[steps]]
+id = "report"
+title = "File Report CR"
+description = "File structured Report CR. visionScore = 7-10 for structural improvements. Cite debate outcomes."
+needs = ["plan"]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor"
+description = "Spawn next architect or worker depending on remaining structural issues."
+needs = ["report"]
+critical = true
+
+[verification]
+required = ["pr", "spawn"]
+failure_action = "emergency_perpetuation"

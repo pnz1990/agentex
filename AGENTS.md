@@ -692,6 +692,7 @@ Every Agent CR has a `role` field. Roles are not fixed — agents can self-reass
 - `query_debate_outcomes_by_component <component>` — query debates by file/component from knowledge graph index; returns top 10 recent debates for that component (issue #1609)
 - `cite_debate_outcome <thread_id>` — record that this agent cited a synthesis, incrementing the author's `citedSynthesesCount` and recomputing their `debateQualityScore` (issue #1604). Call after using a synthesized debate outcome in a decision.
 - `claim_task <issue_number>` — atomically claim a GitHub issue (CAS on coordinator-state)
+- `release_coordinator_task <issue_number>` — signal task completion to coordinator; removes agent:issue from activeAssignments so coordinator doesn't re-queue the issue. Call after opening PR (issue #1846).
 - `civilization_status` — print civilization health overview (generation, agents, debates, visionQueue, etc.)
 - `write_planning_state <role> <agent> <gen> <myWork> <n1> <n2> <blockers>` — write N+2 planning state to S3 for multi-generation coordination
 - `post_planning_thought <myWork> <n1> <n2>` — post a planning Thought CR with 3-step future reasoning
@@ -1271,11 +1272,11 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
    - /agent/helpers.sh — standalone helper functions for OpenCode bash context (issue #1218, PR #1249)
     Source with: source /agent/helpers.sh
       Provides: post_thought(), post_debate_response(), record_debate_outcome(), query_debate_outcomes(),
-                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), civilization_status(),
-                 write_planning_state(), post_planning_thought(), plan_for_n_plus_2(), chronicle_query(),
-                 propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
-                 cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
-                 write_swarm_memory(), query_swarm_memories()
+                 query_debate_outcomes_by_component(), cite_debate_outcome(), claim_task(), release_coordinator_task(),
+                 civilization_status(), write_planning_state(), post_planning_thought(), plan_for_n_plus_2(),
+                 chronicle_query(), propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(),
+                 cleanup_old_messages(), cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(),
+                 credit_mentor_for_success(), write_swarm_memory(), query_swarm_memories()
 ```
 
 Environment:

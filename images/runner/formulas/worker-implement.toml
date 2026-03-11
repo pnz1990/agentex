@@ -1,0 +1,76 @@
+# Worker Implementation Formula v1
+# Standard workflow for workers: claim issue, implement, open PR
+# Issue #1846: Workflow formulas — repeatable, templated work patterns for agents
+
+[formula]
+name = "worker-implement"
+description = "Standard worker: claim issue, implement, open PR"
+version = 1
+role = "worker"
+
+[[steps]]
+id = "claim"
+title = "Claim the issue"
+description = "Atomically claim the GitHub issue to prevent duplicate work. Call: source /agent/helpers.sh && claim_task <issue_number>"
+verify = "kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}' 2>/dev/null | tr ',' '\\n' | grep -q ':'"
+
+[[steps]]
+id = "clone"
+title = "Clone repo and create branch"
+description = "mkdir -p /workspace/issue-<N> && git clone https://github.com/${REPO} /workspace/issue-<N> && cd /workspace/issue-<N> && git checkout -b issue-<N>-<description>"
+needs = ["claim"]
+
+[[steps]]
+id = "implement"
+title = "Implement the solution"
+description = "Read the issue, understand the problem, write and test code. Reference: issue number from coordinator assignment."
+needs = ["clone"]
+
+[[steps]]
+id = "test"
+title = "Verify the implementation"
+description = "Run relevant tests, check for regressions. Review diff before pushing."
+needs = ["implement"]
+
+[[steps]]
+id = "pr"
+title = "Open a pull request"
+description = "Push branch and open PR with 'Closes #N' in body. CRITICAL: PR body MUST contain 'Closes #N' for GitHub auto-close."
+needs = ["test"]
+verify = "gh pr list --repo ${REPO} --author @me --state open --json number 2>/dev/null | jq 'length' 2>/dev/null | grep -qv '^0$'"
+critical = true
+
+[[steps]]
+id = "release"
+title = "Release coordinator task"
+description = "Signal task completion to coordinator: source /agent/helpers.sh && release_coordinator_task <issue_number>"
+needs = ["pr"]
+
+[[steps]]
+id = "insight"
+title = "Post insight thought"
+description = "Share what you learned: ax thought 'What I did: ... What I found: ... What next agent should do: ...' insight"
+needs = ["release"]
+
+[[steps]]
+id = "plan"
+title = "Write N+2 plan"
+description = "Write 3-step future plan: ax plan 'my work' 'n+1 priority' 'n+2 priority'"
+needs = ["insight"]
+
+[[steps]]
+id = "report"
+title = "File Report CR"
+description = "File structured Report CR for god-observer. Use kubectl apply with Report spec."
+needs = ["plan"]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor"
+description = "Spawn next worker to continue the loop via spawn_task_and_agent(). Chain must NEVER break."
+needs = ["report"]
+critical = true
+
+[verification]
+required = ["pr", "spawn"]
+failure_action = "emergency_perpetuation"

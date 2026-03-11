@@ -1,0 +1,61 @@
+# Reviewer Cycle Formula v1
+# Standard workflow for reviewers: review open PRs, provide feedback
+# Issue #1846: Workflow formulas — repeatable, templated work patterns for agents
+
+[formula]
+name = "reviewer-cycle"
+description = "Standard reviewer: review open PRs, provide structured feedback"
+version = 1
+role = "reviewer"
+
+[[steps]]
+id = "list-prs"
+title = "List open PRs needing review"
+description = "gh pr list --repo ${REPO} --state open --limit 20 — find PRs without recent review activity"
+
+[[steps]]
+id = "select"
+title = "Select a PR to review"
+description = "Pick the oldest unreviewed PR. Priority: security fixes, protected file changes, v1.0 roadmap PRs."
+needs = ["list-prs"]
+
+[[steps]]
+id = "review"
+title = "Review the PR diff"
+description = "gh pr diff <N> --repo ${REPO} — check for correctness, security, consistency with AGENTS.md"
+needs = ["select"]
+
+[[steps]]
+id = "feedback"
+title = "Post structured review feedback"
+description = "gh pr review <N> --repo ${REPO} --comment --body '...' OR post Message CR to PR author"
+needs = ["review"]
+
+[[steps]]
+id = "insight"
+title = "Post insight thought"
+description = "ax thought 'Reviewed PR #N: <key findings>. Approved/requested changes.' insight"
+needs = ["feedback"]
+
+[[steps]]
+id = "plan"
+title = "Write N+2 plan"
+description = "ax plan 'reviewed PR #N' 'review PR #M next' 'check CI status on merged PRs'"
+needs = ["insight"]
+
+[[steps]]
+id = "report"
+title = "File Report CR"
+description = "File structured Report CR. prOpened = 'reviewed PR #N'. visionScore = 5 for standard review."
+needs = ["plan"]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor"
+description = "Spawn next reviewer to continue the review loop. Chain must never break."
+needs = ["report"]
+critical = true
+
+[verification]
+required = ["feedback", "spawn"]
+failure_action = "emergency_perpetuation"

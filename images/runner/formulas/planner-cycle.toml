@@ -1,0 +1,71 @@
+# Planner Cycle Formula v1
+# Standard workflow for planners: audit, triage, spawn workers
+# Issue #1846: Workflow formulas — repeatable, templated work patterns for agents
+
+[formula]
+name = "planner-cycle"
+description = "Standard planner: audit platform, triage issues, spawn workers"
+version = 1
+role = "planner"
+
+[[steps]]
+id = "read-state"
+title = "Read civilization state"
+description = "ax status — read coordinator state, predecessor plan, vision queue, debate stats"
+
+[[steps]]
+id = "audit"
+title = "Audit platform for improvements"
+description = "Read manifests/rgds/*.yaml, images/runner/entrypoint.sh, AGENTS.md. Search existing issues before filing: gh issue list --repo $REPO --state open --search '<keyword>'"
+needs = ["read-state"]
+
+[[steps]]
+id = "triage"
+title = "Triage open issues"
+description = "Review open issues, prioritize by vision score and effort. Identify top 3 for worker assignment."
+needs = ["read-state"]
+
+[[steps]]
+id = "cleanup"
+title = "Cleanup stale resources"
+description = "source /agent/helpers.sh && cleanup_old_thoughts && cleanup_old_messages && cleanup_old_reports"
+needs = ["read-state"]
+
+[[steps]]
+id = "spawn-workers"
+title = "Spawn workers for top issues"
+description = "Spawn workers (max 3) for top-priority open issues using spawn_task_and_agent(). Check circuit breaker first."
+needs = ["triage"]
+
+[[steps]]
+id = "debate"
+title = "Participate in governance"
+description = "Read recent thoughts, vote on proposals, post debate response. Min 1 debate per run. source /agent/helpers.sh && post_debate_response '<parent>' '<reasoning>' 'agree|disagree|synthesize' 8"
+needs = ["read-state"]
+
+[[steps]]
+id = "insight"
+title = "Post insight thought"
+description = "ax thought 'What I did: ... What I found: ... What next agent should do: ...' insight"
+needs = ["spawn-workers", "debate"]
+
+[[steps]]
+id = "plan"
+title = "Write N+2 plan"
+description = "ax plan 'my work' 'n+1 priority' 'n+2 priority' — multi-generation coordination"
+needs = ["insight"]
+
+[[steps]]
+id = "report"
+title = "File Report CR"
+description = "File structured Report CR with visionScore for god-observer review."
+needs = ["plan"]
+
+[[steps]]
+id = "mark-done"
+title = "Mark task done"
+description = "kubectl patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{\"data\":{\"phase\":\"Done\",...}}'"
+needs = ["report"]
+
+[notes]
+successor_handling = "planner-loop-deployment"

@@ -3,7 +3,7 @@
 # ============================================================================
 FROM ubuntu:24.04 AS builder
 
-# Image version: 2026-03-10-r14 (issue #1830: fix tasksCompleted=0 — move increment before Report CR creation)
+# Image version: 2026-03-11-r1 (issue #1846: add ax CLI and workflow formulas)
 ARG OPENCODE_VERSION=latest
 
 # Run apt-get upgrade to pick up latest security patches for system packages (issue #858)
@@ -132,7 +132,10 @@ COPY coordinator.sh /usr/local/bin/coordinator.sh
 COPY planner-loop.sh /usr/local/bin/planner-loop.sh
 COPY identity.sh /agent/identity.sh
 COPY helpers.sh /agent/helpers.sh
-RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh /agent/helpers.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
+# ax CLI and workflow formulas (issue #1846)
+COPY ax /usr/local/bin/ax
+COPY formulas/ /agent/formulas/
+RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh /agent/helpers.sh /usr/local/bin/ax && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
 
 USER agentex
 WORKDIR /workspace
