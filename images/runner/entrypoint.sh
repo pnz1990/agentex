@@ -1841,6 +1841,8 @@ proactive_consensus_scan() {
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
       log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
+      # Issue #1934: Pass stable dedup_keyword (4th arg) — title has $count which changes each run,
+      # defeating the title-prefix dedup check. Stable keyword prevents duplicate issues.
       file_proactive_issue "consensus" \
         "debate backlog: $count unresolved debate threads need synthesis" \
         "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
@@ -1855,7 +1857,8 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h"
+3. Update coordinator to prune debates older than 48h" \
+        "debate backlog unresolved debate threads need synthesis"
       return 0
     fi
   fi
@@ -1901,6 +1904,8 @@ proactive_coordinator_scan() {
     done
     if [ "$stale_count" -ge 1 ]; then
       log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+      # Issue #1934: Pass stable dedup_keyword (4th arg) — title has $stale_count which changes,
+      # defeating the title-prefix dedup check. Stable keyword prevents duplicate issues.
       file_proactive_issue "bug" \
         "coordinator state: $stale_count assignments persisted >2h past job completion" \
         "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
@@ -1915,7 +1920,8 @@ This issue was proactively filed by a domain specialist during systematic scan.
 ## Action Required
 1. Review \`cleanup_stale_assignments()\` in coordinator.sh
 2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
+3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)" \
+        "coordinator state assignments persisted past job completion"
       return 0
     fi
   fi
@@ -1931,6 +1937,8 @@ This issue was proactively filed by a domain specialist during systematic scan.
     local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
     if [ "$heartbeat_age" -gt 600 ]; then
       log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+      # Issue #1934: Pass stable dedup_keyword (4th arg) — title has $heartbeat_age which changes,
+      # defeating the title-prefix dedup check. Stable keyword prevents duplicate issues.
       file_proactive_issue "bug" \
         "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
         "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
@@ -1945,7 +1953,8 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
 ## Action Required
 1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
 2. Check coordinator logs for errors
-3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
+3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`" \
+        "coordinator liveness heartbeat stale coordinator may be stuck"
       return 0
     fi
   fi
@@ -1960,6 +1969,9 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
     debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
     if [ "$debate_count" -gt 50 ]; then
       log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
+      # Issue #1934: Pass stable dedup_keyword (4th arg) — title has $debate_count which changes
+      # each run (e.g. 93, 101, 104), defeating title-prefix dedup. Stable keyword prevents
+      # duplicate issues (4 were filed in 12 min before this fix: #1916, #1927, #1929, #1931).
       file_proactive_issue "enhancement" \
         "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
         "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
@@ -1974,7 +1986,8 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 ## Action Required
 1. Spawn an agent specifically to synthesize the oldest unresolved threads
 2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
-3. Consider increasing synthesis frequency in agent instructions"
+3. Consider increasing synthesis frequency in agent instructions" \
+        "civilization health unresolved debates synthesis backlog"
       return 0
     fi
   fi
@@ -1988,17 +2001,46 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 #   $1 = label (bug, architecture, consensus, coordinator, etc.)
 #   $2 = title
 #   $3 = body (should include "Discovered by: <agent> (specialization: <spec>)")
+#   $4 = dedup_keyword (optional) — stable keyword for dedup search, overrides title-prefix search.
+#        Use when $2 title contains a changing count/value that defeats title-prefix dedup.
+#        Example: "civilization health unresolved debates" for a title like
+#        "civilization health: $count unresolved debates — synthesis backlog growing"
+#        Issue #1934: count-in-title defeats dedup; stable keyword fixes this.
+# NOTE (issue #1901): This function ALWAYS returns 0. Filing failure is non-fatal.
+# With set -euo pipefail, returning 1 would crash the agent. Proactive issue filing
+# is best-effort — if it fails (rate limit, duplicate, etc.), the agent continues normally.
 # Updates S3 identity with proactiveIssuesFound counter
 file_proactive_issue() {
   local label="${1:-bug}"
   local title="${2:-}"
   local body="${3:-}"
-  
+  local dedup_keyword="${4:-}"
+
   if [ -z "$title" ]; then
     log "file_proactive_issue: title is required"
-    return 1
+    return 0  # Issue #1901: return 0 (non-fatal), not 1
   fi
-  
+
+  # Issue #1934: Dedup check before filing — prevents duplicate issues when the title
+  # includes a changing count/duration value. Use the caller-provided stable keyword
+  # if given; otherwise fall back to the first 50 chars of the title (PR #1902 approach).
+  # The stable keyword approach is required when the title varies per-run (e.g.,
+  # "civilization health: 93 unresolved debates" vs "civilization health: 101 unresolved debates").
+  local search_key
+  if [ -n "$dedup_keyword" ]; then
+    search_key="$dedup_keyword"
+  else
+    search_key="$(echo "$title" | cut -c1-50)"
+  fi
+  local existing_issue
+  existing_issue=$(gh issue list --repo "$REPO" --state open \
+    --search "$search_key" \
+    --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+  if [ "${existing_issue:-0}" -gt 0 ]; then
+    log "file_proactive_issue: similar open issue already exists (search='$search_key') — skipping duplicate"
+    return 0
+  fi
+
   # File the issue
   local issue_url
   issue_url=$(gh issue create --repo "$REPO" \
@@ -2019,12 +2061,12 @@ file_proactive_issue() {
     
     # Push metric
     push_metric "ProactiveIssueDiscovered" 1
-    
-    return 0
   else
-    log "WARNING: Failed to file proactive issue"
-    return 1
+    # Issue #1901: Non-fatal — log warning but continue. Do NOT return 1.
+    # set -euo pipefail would otherwise crash the agent on filing failure.
+    log "WARNING: Failed to file proactive issue (rate limit or duplicate) — continuing"
   fi
+  return 0  # Issue #1901: always return 0, filing failure is non-fatal
 }
 
 # request_coordinator_task() - Claim an unassigned issue from the coordinator queue
