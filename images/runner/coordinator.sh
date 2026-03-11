@@ -1577,6 +1577,162 @@ JOB_EOF
     fi
 }
 
+# spawn_swarm_for_issue — Create a Swarm CR + Task CR for a swarm-eligible GitHub issue (issue #1782)
+#
+# When the coordinator detects an issue labeled "swarm-eligible" or "multi-domain" in the task queue,
+# it should dispatch that issue to a Swarm instead of a single worker. This function creates:
+#   1. A Task CR (plannerTaskRef) with the issue context as description
+#   2. A Swarm CR referencing that Task CR
+#
+# The swarm-graph RGD immediately spawns a planner Job for the new Swarm. The planner reads
+# the Task CR, spawns workers with SWARM_REF set, and manages collective resolution of the issue.
+#
+# Safety guards:
+#   - Kill switch check (agentex-killswitch ConfigMap)
+#   - Circuit breaker: don't spawn if active_jobs >= limit
+#   - Deduplication: don't spawn a swarm if one already exists for this issue number
+#     (checks activeSwarms field for existing issue:<number> entries)
+#
+# Arguments:
+#   $1 - issue_number
+#   $2 - issue_labels (comma-separated, already fetched by caller)
+#   $3 - issue_title (fetched by caller if available, empty string if not)
+#
+# Returns:
+#   0 — Swarm CR created successfully, remove issue from single-worker routing
+#   1 — Issue is not swarm-eligible or spawn was blocked (caller should use normal routing)
+spawn_swarm_for_issue() {
+    local issue_number="$1"
+    local issue_labels="${2:-}"
+    local issue_title="${3:-issue #${issue_number}}"
+
+    # Only dispatch to swarm if labels include swarm-eligible or multi-domain
+    if ! echo "$issue_labels" | grep -qE "swarm-eligible|multi-domain"; then
+        return 1
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Issue #${issue_number} has swarm-eligible labels (${issue_labels}) — checking swarm dispatch"
+
+    # Check kill switch
+    local kill_switch
+    kill_switch=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+        -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+    if [ "$kill_switch" = "true" ]; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: kill switch active — falling back to single-worker"
+        return 1
+    fi
+
+    # Check circuit breaker
+    local cb_limit
+    cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+    if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=6; fi
+
+    local active_jobs
+    active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "$cb_limit")
+    if [ "$active_jobs" -ge "$cb_limit" ]; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: circuit breaker ($active_jobs/$cb_limit) — falling back to single-worker"
+        return 1
+    fi
+
+    # Deduplication: check if a swarm already exists for this issue
+    # activeSwarms format: "swarm-name:goal:N|..." — check if issue_number appears in any entry
+    local current_active_swarms
+    current_active_swarms=$(get_state "activeSwarms" 2>/dev/null || echo "")
+    if echo "$current_active_swarms" | grep -q "issue-${issue_number}"; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: swarm already exists for issue #${issue_number} — skipping duplicate spawn"
+        return 0  # Return 0 so caller removes from single-worker routing
+    fi
+
+    # Also check live Swarm CRs (not just activeSwarms cache)
+    local existing_swarm_for_issue
+    existing_swarm_for_issue=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+        -l "kro.run/instance-kind=Swarm" \
+        -o json 2>/dev/null | \
+        jq -r --arg iss "$issue_number" \
+        '.items[] | select(.metadata.name | test("issue-" + $iss + "(-|$)")) | .metadata.name' \
+        2>/dev/null | head -1 || echo "")
+    if [ -n "$existing_swarm_for_issue" ]; then
+        echo "[$(date -u +%H:%M:%S)] spawn_swarm_for_issue: Swarm CR already exists for issue #${issue_number} (${existing_swarm_for_issue}) — skipping"
+        return 0
+    fi
+
+    # Get ECR registry from constitution for image reference
+    local ecr_registry
+    ecr_registry=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
+
+    local ts
+    ts=$(date +%s)
+    local swarm_name="swarm-issue-${issue_number}-${ts}"
+    local task_name="task-${swarm_name}-planner"
+    local swarm_goal="Collectively resolve GitHub issue #${issue_number}: ${issue_title}"
+
+    # Truncate goal for safety (ConfigMap values have limits, and kro CEL templates may truncate)
+    local safe_goal
+    safe_goal=$(echo "$swarm_goal" | head -c 200 | sed 's/"/\\"/g')
+
+    echo "[$(date -u +%H:%M:%S)] Spawning swarm ${swarm_name} for issue #${issue_number}"
+
+    # Step 1: Create the Task CR (plannerTaskRef) BEFORE the Swarm CR
+    # CRITICAL: The swarm-graph RGD spawns a planner Job that reads TASK_CR_NAME.
+    # If the Task CR doesn't exist when the planner starts, it gets empty context
+    # and exits without doing any work (issue #2005 root cause).
+    kubectl_with_timeout 10 apply -f - <<TASK_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/swarm: ${swarm_name}
+    agentex/role: planner
+    agentex/issue: "${issue_number}"
+spec:
+  title: "Swarm planner: issue #${issue_number}"
+  description: "You are the planner for swarm ${swarm_name}. Goal: ${safe_goal}. Spawn 2-3 workers with SWARM_REF=${swarm_name} to resolve this issue collectively. Each worker should claim a sub-task and open a PR. Coordinate via swarm messaging."
+  effort: "L"
+  assignedTo: "${swarm_name}-planner"
+TASK_EOF
+
+    # Verify Task CR was created
+    local task_created
+    task_created=$(kubectl_with_timeout 10 get configmap "${task_name}-spec" -n "$NAMESPACE" \
+        -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+    if [ -z "$task_created" ]; then
+        echo "[$(date -u +%H:%M:%S)] WARNING: spawn_swarm_for_issue: Task CR ${task_name}-spec not found after apply — swarm spawn may fail"
+    fi
+
+    # Step 2: Create the Swarm CR (triggers kro to spawn the planner Job)
+    kubectl_with_timeout 10 apply -f - <<SWARM_EOF 2>/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Swarm
+metadata:
+  name: ${swarm_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/issue: "${issue_number}"
+spec:
+  goal: "${safe_goal}"
+  plannerTaskRef: "${task_name}"
+  maxAgents: 4
+  issueRef: "${issue_number}"
+SWARM_EOF
+
+    local swarm_exit=$?
+    if [ "$swarm_exit" -eq 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] Spawned swarm ${swarm_name} for issue #${issue_number} (goal-origin: coordinator)"
+        push_metric "SwarmSpawnedByCoordinator" 1 "Count" "IssueNumber=${issue_number}"
+        post_coordinator_thought "Coordinator spawned swarm ${swarm_name} for swarm-eligible issue #${issue_number}. Goal: ${safe_goal}. Task CR: ${task_name}. This is the first coordinator-driven swarm spawn (v0.6 Criterion 1)." "insight"
+        return 0
+    else
+        echo "[$(date -u +%H:%M:%S)] WARNING: spawn_swarm_for_issue: Failed to create Swarm CR ${swarm_name}"
+        return 1
+    fi
+}
+
 # track_active_swarms — Update coordinator-state.activeSwarms with live swarm summary (issue #1775)
 # v0.6 Swarm Intelligence observability: count non-Disbanded swarm state ConfigMaps and record
 # per-swarm summaries (name:goal:member-count) so check_v06_milestone() and civilization_status()

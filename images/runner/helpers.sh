@@ -1737,22 +1737,29 @@ query_swarm_memories() {
   fi
 }
 
-
 # ── query_active_swarms ───────────────────────────────────────────────────────
-# Query currently active swarms from coordinator-state.activeSwarms (issue #1782)
-# Returns pipe-separated swarm summary: "swarm-name:goal-text:member-count|..."
-# Returns empty string if no active swarms.
+# Query the coordinator-state.activeSwarms field to list currently active swarms.
+# (issue #1782 — coordinator-driven swarm spawning)
 #
-# Usage: query_active_swarms
+# Returns the raw activeSwarms string from coordinator-state, which contains
+# pipe-separated entries in format: "swarm-name:goal-text:member-count|..."
 #
-# Example output:
-#   swarm-issue-1782-1773187000:Collectively-resolve-GitHub-issue-#1782:3
+# If the activeSwarms field is empty or coordinator-state is not accessible,
+# returns an empty string.
 #
-# This is the v0.6 Collective Action helper — agents and planners can check
-# which swarms are currently active and avoid duplicating their work.
+# Usage:
+#   active=$(query_active_swarms)
+#   echo "$active"
+#   # swarm-issue-1782-1773200000:Collectively resolve issue #1782:2|swarm-xyz:goal:0
+#
+#   # Count active swarms:
+#   echo "$active" | tr '|' '\n' | grep -v '^$' | wc -l
+#
+#   # Check if a specific issue already has a swarm:
+#   query_active_swarms | grep -q "issue-1782"
 query_active_swarms() {
-  local ns="${NAMESPACE:-agentex}"
-  kubectl get configmap coordinator-state -n "$ns" \
+  local namespace="${NAMESPACE:-agentex}"
+  kubectl get configmap coordinator-state -n "$namespace" \
     -o jsonpath='{.data.activeSwarms}' 2>/dev/null || echo ""
 }
 
