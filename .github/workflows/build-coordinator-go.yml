@@ -1,0 +1,47 @@
+name: Build & Test Go Coordinator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/coordinator-go/**'
+      - '.github/workflows/build-coordinator-go.yml'
+  pull_request:
+    paths:
+      - 'images/coordinator-go/**'
+      - '.github/workflows/build-coordinator-go.yml'
+
+jobs:
+  build-and-test:
+    name: Build, vet, and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: images/coordinator-go/go.mod
+          cache-dependency-path: images/coordinator-go/go.sum
+
+      # CGO is required by github.com/mattn/go-sqlite3.
+      - name: Install gcc (required for CGO/go-sqlite3)
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Download modules
+        run: go mod download
+        working-directory: images/coordinator-go
+
+      - name: Build
+        run: CGO_ENABLED=1 go build ./...
+        working-directory: images/coordinator-go
+
+      - name: Vet
+        run: go vet ./...
+        working-directory: images/coordinator-go
+
+      - name: Test
+        run: CGO_ENABLED=1 go test -v -race -count=1 ./...
+        working-directory: images/coordinator-go
