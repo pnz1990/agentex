@@ -1490,30 +1490,59 @@ prune_orphaned_unresolved_debates() {
         -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || true)
     [ -z "$current_unresolved" ] && return 0
 
-    # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
-    # N individual kubectl get calls (one per unresolved entry). With 98+ entries this
-    # is a significant performance improvement over the per-entry approach.
-    local existing_thought_names
-    existing_thought_names=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
-        -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    # Issue #1667: Pre-fetch all existing thought CMs (name + creationTimestamp) in one batch
+    # query to avoid N individual kubectl calls (one per unresolved entry).
+    # Issue #1948: Also fetch creationTimestamp so we can age-prune threads >18h (synthesis window closed).
+    local existing_thoughts_json
+    existing_thoughts_json=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
+        -l agentex/thought -o json 2>/dev/null || echo "")
+
+    local existing_thought_names=""
+    local thought_timestamps=""
+    if [ -n "$existing_thoughts_json" ] && [ "$existing_thoughts_json" != "null" ]; then
+        existing_thought_names=$(echo "$existing_thoughts_json" | \
+            jq -r '[.items[].metadata.name] | join(" ")' 2>/dev/null || echo "")
+        thought_timestamps=$(echo "$existing_thoughts_json" | \
+            jq -r '.items[] | "\(.metadata.name)\t\(.metadata.creationTimestamp)"' 2>/dev/null || true)
+    fi
+
+    # Issue #1948: 18h cutoff — parent CMs older than this won't receive synthesis before
+    # the 24h TTL cleanup deletes them. Prune them proactively to bound the backlog.
+    local cutoff_18h_epoch=0
+    cutoff_18h_epoch=$(date -u -d '18 hours ago' +%s 2>/dev/null || echo "0")
 
     local pruned_count=0
     local valid_entries=""
     while IFS= read -r thread_id; do
         [ -z "$thread_id" ] && continue
-        if echo " $existing_thought_names " | grep -qF " $thread_id "; then
-            [ -n "$valid_entries" ] \
-                && valid_entries="${valid_entries},${thread_id}" \
-                || valid_entries="$thread_id"
-        else
-            echo "[$(date -u +%H:%M:%S)] Pruning orphaned unresolvedDebate entry: $thread_id"
+        if ! echo " $existing_thought_names " | grep -qF " $thread_id "; then
+            echo "[$(date -u +%H:%M:%S)] Pruning orphaned unresolvedDebate entry: $thread_id (parent CM deleted)"
             pruned_count=$((pruned_count + 1))
+            continue
         fi
+        # Issue #1948: Also prune threads whose parent CM is older than 18h.
+        # These threads are past the synthesis window and will be deleted in the next 24h cleanup cycle.
+        if [ "$cutoff_18h_epoch" -gt 0 ] && [ -n "$thought_timestamps" ]; then
+            local parent_ts
+            parent_ts=$(echo "$thought_timestamps" | awk -F'\t' -v name="$thread_id" '$1==name{print $2}' 2>/dev/null || echo "")
+            if [ -n "$parent_ts" ]; then
+                local parent_epoch
+                parent_epoch=$(date -u -d "$parent_ts" +%s 2>/dev/null || echo "0")
+                if [ "$parent_epoch" -gt 0 ] && [ "$parent_epoch" -lt "$cutoff_18h_epoch" ]; then
+                    echo "[$(date -u +%H:%M:%S)] Pruning stale unresolvedDebate entry: $thread_id (parent >18h old)"
+                    pruned_count=$((pruned_count + 1))
+                    continue
+                fi
+            fi
+        fi
+        [ -n "$valid_entries" ] \
+            && valid_entries="${valid_entries},${thread_id}" \
+            || valid_entries="$thread_id"
     done < <(echo "$current_unresolved" | tr ',' '\n')
 
     if [ "$pruned_count" -gt 0 ]; then
         update_state "unresolvedDebates" "$valid_entries"
-        echo "[$(date -u +%H:%M:%S)] Pruned $pruned_count orphaned entries from unresolvedDebates"
+        echo "[$(date -u +%H:%M:%S)] Pruned $pruned_count stale/orphaned entries from unresolvedDebates"
         push_metric "OrphanedDebatesPruned" "$pruned_count" "Count" "Component=Coordinator"
     fi
 }
@@ -2770,7 +2799,8 @@ track_debate_activity() {
             type: (.data.thoughtType // ""),
             parent: (.data.parentRef // ""),
             agent: (.data.agentRef // ""),
-            content: ((.data.content // "") | .[0:100])
+            content: ((.data.content // "") | .[0:100]),
+            creationTimestamp: .metadata.creationTimestamp
           }]' 2>/dev/null) || return 0
 
     [ -z "$all_cm" ] || [ "$all_cm" = "null" ] || [ "$all_cm" = "[]" ] && return 0
@@ -2835,6 +2865,18 @@ track_debate_activity() {
         existing_thought_names_tda=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
             -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
 
+        # Issue #1948: Pre-compute the 18h expiry cutoff for debate threads.
+        # Threads older than 18h are unlikely to receive synthesis — the parent thought
+        # will be deleted in the next cleanup cycle (24h TTL). Auto-expiring them prevents
+        # unresolvedDebates from accumulating 100+ stale entries.
+        local cutoff_18h_epoch=0
+        cutoff_18h_epoch=$(date -u -d '18 hours ago' +%s 2>/dev/null || echo "0")
+
+        # Build a name→timestamp lookup from all_cm to avoid per-CM kubectl calls.
+        # Used to check parent CM age for auto-expiry (issue #1948).
+        local parent_timestamps
+        parent_timestamps=$(echo "$all_cm" | jq -r '.[] | "\(.name)\t\(.creationTimestamp)"' 2>/dev/null || true)
+
         # Build list of unresolved thread IDs (in disagree but not in resolved)
         while IFS= read -r thread_id; do
             [ -z "$thread_id" ] && continue
@@ -2845,6 +2887,21 @@ track_debate_activity() {
             if ! echo " $existing_thought_names_tda " | grep -qF " $thread_id "; then
                 echo "[$(date -u +%H:%M:%S)] Skipping orphaned debate thread: $thread_id (parent CM deleted)"
                 continue
+            fi
+            # Issue #1948: Auto-expire debate threads whose parent CM is older than 18h.
+            # These threads have been unresolved long enough that synthesis is unlikely.
+            # The parent CM will be deleted within 6h by the 24h TTL cleanup anyway.
+            if [ "$cutoff_18h_epoch" -gt 0 ]; then
+                local parent_ts
+                parent_ts=$(echo "$parent_timestamps" | awk -F'\t' -v name="$thread_id" '$1==name{print $2}' 2>/dev/null || echo "")
+                if [ -n "$parent_ts" ]; then
+                    local parent_epoch
+                    parent_epoch=$(date -u -d "$parent_ts" +%s 2>/dev/null || echo "0")
+                    if [ "$parent_epoch" -gt 0 ] && [ "$parent_epoch" -lt "$cutoff_18h_epoch" ]; then
+                        echo "[$(date -u +%H:%M:%S)] Auto-expiring stale debate thread: $thread_id (parent >18h old, synthesis window closed)"
+                        continue
+                    fi
+                fi
             fi
             # Check if this thread has a synthesis response
             if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
