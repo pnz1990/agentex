@@ -117,6 +117,11 @@ func run(logger *slog.Logger) error {
 		if execErr != nil {
 			return fmt.Errorf("[execute] %w", execErr)
 		}
+
+		// Post civilizational signals (Thought CRs, Message CRs) after simulated work.
+		// Best-effort: failures are logged but do not fail the agent.
+		behaviorCfg := agent.LoadFlightBehaviorConfig()
+		agent.RunFlightBehaviors(ctx, client, cfg, behaviorCfg, task)
 	} else {
 		workdir := fmt.Sprintf("/workspace/issue-%d", task.IssueNumber)
 		logger.Info("executing opencode")
