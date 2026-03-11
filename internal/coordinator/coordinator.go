@@ -12,6 +12,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/pnz1990/agentex/internal/audit"
 	"github.com/pnz1990/agentex/internal/config"
 	"github.com/pnz1990/agentex/internal/health"
 	k8sclient "github.com/pnz1990/agentex/internal/k8s"
@@ -35,6 +36,9 @@ type Coordinator struct {
 	// Completion tracking for coordinator-controlled spawning (#2061)
 	tracker                  *completionTracker
 	coordinatorSpawnsEnabled bool
+
+	// Audit logger for durable action trail (#2062)
+	auditLog *audit.Logger
 }
 
 // NewCoordinator creates a new Coordinator instance.
@@ -62,6 +66,13 @@ func (c *Coordinator) WithMetrics(m *Metrics) *Coordinator {
 // coordinator main loop and stopped when the coordinator stops.
 func (c *Coordinator) WithHealthMonitor(m *health.Monitor) *Coordinator {
 	c.healthMonitor = m
+	return c
+}
+
+// WithAuditLogger attaches a durable audit logger (#2062).
+// If set, the coordinator logs dispatch, spawn, kill, and remediation decisions.
+func (c *Coordinator) WithAuditLogger(l *audit.Logger) *Coordinator {
+	c.auditLog = l
 	return c
 }
 
@@ -107,6 +118,12 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	if c.healthMonitor != nil {
 		go c.healthMonitor.Run(ctx)
 		c.logger.Info("health monitor started")
+	}
+
+	// Start audit logger if configured (#2062)
+	if c.auditLog != nil {
+		go c.auditLog.Start(ctx)
+		c.logger.Info("audit logger started")
 	}
 
 	ticker := time.NewTicker(c.config.HeartbeatInterval)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/pnz1990/agentex/internal/audit"
 	"github.com/pnz1990/agentex/internal/health"
 )
 
@@ -179,6 +180,17 @@ func (c *Coordinator) KillStuckAgent(ctx context.Context, agentName string) erro
 		"issue", issueNumber,
 		"wasAssigned", assigned,
 	)
+
+	// Audit: record kill decision (#2062)
+	if c.auditLog != nil {
+		c.auditLog.Log(
+			audit.ActionKill,
+			"success",
+			fmt.Sprintf("killed stuck agent, wasAssigned=%v", assigned),
+			issueNumber,
+			0,
+		)
+	}
 
 	if c.metrics != nil {
 		c.metrics.AgentsFailed.Inc()

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pnz1990/agentex/internal/audit"
 	"github.com/pnz1990/agentex/internal/config"
 	"github.com/pnz1990/agentex/internal/coordinator"
 	"github.com/pnz1990/agentex/internal/health"
@@ -62,10 +63,22 @@ func main() {
 	// Create health monitor (#2059)
 	healthMon := health.NewMonitor(client, *namespace, *healthInterval, logger)
 
+	// Create audit logger (#2062) — reads bucket/region from constitution at startup
+	// (constitution is loaded by coordinator.Run, so we read the env var directly here)
+	auditCfg := audit.Config{
+		AgentName:  "coordinator",
+		Role:       "coordinator",
+		Bucket:     os.Getenv("S3_BUCKET"),  // set from constitution in prod
+		AwsRegion:  os.Getenv("AWS_REGION"), // set from constitution in prod
+		FlushEvery: 60 * time.Second,
+	}
+	auditLogger := audit.New(auditCfg, logger)
+
 	// Create coordinator, wiring in metrics and health monitor
 	coord := coordinator.NewCoordinator(client, cfg, logger).
 		WithMetrics(coordMetrics).
-		WithHealthMonitor(healthMon)
+		WithHealthMonitor(healthMon).
+		WithAuditLogger(auditLogger)
 
 	// Start HTTP server for health and metrics
 	httpSrv := server.New(server.Config{
