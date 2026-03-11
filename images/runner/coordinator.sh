@@ -4063,12 +4063,23 @@ Begin v0.6 milestone planning. Suggest: focus on **swarm intelligence** — grou
 
 Closes #1732"
 
-        gh issue create \
-            --repo "${GITHUB_REPO}" \
-            --title "milestone: v0.5 Emergent Specialization COMPLETE — all criteria verified by coordinator" \
-            --label "enhancement,self-improvement" \
-            --body "$milestone_body" 2>/dev/null || \
-            echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.5 completion issue (non-fatal)"
+        # Issue #2019: Pre-filing dedup check — prevent duplicate issues during concurrent
+        # coordinator instances (rolling updates). Both instances pass the ConfigMap guard
+        # before either patches it; the GitHub check provides a second barrier.
+        local existing_v05_issue
+        existing_v05_issue=$(gh issue list --repo "${GITHUB_REPO}" \
+            --search "milestone: v0.5 Emergent Specialization COMPLETE" \
+            --state open --limit 1 2>/dev/null | head -1)
+        if [ -n "$existing_v05_issue" ]; then
+            echo "[$(date -u +%H:%M:%S)] check_v05_milestone: milestone issue already exists — skipping duplicate creation (issue #2019)"
+        else
+            gh issue create \
+                --repo "${GITHUB_REPO}" \
+                --title "milestone: v0.5 Emergent Specialization COMPLETE — all criteria verified by coordinator" \
+                --label "enhancement,self-improvement" \
+                --body "$milestone_body" 2>/dev/null || \
+                echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.5 completion issue (non-fatal)"
+        fi
 
         push_metric "MilestoneCompleted" 1 "Count" "Milestone=v0.5"
     fi
@@ -4300,12 +4311,23 @@ swarms reasoning about other swarms' work and collaborating across goal boundari
 
 Closes #1771"
 
-        gh issue create \
-            --repo "${GITHUB_REPO}" \
-            --title "milestone: v0.6 Collective Action COMPLETE — all criteria verified by coordinator" \
-            --label "enhancement,self-improvement" \
-            --body "$milestone_body" 2>/dev/null || \
-            echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.6 completion issue (non-fatal)"
+        # Issue #2019: Pre-filing dedup check — prevent duplicate issues during concurrent
+        # coordinator instances (rolling updates). Both instances pass the ConfigMap guard
+        # before either patches it; the GitHub check provides a second barrier.
+        local existing_v06_issue
+        existing_v06_issue=$(gh issue list --repo "${GITHUB_REPO}" \
+            --search "milestone: v0.6 Collective Action COMPLETE" \
+            --state open --limit 1 2>/dev/null | head -1)
+        if [ -n "$existing_v06_issue" ]; then
+            echo "[$(date -u +%H:%M:%S)] check_v06_milestone: milestone issue already exists — skipping duplicate creation (issue #2019)"
+        else
+            gh issue create \
+                --repo "${GITHUB_REPO}" \
+                --title "milestone: v0.6 Collective Action COMPLETE — all criteria verified by coordinator" \
+                --label "enhancement,self-improvement" \
+                --body "$milestone_body" 2>/dev/null || \
+                echo "[$(date -u +%H:%M:%S)] WARNING: Could not file v0.6 completion issue (non-fatal)"
+        fi
 
         push_metric "MilestoneCompleted" 1 "Count" "Milestone=v0.6"
     fi
