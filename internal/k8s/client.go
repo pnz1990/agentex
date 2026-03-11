@@ -60,6 +60,11 @@ var (
 		Version:  KroVersion,
 		Resource: "messages",
 	}
+	CampaignGVR = schema.GroupVersionResource{
+		Group:    KroGroup,
+		Version:  KroVersion,
+		Resource: "campaigns",
+	}
 )
 
 // Client wraps Kubernetes clientset and dynamic client with typed convenience methods.
