@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -106,6 +107,9 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		c.logger.Error("heartbeat failed", "error", err)
 	}
 
+	// Every tick: touch liveness probe file (K8s exec probe compatibility)
+	c.touchLivenessFile()
+
 	// Every tick: cleanup stale assignments
 	if err := c.cleanupStaleAssignments(ctx); err != nil {
 		c.logger.Error("cleanup stale assignments failed", "error", err)
@@ -175,6 +179,16 @@ func (c *Coordinator) loadConstitution(ctx context.Context) error {
 func (c *Coordinator) heartbeat(ctx context.Context) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	return c.stateManager.UpdateField(ctx, "lastHeartbeat", now)
+}
+
+// touchLivenessFile writes /tmp/coordinator-alive for K8s exec-based
+// liveness probes. The coordinator-graph RGD uses an exec probe that
+// checks for this file. This ensures compatibility whether running
+// the bash or Go coordinator.
+func (c *Coordinator) touchLivenessFile() {
+	if err := os.WriteFile("/tmp/coordinator-alive", []byte(time.Now().UTC().Format(time.RFC3339)), 0o644); err != nil {
+		c.logger.Warn("failed to touch liveness file", "error", err)
+	}
 }
 
 // ensureStateFieldsInitialized initializes coordinator-state fields that may

@@ -1,0 +1,43 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: campaign-graph
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Campaign
+    spec:
+      title: string | required=true
+      description: string | default=""
+      owner: string | default=""
+      priority: integer | default=5
+      tasks: string | default="[]"
+      dependencies: string | default="{}"
+    status:
+      configMapName: ${campaignState.metadata.name}
+      phase: ${campaignState.data.phase}
+  resources:
+    # Campaign state ConfigMap — tracks campaign progress, task status,
+    # and dependency resolution. The coordinator's campaign system
+    # (internal/coordinator/campaign.go) manages dynamic fields at runtime.
+    - id: campaignState
+      readyWhen:
+        - ${campaignState.metadata.resourceVersion != ""}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-state
+          namespace: ${schema.metadata.namespace}
+          labels:
+            app: agentex-campaign
+            agentex/component: campaign
+            agentex/campaign: ${schema.metadata.name}
+        data:
+          title: ${schema.spec.title}
+          description: ${schema.spec.description}
+          owner: ${schema.spec.owner}
+          priority: ${string(schema.spec.priority)}
+          tasks: ${schema.spec.tasks}
+          dependencies: ${schema.spec.dependencies}
+          phase: "pending"
