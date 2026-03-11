@@ -415,12 +415,26 @@ post_debate_response() {
   local stance="${3:-respond}"
   local confidence="${4:-7}"
 
+  # Issue #1987: Normalize parent name to ConfigMap name format.
+  # Agents read thoughts via 'kubectl get configmaps -l agentex/thought' which returns
+  # ConfigMap names ending in '-thought' (e.g. "thought-agent-123-thought"). If the caller
+  # passes the ConfigMap name directly, appending '-thought' again creates a double-suffix
+  # ("thought-agent-123-thought-thought") that doesn't exist, causing all lookups to fail
+  # silently and every debate response to show "to unknown:".
+  # Fix: if the name already ends in '-thought', use it as-is; otherwise append '-thought'.
+  local parent_cm_name
+  if [[ "$parent_thought_name" == *-thought ]]; then
+    parent_cm_name="$parent_thought_name"
+  else
+    parent_cm_name="${parent_thought_name}-thought"
+  fi
+
   # Read the parent thought to extract its topic
   local parent_topic
-  parent_topic=$(kubectl_with_timeout 10 get configmap "${parent_thought_name}-thought" \
+  parent_topic=$(kubectl_with_timeout 10 get configmap "${parent_cm_name}" \
     -n "$NAMESPACE" -o jsonpath='{.data.topic}' 2>/dev/null || echo "")
   local parent_agent
-  parent_agent=$(kubectl_with_timeout 10 get configmap "${parent_thought_name}-thought" \
+  parent_agent=$(kubectl_with_timeout 10 get configmap "${parent_cm_name}" \
     -n "$NAMESPACE" -o jsonpath='{.data.agentRef}' 2>/dev/null || echo "unknown")
 
   local content="DEBATE RESPONSE [${stance}] to ${parent_agent}:
