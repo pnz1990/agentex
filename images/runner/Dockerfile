@@ -1,4 +1,26 @@
 # ============================================================================
+# Stage 0: Go builder — compile agent and coordinator binaries
+# ============================================================================
+FROM golang:1.25-alpine AS go-builder
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /build
+
+# Copy module files first for Docker layer caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy Go source
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY roles/ roles/
+
+# Build both binaries — static, no CGO
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /build/bin/agentex-agent ./cmd/agent/
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /build/bin/agentex-coordinator ./cmd/coordinator/
+
+# ============================================================================
 # Stage 1: Builder — Install Node.js with gnupg, then remove gnupg completely
 # ============================================================================
 FROM ubuntu:24.04 AS builder
@@ -127,12 +149,19 @@ RUN git config --system user.name "agentex-bot" \
     && git config --system credential.helper store \
     && git config --system safe.directory '*'
 
-COPY entrypoint.sh /entrypoint.sh
-COPY coordinator.sh /usr/local/bin/coordinator.sh
-COPY planner-loop.sh /usr/local/bin/planner-loop.sh
-COPY identity.sh /agent/identity.sh
-COPY helpers.sh /agent/helpers.sh
+COPY images/runner/entrypoint.sh /entrypoint.sh
+COPY images/runner/coordinator.sh /usr/local/bin/coordinator.sh
+COPY images/runner/planner-loop.sh /usr/local/bin/planner-loop.sh
+COPY images/runner/identity.sh /agent/identity.sh
+COPY images/runner/helpers.sh /agent/helpers.sh
 RUN mkdir -p /agent && chmod +x /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent/identity.sh /agent/helpers.sh && chown -R agentex:agentex /entrypoint.sh /usr/local/bin/coordinator.sh /usr/local/bin/planner-loop.sh /agent
+
+# Go binaries — compiled in go-builder stage, placed alongside bash scripts.
+# Set AGENTEX_USE_GO=true to use the Go agent entrypoint instead of bash.
+# Set AGENTEX_USE_GO_COORDINATOR=true to use the Go coordinator instead of bash.
+COPY --from=go-builder /build/bin/agentex-agent /usr/local/bin/agentex-agent
+COPY --from=go-builder /build/bin/agentex-coordinator /usr/local/bin/agentex-coordinator
+RUN chmod +x /usr/local/bin/agentex-agent /usr/local/bin/agentex-coordinator
 
 USER agentex
 WORKDIR /workspace

@@ -12,6 +12,7 @@ spec:
       imageTag: string | default="latest"
       imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
       clusterName: string | default="agentex"
+      useGoCoordinator: string | default="false"  # Set to "true" to use the Go coordinator instead of bash
     status:
       configMapName: ${coordinatorState.metadata.name}
       deploymentName: ${coordinatorDeployment.metadata.name}
@@ -110,6 +111,8 @@ spec:
                       value: ${schema.metadata.namespace}
                     - name: GITHUB_TOKEN_FILE
                       value: "/var/secrets/github/token"
+                    - name: AGENTEX_USE_GO_COORDINATOR  # Feature flag: "true" dispatches to Go binary
+                      value: ${schema.spec.useGoCoordinator}
                   resources:
                     requests:
                       memory: "512Mi"

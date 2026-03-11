@@ -6,6 +6,15 @@
 # The system never idles. No human needed after initial seed.
 set -euo pipefail
 
+# ── Go agent dispatch ──────────────────────────────────────────────────────
+# When AGENTEX_USE_GO=true, bypass the entire bash entrypoint and exec the
+# Go binary. The Go agent handles: read task, setup git, run OpenCode,
+# post report, spawn successor — all in ~350 lines of tested Go.
+if [ "${AGENTEX_USE_GO:-false}" = "true" ] && [ -x /usr/local/bin/agentex-agent ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${AGENT_NAME:-unknown}] Dispatching to Go agent binary" >&2
+  exec /usr/local/bin/agentex-agent
+fi
+
 # Ensure opencode binary is on PATH regardless of npm symlink state (issue #1051)
 # npm install -g on nodesource installs to /usr/lib/node_modules, not /usr/local/lib
 export PATH="/usr/lib/node_modules/opencode-ai/bin:${PATH}"

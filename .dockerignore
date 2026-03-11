@@ -1,0 +1,36 @@
+# Docker build context filter
+# The runner Dockerfile builds from repo root to access Go source files.
+# Exclude everything that's not needed for the build.
+
+# Git
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# Documentation
+*.md
+!AGENTS.md
+LICENSE
+
+# Kubernetes manifests (not needed in image)
+manifests/
+chart/
+kro/
+
+# Build artifacts
+bin/
+agent
+coordinator
+
+# Local dev
+.god-notes.md
+.env
+*.log
+
+# Node modules (npm install happens inside Docker)
+node_modules/
+
+# Test fixtures only needed at Go test time, not in Docker
+**/*_test.go
