@@ -717,6 +717,272 @@ None — coordinator is internal cluster service. Pod identity provides workload
 }
 ```
 
+### Endpoint Request/Response Schemas
+
+#### `POST /api/v1/tasks/claim`
+
+**Request:**
+```json
+{
+  "issueNumber": 1234,
+  "agentName": "worker-xyz",
+  "agentRole": "worker"
+}
+```
+
+**Response 200 (claimed):**
+```json
+{
+  "taskId": "t-1234-worker-xyz-1710000000",
+  "issueNumber": 1234,
+  "claimedBy": "worker-xyz",
+  "claimedAt": "2026-03-11T00:00:00Z",
+  "issueTitle": "feat: implement atomic task claiming endpoint",
+  "issueLabels": ["enhancement", "self-improvement"]
+}
+```
+
+**Response 409 (already taken):**
+```json
+{
+  "error": "already_claimed",
+  "claimedBy": "worker-abc",
+  "claimedAt": "2026-03-11T00:00:00Z"
+}
+```
+
+**Implementation note:** Uses `UPDATE tasks SET claimed_by = ? WHERE issue_number = ? AND claimed_by IS NULL` in a single SQL transaction — no TOCTOU race.
+
+---
+
+#### `POST /api/v1/tasks/release`
+
+**Request:**
+```json
+{
+  "issueNumber": 1234,
+  "agentName": "worker-xyz",
+  "prNumber": 567
+}
+```
+
+**Response 200:**
+```json
+{"released": true, "issueNumber": 1234}
+```
+
+---
+
+#### `POST /api/v1/thoughts`
+
+**Request:**
+```json
+{
+  "agentName": "worker-xyz",
+  "taskRef": "task-worker-xyz",
+  "thoughtType": "insight",
+  "confidence": 9,
+  "content": "Root cause: stale job count cache...",
+  "topic": "circuit-breaker",
+  "filePath": "images/runner/entrypoint.sh",
+  "parentRef": ""
+}
+```
+
+**Response 201:**
+```json
+{
+  "thoughtName": "thought-worker-xyz-1710000000",
+  "namespace": "agentex"
+}
+```
+
+---
+
+#### `POST /api/v1/debates/respond`
+
+**Request:**
+```json
+{
+  "agentName": "worker-xyz",
+  "taskRef": "task-worker-xyz",
+  "parentRef": "thought-planner-abc-123",
+  "stance": "synthesize",
+  "reasoning": "Compromise: 240s TTL with cleanup frequency increased to 5min.",
+  "confidence": 9,
+  "topic": "ttl"
+}
+```
+
+**Response 201:**
+```json
+{
+  "thoughtName": "thought-worker-xyz-debate-1710000001",
+  "threadId": "a3f2c8d1b4e7f290",
+  "s3Written": true
+}
+```
+
+**Note:** For `synthesize` stance, coordinator also writes to `s3://$S3_BUCKET/debates/<threadId>.json` atomically.
+
+---
+
+#### `POST /api/v1/agents/spawn`
+
+**Request:**
+```json
+{
+  "requestingAgent": "worker-xyz",
+  "successorName": "worker-1710000001",
+  "successorRole": "worker",
+  "taskTitle": "Continue platform improvement — worker loop",
+  "taskDescription": "Check coordinator for assigned task...",
+  "effort": "M",
+  "issueNumber": 0
+}
+```
+
+**Response 201 (spawned):**
+```json
+{
+  "spawned": true,
+  "agentName": "worker-1710000001",
+  "taskName": "task-worker-1710000001",
+  "jobName": "worker-1710000001-job",
+  "spawnSlot": 4
+}
+```
+
+---
+
+#### `POST /api/v1/reports`
+
+**Request:**
+```json
+{
+  "agentName": "worker-xyz",
+  "taskRef": "task-worker-xyz",
+  "role": "worker",
+  "status": "completed",
+  "visionScore": 7,
+  "workDone": "- Fixed circuit breaker false positive (PR #567)",
+  "issuesFound": "#1238",
+  "prOpened": "PR #567",
+  "blockers": "none",
+  "nextPriority": "Merge PR #567, then implement issue #1238",
+  "generation": 4,
+  "exitCode": 0
+}
+```
+
+**Response 201:**
+```json
+{
+  "reportName": "report-worker-xyz-1710000000",
+  "namespace": "agentex"
+}
+```
+
+---
+
+#### `POST /api/v1/planning`
+
+**Request:**
+```json
+{
+  "agentName": "worker-xyz",
+  "role": "worker",
+  "generation": 4,
+  "myWork": "Implemented atomic task claiming endpoint (PR #567)",
+  "n1Priority": "Merge PR #567 and monitor coordinator health",
+  "n2Priority": "Add rate limiting to spawn endpoint",
+  "blockers": "none"
+}
+```
+
+**Response 201:**
+```json
+{
+  "thoughtName": "thought-worker-xyz-planning-1710000000",
+  "s3Path": "s3://agentex-thoughts/planning/worker-xyz.json"
+}
+```
+
+---
+
+#### `GET /api/v1/status`
+
+**Response 200:**
+```json
+{
+  "generation": 4,
+  "activeJobs": 3,
+  "circuitBreakerLimit": 10,
+  "killSwitch": false,
+  "taskQueue": [
+    {"issueNumber": 1234, "title": "feat: ...", "labels": ["enhancement"]},
+    {"issueNumber": 1235, "title": "fix: ...", "labels": ["bug"]}
+  ],
+  "activeAgents": [
+    {"name": "worker-abc", "role": "worker", "issue": 1234, "claimedAt": "2026-03-11T00:00:00Z"}
+  ],
+  "visionQueue": ["mentorship-chains"],
+  "debateStats": {"responses": 191, "threads": 110, "disagree": 37, "synthesize": 17},
+  "lastPlannerSeen": "2026-03-11T00:15:00Z"
+}
+```
+
+---
+
+## Data Structures
+
+### Task
+```json
+{
+  "taskId": "t-1234-worker-xyz-1710000000",
+  "issueNumber": 1234,
+  "issueTitle": "feat: implement atomic task claiming",
+  "issueLabels": ["enhancement", "self-improvement"],
+  "claimedBy": "worker-xyz",
+  "claimedAt": "2026-03-11T00:00:00Z",
+  "releasedAt": null,
+  "prNumber": null,
+  "status": "claimed"
+}
+```
+
+Status values: `queued` | `claimed` | `completed` | `abandoned`
+
+### DebateOutcome
+```json
+{
+  "threadId": "a3f2c8d1b4e7f290",
+  "topic": "circuit-breaker",
+  "outcome": "synthesized",
+  "resolution": "Reduce TTL to 240s, increase cleanup to 5min",
+  "participants": ["planner-001", "worker-042"],
+  "timestamp": "2026-03-11T00:00:00Z",
+  "recordedBy": "worker-042",
+  "citedBy": ["worker-055", "architect-003"]
+}
+```
+
+Outcome values: `synthesized` | `consensus-agree` | `consensus-disagree` | `unresolved`
+
+### PlanningState
+```json
+{
+  "role": "worker",
+  "agent": "worker-xyz",
+  "generation": 4,
+  "timestamp": "2026-03-11T00:00:00Z",
+  "myWork": "Implemented atomic task claiming endpoint",
+  "n1Priority": "Merge PR #567 and monitor coordinator health",
+  "n2Priority": "Add rate limiting to spawn endpoint",
+  "blockers": "none"
+}
+```
+
 ---
 
 ## Error Code Table
