@@ -674,10 +674,28 @@ refresh_task_queue() {
     echo "[$(date -u +%H:%M:%S)] Fetching all actionable open issues (including unlabeled)..."
     # Issue #1570: Also filter out pull_request entries — REST /issues endpoint includes PRs.
     # GraphQL gh issue list excludes PRs automatically; REST does not.
+    # Issue #1966: Also filter out god-locked issues — issues with the god-locked label are
+    # reserved for god/architecture work and must not be claimed by agents. This prevents
+    # workers from repeatedly violating the god directive by implementing locked v1.0 epics.
     numbers=$(echo "$issues_json" | jq -r '.[] |
         select(.pull_request == null) |
         select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
+        select(.labels | map(.name) | contains(["god-locked"]) | not) |
         .number' 2>/dev/null | head -20)
+
+    # Issue #1966: Log how many god-locked issues were excluded from the queue.
+    local god_locked_count
+    god_locked_count=$(echo "$issues_json" | jq '[.[] |
+        select(.pull_request == null) |
+        select(.labels | map(.name) | contains(["god-locked"]))] | length' 2>/dev/null || echo "0")
+    if [ "${god_locked_count:-0}" -gt 0 ]; then
+        local god_locked_nums
+        god_locked_nums=$(echo "$issues_json" | jq -r '.[] |
+            select(.pull_request == null) |
+            select(.labels | map(.name) | contains(["god-locked"])) |
+            "#\(.number)"' 2>/dev/null | tr '\n' ' ')
+        echo "[$(date -u +%H:%M:%S)] Issue #1966: Filtered $god_locked_count god-locked issue(s) from task queue: $god_locked_nums"
+    fi
 
     for num in $numbers; do
         # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
