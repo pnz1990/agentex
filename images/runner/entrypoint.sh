@@ -1927,6 +1927,16 @@ proactive_coordinator_scan() {
     done
     if [ "$stale_count" -ge 1 ]; then
       log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+      # Issue #2004: dedup using stable keyword — stale_count varies each run, defeating title dedup.
+      # Same root cause as issue #1934 (count-varying titles create unlimited duplicate issues).
+      local existing_stale_issue
+      existing_stale_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "coordinator state assignments persisted past job completion" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_stale_issue:-0}" -gt 0 ]; then
+        log "Coordinator scan: stale assignment issue already open — skipping duplicate (stale_count=$stale_count)"
+        return 0
+      fi
       file_proactive_issue "bug" \
         "coordinator state: $stale_count assignments persisted >2h past job completion" \
         "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
@@ -1957,6 +1967,16 @@ This issue was proactively filed by a domain specialist during systematic scan.
     local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
     if [ "$heartbeat_age" -gt 600 ]; then
       log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+      # Issue #2004: dedup using stable keyword — heartbeat_age varies each run, defeating title dedup.
+      # Same root cause as issue #1934 (count-varying titles create unlimited duplicate issues).
+      local existing_heartbeat_issue
+      existing_heartbeat_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "coordinator liveness heartbeat stale coordinator may be stuck" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_heartbeat_issue:-0}" -gt 0 ]; then
+        log "Coordinator scan: coordinator liveness issue already open — skipping duplicate (heartbeat_age=${heartbeat_age}s)"
+        return 0
+      fi
       file_proactive_issue "bug" \
         "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
         "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
