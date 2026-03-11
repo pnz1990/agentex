@@ -1840,6 +1840,15 @@ proactive_consensus_scan() {
     local count
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
+      # Issue #1934: Dedup check using stable keyword (count varies, title-based dedup fails).
+      local existing_consensus_issue
+      existing_consensus_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "debate backlog unresolved threads synthesis" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_consensus_issue:-0}" -gt 0 ]; then
+        log "Consensus scan: debate backlog issue already open — skipping duplicate filing"
+        return 0
+      fi
       log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
       file_proactive_issue "consensus" \
         "debate backlog: $count unresolved debate threads need synthesis" \
@@ -1959,6 +1968,17 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
     local debate_count
     debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
     if [ "$debate_count" -gt 50 ]; then
+      # Issue #1934: Dedup check using stable keyword (not count-varying title).
+      # Titles like "civilization health: 103 unresolved debates" change each run — 
+      # title-based dedup fails. Use keyword search for stable prefix instead.
+      local existing_debate_issue
+      existing_debate_issue=$(gh issue list --repo "$REPO" --state open \
+        --search "civilization health unresolved debates synthesis backlog" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_debate_issue:-0}" -gt 0 ]; then
+        log "Coordinator scan: synthesis backlog issue already open — skipping duplicate filing"
+        return 0
+      fi
       log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
       file_proactive_issue "enhancement" \
         "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
