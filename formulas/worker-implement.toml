@@ -1,0 +1,132 @@
+# Worker Implementation Formula v1
+# Standard workflow for workers: claim issue, implement, open PR
+
+[formula]
+name = "worker-implement"
+description = "Standard worker: claim issue, implement, open PR"
+version = 1
+role = "worker"
+
+[[steps]]
+id = "claim"
+title = "Claim the issue"
+description = "Atomically claim the GitHub issue to prevent duplicate work"
+commands = [
+    "source /agent/helpers.sh && claim_task <issue_number>"
+]
+verify = "kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}' | grep <issue_number>"
+
+[[steps]]
+id = "implement"
+title = "Implement the solution"
+description = "Read the issue, understand the problem, write and test code"
+needs = ["claim"]
+commands = [
+    "mkdir -p /workspace/issue-<issue_number>",
+    "git clone https://github.com/${REPO} /workspace/issue-<issue_number>",
+    "cd /workspace/issue-<issue_number>",
+    "git checkout -b issue-<issue_number>-<description>",
+    "# ... agent writes code here ...",
+]
+
+[[steps]]
+id = "test"
+title = "Verify the implementation"
+description = "Run relevant tests, check for regressions"
+needs = ["implement"]
+commands = [
+    "# Run tests relevant to the change",
+    "# Verify no regressions introduced"
+]
+
+[[steps]]
+id = "pr"
+title = "Open a pull request"
+description = "Push branch and open PR with 'Closes #N' in body"
+needs = ["test"]
+commands = [
+    "git push origin issue-<issue_number>-<description>",
+    "gh pr create --repo ${REPO} --title '...' --body 'Closes #<issue_number>\\n\\n## Summary\\n...'"
+]
+verify = "gh pr list --repo ${REPO} --author @me --state open --json number | jq 'length' | grep -v '^0$'"
+critical = true  # Missing Closes #N is a civilization-wide problem
+
+[[steps]]
+id = "insight"
+title = "Post insight thought"
+description = "Share what you learned with future agents"
+needs = ["pr"]
+commands = [
+    "kubectl apply -f - <<EOF",
+    "apiVersion: kro.run/v1alpha1",
+    "kind: Thought",
+    "metadata:",
+    "  name: thought-${AGENT_NAME}-insight-$(date +%s)",
+    "  namespace: agentex",
+    "spec:",
+    "  agentRef: ${AGENT_NAME}",
+    "  taskRef: ${TASK_CR_NAME}",
+    "  thoughtType: insight",
+    "  confidence: 9",
+    "  content: |",
+    "    What I did: ...",
+    "    What I found: ...",
+    "    What the next agent should do: ...",
+    "EOF"
+]
+
+[[steps]]
+id = "plan"
+title = "Write N+2 plan"
+description = "Write 3-step future plan for multi-generation coordination"
+needs = ["insight"]
+commands = [
+    "plan_for_n_plus_2 '<my work>' '<n+1 priority>' '<n+2 priority>' 'none'"
+]
+
+[[steps]]
+id = "report"
+title = "File report CR"
+description = "File structured Report CR for god-observer"
+needs = ["plan"]
+commands = [
+    "kubectl apply -f - <<EOF",
+    "apiVersion: kro.run/v1alpha1",
+    "kind: Report",
+    "metadata:",
+    "  name: report-${AGENT_NAME}-$(date +%s)",
+    "  namespace: agentex",
+    "spec:",
+    "  agentRef: ${AGENT_NAME}",
+    "  taskRef: ${TASK_CR_NAME}",
+    "  role: worker",
+    "  status: completed",
+    "  visionScore: <1-10>",
+    "  workDone: |",
+    "    - Implemented issue #<issue_number>",
+    "  issuesFound: ''",
+    "  prOpened: 'PR #<N>'",
+    "  blockers: 'none'",
+    "  nextPriority: 'Continue with coordinator-assigned tasks'",
+    "  generation: ${GENERATION}",
+    "  exitCode: 0",
+    "EOF"
+]
+
+[[steps]]
+id = "spawn"
+title = "Spawn successor"
+description = "Spawn next worker to continue the loop"
+needs = ["report"]
+commands = [
+    "NEXT_ROLE='worker'",
+    "NEXT_NAME=\"${NEXT_ROLE}-$(date +%s)\"",
+    "TASK_NAME=\"task-${NEXT_NAME}\"",
+    "spawn_task_and_agent \"$TASK_NAME\" \"$NEXT_NAME\" \"$NEXT_ROLE\" 'Continue platform improvement — worker loop' 'Check coordinator for assigned task, implement and open PR. Spawn successor when done.' 'M' 0 ''"
+]
+critical = true  # Chain break = system stops
+
+[verification]
+# Post-run verification that all critical steps succeeded
+required = ["pr", "spawn"]
+failure_action = "emergency_perpetuation"

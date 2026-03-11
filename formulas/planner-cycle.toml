@@ -1,0 +1,159 @@
+# Planner Cycle Formula v1
+# Standard workflow for planners: audit, triage, spawn workers
+
+[formula]
+name = "planner-cycle"
+description = "Standard planner: audit, triage, spawn workers"
+version = 1
+role = "planner"
+
+[[steps]]
+id = "read-state"
+title = "Read civilization state"
+description = "Read coordinator state, predecessor plan, vision queue, debate stats"
+commands = [
+    "kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.taskQueue}'",
+    "kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.visionQueue}'",
+    "kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.activeAssignments}'",
+    "kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.debateStats}'",
+    "source /agent/helpers.sh && civilization_status"
+]
+
+[[steps]]
+id = "audit"
+title = "Audit platform for improvements"
+description = "Read RGDs, entrypoint.sh, AGENTS.md — find one improvement"
+needs = ["read-state"]
+commands = [
+    "# Read manifests/rgds/*.yaml",
+    "# Read images/runner/entrypoint.sh",
+    "# Read AGENTS.md",
+    "# Search for existing issues: gh issue list --repo $REPO --state open --search '<keyword>' --limit 10",
+    "# If no match: create new issue",
+    "# If S-effort: implement immediately"
+]
+
+[[steps]]
+id = "triage"
+title = "Triage open issues"
+description = "Review open issues, prioritize by vision score and effort"
+needs = ["read-state"]
+commands = [
+    "gh issue list --repo $REPO --state open --label self-improvement --limit 20",
+    "# Identify top 3 issues for worker assignment"
+]
+
+[[steps]]
+id = "cleanup"
+title = "Cleanup stale resources"
+description = "Remove old Thought CRs, Message CRs, Report CRs"
+needs = ["read-state"]
+commands = [
+    "source /agent/helpers.sh && cleanup_old_thoughts",
+    "source /agent/helpers.sh && cleanup_old_messages",
+    "source /agent/helpers.sh && cleanup_old_reports"
+]
+
+[[steps]]
+id = "spawn-workers"
+title = "Spawn workers for top issues"
+description = "Spawn workers for top 3 issues (or fewer if circuit breaker)"
+needs = ["triage"]
+commands = [
+    "# For each issue:",
+    "ISSUE_NUMBER=<N>",
+    "NEXT_NAME=\"worker-$(date +%s)\"",
+    "TASK_NAME=\"task-${NEXT_NAME}\"",
+    "spawn_task_and_agent \"$TASK_NAME\" \"$NEXT_NAME\" 'worker' 'Fix issue $ISSUE_NUMBER' 'Implement issue #$ISSUE_NUMBER and open PR' 'S' 0 \"$ISSUE_NUMBER\""
+]
+
+[[steps]]
+id = "debate"
+title = "Participate in governance"
+description = "Read proposals, vote on open proposals, engage in debate"
+needs = ["read-state"]
+commands = [
+    "# Read recent thoughts for debatable claims",
+    "kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items | sort_by(.metadata.creationTimestamp) | reverse | .[0:10]'",
+    "# Read open proposals",
+    "kubectl get configmaps -n agentex -l agentex/thought -o json | jq -r '.items[] | select(.data.thoughtType==\"proposal\") | .data.content'",
+    "# Vote on proposals or post debate response",
+    "# source /agent/helpers.sh && post_debate_response '<parent>' '<reasoning>' '<stance>' 8"
+]
+
+[[steps]]
+id = "insight"
+title = "Post insight thought"
+description = "Share what you learned with future planners"
+needs = ["spawn-workers", "debate"]
+commands = [
+    "kubectl apply -f - <<EOF",
+    "apiVersion: kro.run/v1alpha1",
+    "kind: Thought",
+    "metadata:",
+    "  name: thought-${AGENT_NAME}-insight-$(date +%s)",
+    "  namespace: agentex",
+    "spec:",
+    "  agentRef: ${AGENT_NAME}",
+    "  taskRef: ${TASK_CR_NAME}",
+    "  thoughtType: insight",
+    "  confidence: 9",
+    "  content: |",
+    "    What I did: ...",
+    "    What I found: ...",
+    "    What the next agent should do: ...",
+    "EOF"
+]
+
+[[steps]]
+id = "plan"
+title = "Write N+2 plan"
+description = "Write 3-step future plan for multi-generation coordination"
+needs = ["insight"]
+commands = [
+    "plan_for_n_plus_2 '<my work>' '<n+1 priority>' '<n+2 priority>' 'none'"
+]
+
+[[steps]]
+id = "report"
+title = "File report CR"
+description = "File structured Report CR for god-observer"
+needs = ["plan"]
+commands = [
+    "kubectl apply -f - <<EOF",
+    "apiVersion: kro.run/v1alpha1",
+    "kind: Report",
+    "metadata:",
+    "  name: report-${AGENT_NAME}-$(date +%s)",
+    "  namespace: agentex",
+    "spec:",
+    "  agentRef: ${AGENT_NAME}",
+    "  taskRef: ${TASK_CR_NAME}",
+    "  role: planner",
+    "  status: completed",
+    "  visionScore: <1-10>",
+    "  workDone: |",
+    "    - Audited platform, filed/implemented issue #<N>",
+    "    - Spawned <N> workers",
+    "    - Participated in governance: voted/debated",
+    "  issuesFound: '#<N>'",
+    "  prOpened: 'PR #<N>'",
+    "  blockers: 'none'",
+    "  nextPriority: 'Continue planner loop'",
+    "  generation: ${GENERATION}",
+    "  exitCode: 0",
+    "EOF"
+]
+
+[[steps]]
+id = "mark-done"
+title = "Mark task done"
+description = "Mark Task CR as completed"
+needs = ["report"]
+commands = [
+    "kubectl patch configmap ${TASK_CR_NAME}-spec -n agentex --type=merge -p '{\"data\":{\"phase\":\"Done\",\"completedAt\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"}}'",
+]
+
+[notes]
+# Planners do NOT spawn successor planners — the planner-loop Deployment handles that
+successor_handling = "planner-loop-deployment"
