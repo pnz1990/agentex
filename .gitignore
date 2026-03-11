@@ -2,3 +2,6 @@ infra/.terraform/
 infra/terraform.tfstate
 infra/terraform.tfstate.backup
 infra/.terraform.lock.hcl
+bin/
+coverage.out
+coverage.html

@@ -1,0 +1,56 @@
+name: Go CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'Makefile'
+      - '.github/workflows/go-ci.yml'
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'Makefile'
+      - '.github/workflows/go-ci.yml'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Run tests
+        run: go test -v -race -count=1 -timeout 120s ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build coordinator binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/coordinator ./cmd/coordinator/
+
+      - name: Build Docker image
+        run: docker build -t agentex/coordinator-go:test -f images/coordinator-go/Dockerfile .
