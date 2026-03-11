@@ -683,7 +683,7 @@ refresh_task_queue() {
         select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
         .number' 2>/dev/null | head -50)
 
-    for num in $numbers; do
+     for num in $numbers; do
         # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
         if echo " $covered_issues " | grep -q " $num "; then
             echo "[$(date -u +%H:%M:%S)] Issue #1384: Skipping issue #$num — open PR already exists"
@@ -693,6 +693,15 @@ refresh_task_queue() {
         # Score based on labels already fetched (avoid extra API calls)
         local labels
         labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.pull_request == null) | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+        # Issue #1966: Skip issues with the "god-locked" label — these are locked by god directive
+        # and agents must not implement them. God applies this label to prevent wasted work on
+        # epics that require scaffolding (e.g., v1.0 Go rewrites). This check uses labels already
+        # fetched from the bulk issues query — no extra API calls needed.
+        if echo "$labels" | grep -q "god-locked"; then
+            echo "[$(date -u +%H:%M:%S)] Issue #1966: Skipping issue #$num — has god-locked label (directive violation prevention)"
+            continue
+        fi
 
         # Issue #1442: Accumulate label data for issueLabels cache (only for labeled issues)
         if [ -n "$labels" ]; then
@@ -4864,18 +4873,27 @@ route_tasks_by_specialization() {
                 --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
         fi
 
-        # Issue #1782: Check if issue is swarm-eligible before single-worker routing.
-        # Multi-domain or XL/XXL effort issues are dispatched to a coordinator-spawned Swarm
-        # instead of a single worker. spawn_swarm_for_issue() returns 0 if it created the swarm,
-        # 1 if the issue should be handled normally by single-worker routing.
-        if spawn_swarm_for_issue "$issue_num" "$issue_labels" ""; then
-            echo "[$(date -u +%H:%M:%S)] Issue #$issue_num dispatched to swarm — skipping single-worker routing"
-            # Update local active_assignments so subsequent iterations see the swarm assignment
-            active_assignments=$(get_state "activeAssignments" 2>/dev/null || echo "")
-            specialized_count=$((specialized_count + 1))
-            local routing_entry="${issue_num}:swarm"
-            routing_log="${routing_log}${routing_entry};"
+        # Issue #1966: Skip issues with the "god-locked" label — locked by god directive.
+        if echo "$issue_labels" | grep -q "god-locked"; then
+            echo "[$(date -u +%H:%M:%S)] Issue #1966: Skipping routing for issue #$issue_num — has god-locked label"
             continue
+        fi
+
+        # Issue #1782: Dispatch swarm-eligible issues to a Swarm CR instead of a single worker.
+        # Issues labeled "swarm-eligible" or "multi-domain" need collective resolution.
+        # spawn_swarm_for_issue() creates Task CR + Swarm CR and returns 0 on success.
+        # On success: skip single-worker assignment (swarm planner will claim it).
+        # On failure (blocked, not eligible): fall through to normal single-worker routing.
+        if echo "$issue_labels" | grep -qE "swarm-eligible|multi-domain"; then
+            if spawn_swarm_for_issue "$issue_num" "$issue_labels" ""; then
+                echo "[$(date -u +%H:%M:%S)] Issue #1782: Issue #$issue_num dispatched to swarm — skipping single-worker assignment"
+                # Count as a specialized routing action (swarm IS specialized routing)
+                specialized_count=$((specialized_count + 1))
+                push_metric "SwarmEligibleDispatched" 1 "Count" "IssueNumber=${issue_num}"
+                continue
+            fi
+            # spawn_swarm_for_issue returned 1: blocked or duplicate — fall through to normal routing
+            echo "[$(date -u +%H:%M:%S)] Issue #1782: Swarm spawn blocked for #$issue_num — using normal routing"
         fi
 
         # Find best specialized agent
