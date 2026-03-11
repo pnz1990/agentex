@@ -171,6 +171,18 @@ func (c *Client) PatchConfigMap(ctx context.Context, namespace, name string, pat
 	return cm, nil
 }
 
+// ListConfigMaps lists all ConfigMaps in the given namespace.
+func (c *Client) ListConfigMaps(ctx context.Context, namespace string, opts metav1.ListOptions) (*corev1.ConfigMapList, error) {
+	ctx, cancel := withTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cms, err := c.Clientset.CoreV1().ConfigMaps(namespace).List(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("listing configmaps in %s: %w", namespace, err)
+	}
+	return cms, nil
+}
+
 // ListJobs lists all Jobs in the given namespace.
 func (c *Client) ListJobs(ctx context.Context, namespace string, opts metav1.ListOptions) (*batchv1.JobList, error) {
 	ctx, cancel := withTimeout(ctx, 15*time.Second)
