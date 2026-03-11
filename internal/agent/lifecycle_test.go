@@ -369,3 +369,93 @@ func TestLoadFromEnv_Required(t *testing.T) {
 		t.Errorf("Region = %q, want us-west-2", cfg.Region)
 	}
 }
+
+// --- TestFlightTestConfig ---
+
+func TestLoadFromEnv_FlightTestDefaults(t *testing.T) {
+	t.Setenv("AGENT_NAME", "flight-agent")
+	t.Setenv("AGENT_ROLE", "worker")
+	t.Setenv("TASK_CR_NAME", "task-flight-1")
+	t.Setenv("AGENTEX_FLIGHT_TEST", "")
+	t.Setenv("MOCK_AGENT_FAIL", "")
+	t.Setenv("MOCK_AGENT_SLEEP_SECONDS", "")
+
+	cfg := &AgentConfig{}
+	if err := cfg.LoadFromEnv(); err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+
+	if cfg.FlightTest {
+		t.Error("FlightTest should default to false")
+	}
+	if cfg.MockFail {
+		t.Error("MockFail should default to false")
+	}
+	if cfg.MockSleepSeconds != 3 {
+		t.Errorf("MockSleepSeconds = %d, want 3", cfg.MockSleepSeconds)
+	}
+}
+
+func TestLoadFromEnv_FlightTestEnabled(t *testing.T) {
+	t.Setenv("AGENT_NAME", "flight-agent")
+	t.Setenv("AGENT_ROLE", "worker")
+	t.Setenv("TASK_CR_NAME", "task-flight-2")
+	t.Setenv("AGENTEX_FLIGHT_TEST", "true")
+	t.Setenv("MOCK_AGENT_FAIL", "true")
+	t.Setenv("MOCK_AGENT_SLEEP_SECONDS", "7")
+
+	cfg := &AgentConfig{}
+	if err := cfg.LoadFromEnv(); err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+
+	if !cfg.FlightTest {
+		t.Error("FlightTest should be true")
+	}
+	if !cfg.MockFail {
+		t.Error("MockFail should be true")
+	}
+	if cfg.MockSleepSeconds != 7 {
+		t.Errorf("MockSleepSeconds = %d, want 7", cfg.MockSleepSeconds)
+	}
+}
+
+// --- TestExecuteFlightTest ---
+
+func TestExecuteFlightTest_Success(t *testing.T) {
+	cfg := &AgentConfig{
+		Name:             "mock-agent",
+		MockSleepSeconds: 0, // instant
+		MockFail:         false,
+	}
+
+	result, err := ExecuteFlightTest(cfg)
+	if err != nil {
+		t.Fatalf("ExecuteFlightTest: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("expected success=true, got false (error=%q)", result.Error)
+	}
+	if result.Error != "" {
+		t.Errorf("expected no error, got %q", result.Error)
+	}
+}
+
+func TestExecuteFlightTest_Failure(t *testing.T) {
+	cfg := &AgentConfig{
+		Name:             "mock-fail-agent",
+		MockSleepSeconds: 0, // instant
+		MockFail:         true,
+	}
+
+	result, err := ExecuteFlightTest(cfg)
+	if err != nil {
+		t.Fatalf("ExecuteFlightTest returned Go error: %v", err)
+	}
+	if result.Success {
+		t.Error("expected success=false when MockFail=true")
+	}
+	if result.Error == "" {
+		t.Error("expected non-empty error string when MockFail=true")
+	}
+}

@@ -77,41 +77,64 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("[init] loading roles: %w", err)
 	}
 
-	// Render prompt
-	prompt, err := agent.RenderAgentPrompt(registry, cfg.Role, task, cfg.Repo)
-	if err != nil {
-		return fmt.Errorf("[read-task] render prompt: %w", err)
-	}
-
-	// Phase: setup-git
-	workdir := fmt.Sprintf("/workspace/issue-%d", task.IssueNumber)
-	logger.Info("setting up git workspace", "workdir", workdir)
-	if err := agent.SetupGitWorkspace(cfg.Repo, task.IssueNumber, workdir); err != nil {
-		reportErr := agent.PostReport(ctx, client, cfg.Namespace, cfg.Name, &agent.ExecutionResult{
-			Phase: agent.PhaseSetupGit,
-			Error: err.Error(),
-		})
-		if reportErr != nil {
-			logger.Error("failed to post error report", "error", reportErr)
+	// Render prompt (skipped in flight test mode — no LLM call will be made)
+	var prompt string
+	if !cfg.FlightTest {
+		var renderErr error
+		prompt, renderErr = agent.RenderAgentPrompt(registry, cfg.Role, task, cfg.Repo)
+		if renderErr != nil {
+			return fmt.Errorf("[read-task] render prompt: %w", renderErr)
 		}
-		return fmt.Errorf("[setup-git] %w", err)
 	}
 
-	// Phase: execute — run OpenCode
-	logger.Info("executing opencode")
-	result, err := agent.ExecuteOpenCode(ctx, prompt, workdir, cfg.Model)
-	if err != nil {
-		return fmt.Errorf("[execute] %w", err)
+	// Phase: setup-git  (skipped in flight test mode)
+	if cfg.FlightTest {
+		logger.Info("flight test mode: skipping git workspace setup")
+	} else {
+		workdir := fmt.Sprintf("/workspace/issue-%d", task.IssueNumber)
+		logger.Info("setting up git workspace", "workdir", workdir)
+		if err := agent.SetupGitWorkspace(cfg.Repo, task.IssueNumber, workdir); err != nil {
+			reportErr := agent.PostReport(ctx, client, cfg.Namespace, cfg.Name, &agent.ExecutionResult{
+				Phase: agent.PhaseSetupGit,
+				Error: err.Error(),
+			})
+			if reportErr != nil {
+				logger.Error("failed to post error report", "error", reportErr)
+			}
+			return fmt.Errorf("[setup-git] %w", err)
+		}
 	}
 
-	// Detect PR number
-	prNum, prErr := agent.DetectPRNumber(cfg.Repo, task.IssueNumber)
-	if prErr != nil {
-		logger.Warn("could not detect PR number", "error", prErr)
-	} else if prNum > 0 {
-		result.PRNumber = prNum
-		result.Success = true
-		logger.Info("detected PR", "number", prNum)
+	// Phase: execute
+	var result *agent.ExecutionResult
+	if cfg.FlightTest {
+		logger.Info("flight test mode: executing mock agent",
+			"sleepSeconds", cfg.MockSleepSeconds,
+			"fail", cfg.MockFail,
+		)
+		var execErr error
+		result, execErr = agent.ExecuteFlightTest(cfg)
+		if execErr != nil {
+			return fmt.Errorf("[execute] %w", execErr)
+		}
+	} else {
+		workdir := fmt.Sprintf("/workspace/issue-%d", task.IssueNumber)
+		logger.Info("executing opencode")
+		var execErr error
+		result, execErr = agent.ExecuteOpenCode(ctx, prompt, workdir, cfg.Model)
+		if execErr != nil {
+			return fmt.Errorf("[execute] %w", execErr)
+		}
+
+		// Detect PR number (real mode only)
+		prNum, prErr := agent.DetectPRNumber(cfg.Repo, task.IssueNumber)
+		if prErr != nil {
+			logger.Warn("could not detect PR number", "error", prErr)
+		} else if prNum > 0 {
+			result.PRNumber = prNum
+			result.Success = true
+			logger.Info("detected PR", "number", prNum)
+		}
 	}
 
 	// Phase: report

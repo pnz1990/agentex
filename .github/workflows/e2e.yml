@@ -1,0 +1,120 @@
+name: E2E Flight Tests
+
+# Flight tests run against the agentex-e2e staging namespace on the main EKS
+# cluster. Mock agents (AGENTEX_FLIGHT_TEST=true) exercise the full coordinator
+# lifecycle without real OpenCode/Bedrock sessions.
+#
+# Staging environment setup (one-time):
+#   ./manifests/e2e/setup.sh
+#   ./scripts/push-e2e-image.sh
+#
+# Run manually:
+#   go test -v -tags e2e -timeout 20m ./e2e/... \
+#     -run TestBasicDispatch \
+#     (with KUBECONFIG, E2E_NAMESPACE, FLIGHT_TEST_IMAGE set)
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: 'Go -run filter (empty = all tests)'
+        required: false
+        default: ''
+      timeout:
+        description: 'Test timeout'
+        required: false
+        default: '20m'
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  e2e:
+    name: E2E Flight Tests (EKS staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      E2E_NAMESPACE: agentex-e2e
+      FLIGHT_TEST_IMAGE: 569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:e2e
+      AWS_REGION: us-west-2
+      EKS_CLUSTER: agentex
+
+    permissions:
+      id-token: write   # Required for OIDC → AWS authentication
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      # Authenticate to AWS via OIDC (no long-lived credentials stored)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::569190534191:role/github-actions-e2e
+          aws-region: us-west-2
+
+      # Write kubeconfig for the EKS cluster
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name $EKS_CLUSTER \
+            --region $AWS_REGION
+          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+          # Always pass --context explicitly to avoid accidentally targeting
+          # a wrong cluster if multiple contexts are present in the kubeconfig.
+          echo "KUBE_CONTEXT=arn:aws:eks:${AWS_REGION}:569190534191:cluster/${EKS_CLUSTER}" >> $GITHUB_ENV
+
+      # Ensure staging environment is ready (idempotent)
+      - name: Ensure staging environment
+        run: bash manifests/e2e/setup.sh
+
+      # Run e2e tests
+      - name: Run e2e tests
+        run: |
+          FILTER="${{ github.event.inputs.test_filter }}"
+          TIMEOUT="${{ github.event.inputs.timeout }}"
+          TIMEOUT="${TIMEOUT:-20m}"
+          RUN_ARGS=""
+          if [ -n "$FILTER" ]; then
+            RUN_ARGS="-run $FILTER"
+          fi
+          go test \
+            -v \
+            -tags e2e \
+            -timeout "$TIMEOUT" \
+            -count=1 \
+            $RUN_ARGS \
+            ./e2e/...
+
+      # Collect logs on failure
+      - name: Collect staging logs on failure
+        if: failure()
+        run: |
+          echo "=== coordinator-state ===" || true
+          kubectl --context $KUBE_CONTEXT get configmap coordinator-state -n $E2E_NAMESPACE -o yaml || true
+          echo "=== Jobs ===" || true
+          kubectl --context $KUBE_CONTEXT get jobs -n $E2E_NAMESPACE -o wide || true
+          echo "=== Pods ===" || true
+          kubectl --context $KUBE_CONTEXT get pods -n $E2E_NAMESPACE -o wide || true
+          echo "=== Report CRs ===" || true
+          kubectl --context $KUBE_CONTEXT get reports -n $E2E_NAMESPACE -o yaml || true
+          echo "=== Recent events ===" || true
+          kubectl --context $KUBE_CONTEXT get events -n $E2E_NAMESPACE --sort-by=.lastTimestamp | tail -50 || true
+
+      # Clean up test-run resources (keep namespace/SA/RBAC for next run)
+      - name: Clean up test Jobs and CRs
+        if: always()
+        run: |
+          kubectl --context $KUBE_CONTEXT delete jobs -n $E2E_NAMESPACE -l agentex/e2e=true --ignore-not-found=true || true
+          kubectl --context $KUBE_CONTEXT delete reports -n $E2E_NAMESPACE --all --ignore-not-found=true || true
+          kubectl --context $KUBE_CONTEXT delete tasks -n $E2E_NAMESPACE -l agentex/e2e=true --ignore-not-found=true || true
+          # Reset coordinator-state for next run
+          kubectl --context $KUBE_CONTEXT patch configmap coordinator-state -n $E2E_NAMESPACE \
+            --type=merge \
+            -p '{"data":{"taskQueue":"","activeAssignments":"","spawnSlots":"5","activeAgents":""}}' || true
