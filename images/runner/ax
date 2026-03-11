@@ -1,0 +1,774 @@
+#!/usr/bin/env bash
+# ax — Agentex CLI for workflow formula management
+#
+# Issue #1846: Workflow formulas — repeatable, templated work patterns for agents
+#
+# Formulas are TOML files that define trackable steps for recurring workflows.
+# Each agent instance gets a formula "run" — a tracked execution of a formula.
+# Progress persists in /tmp/ax-formula-state.json (agent-local) and in S3
+# (for recovery by successor agents when an agent dies mid-formula).
+#
+# USAGE:
+#   ax formula list                   # list available formulas
+#   ax formula start <name>           # start a formula run
+#   ax formula current                # show current step
+#   ax formula done <step-id>         # mark step complete, advance to next
+#   ax formula progress               # show progress bar and all steps
+#   ax formula resume                 # resume a partially-completed formula
+#   ax formula skip <step-id>         # skip a step (records reason)
+#   ax formula status                 # full status of current run
+#
+# Other ax subcommands:
+#   ax tasks --mine                   # show tasks assigned to this agent
+#   ax status                         # civilization status overview
+#   ax thought <content> [type]       # post a thought CR
+#   ax plan <my-work> <n1> <n2>       # write 3-step planning state
+#   ax spawn <role>                   # spawn successor agent
+#   ax report                         # file Report CR (from /tmp/ax-report-*.json)
+#
+# FORMULA FILE FORMAT (TOML):
+#   [formula]
+#   name = "worker-implement"
+#   description = "Standard worker: claim issue, implement, open PR"
+#   version = 1
+#   role = "worker"
+#
+#   [[steps]]
+#   id = "claim"
+#   title = "Claim the issue"
+#   description = "..."
+#   verify = "..."       # optional: bash command that exits 0 if step is done
+#
+#   [[steps]]
+#   id = "implement"
+#   needs = ["claim"]    # optional: step IDs that must complete first
+#   ...
+
+set -o pipefail 2>/dev/null || true
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+AX_VERSION="1.0.0"
+FORMULA_DIR="${AX_FORMULA_DIR:-/agent/formulas}"
+STATE_FILE="${AX_STATE_FILE:-/tmp/ax-formula-state.json}"
+NAMESPACE="${NAMESPACE:-agentex}"
+AGENT_NAME="${AGENT_NAME:-unknown}"
+AGENT_ROLE="${AGENT_ROLE:-worker}"
+S3_BUCKET="${S3_BUCKET:-agentex-thoughts}"
+
+# Try to load S3 bucket from constitution if not set
+if [ "$S3_BUCKET" = "agentex-thoughts" ] && command -v kubectl >/dev/null 2>&1; then
+  _s3=$(timeout 5s kubectl get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.s3Bucket}' 2>/dev/null || echo "")
+  [ -n "$_s3" ] && S3_BUCKET="$_s3"
+fi
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+ax_log() { echo "[ax] $*" >&2; }
+ax_info() { echo "[ax] $*"; }
+ax_error() { echo "[ax ERROR] $*" >&2; }
+
+# ── TOML Parser (minimal, for formula files) ──────────────────────────────────
+# Parses the subset of TOML used in formula files.
+# Returns key=value pairs, one per line.
+# For [[steps]] arrays, prefixes with "step_N_<key>=<value>"
+#
+# Usage: toml_parse <file>
+toml_parse() {
+  local file="$1"
+  [ -f "$file" ] || { ax_error "Formula file not found: $file"; return 1; }
+
+  local section="" step_idx=-1
+
+  while IFS= read -r line; do
+    # Skip comments and empty lines
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+    # Section headers
+    if [[ "$line" =~ ^\[formula\] ]]; then
+      section="formula"
+      continue
+    fi
+    if [[ "$line" =~ ^\[\[steps\]\] ]]; then
+      section="steps"
+      step_idx=$((step_idx + 1))
+      continue
+    fi
+
+    # Key = value parsing
+    if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_-]*)[[:space:]]*=[[:space:]]*(.*) ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local value="${BASH_REMATCH[2]}"
+
+      # Strip surrounding quotes
+      value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+
+      # Handle TOML arrays like needs = ["claim", "implement"]
+      if [[ "$value" =~ ^\[.*\]$ ]]; then
+        # Strip brackets and parse comma-separated values
+        value=$(echo "$value" | tr -d '[]' | tr -d '"' | tr -d "'" | tr ',' ' ' | tr -s ' ')
+      fi
+
+      if [ "$section" = "formula" ]; then
+        echo "formula_${key}=${value}"
+      elif [ "$section" = "steps" ] && [ $step_idx -ge 0 ]; then
+        echo "step_${step_idx}_${key}=${value}"
+      fi
+    fi
+  done < "$file"
+}
+
+# ── Formula Discovery ─────────────────────────────────────────────────────────
+formula_list() {
+  ax_info "Available formulas:"
+  ax_info ""
+
+  local found=0
+  for dir in "$FORMULA_DIR" "/workspace/repo/formulas" "$(dirname "$0")/../formulas"; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*.toml; do
+      [ -f "$f" ] || continue
+      local name desc role
+      name=$(toml_parse "$f" 2>/dev/null | grep "^formula_name=" | cut -d= -f2-)
+      desc=$(toml_parse "$f" 2>/dev/null | grep "^formula_description=" | cut -d= -f2-)
+      role=$(toml_parse "$f" 2>/dev/null | grep "^formula_role=" | cut -d= -f2-)
+      ax_info "  ${name:-$(basename "$f" .toml)} [role=${role:-any}]"
+      ax_info "    ${desc}"
+      ax_info ""
+      found=$((found + 1))
+    done
+  done
+
+  if [ $found -eq 0 ]; then
+    ax_info "  No formulas found in: $FORMULA_DIR"
+    ax_info "  Set AX_FORMULA_DIR to your formula directory."
+  fi
+}
+
+# Find a formula file by name
+formula_find() {
+  local name="$1"
+  for dir in "$FORMULA_DIR" "/workspace/repo/formulas" "$(dirname "$0")/../formulas"; do
+    [ -d "$dir" ] || continue
+    local candidate="${dir}/${name}.toml"
+    [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+# ── Formula State (JSON in /tmp and S3) ───────────────────────────────────────
+# State schema:
+# {
+#   "formulaName": "worker-implement",
+#   "agentName": "worker-123",
+#   "startedAt": "2026-...",
+#   "currentStep": "implement",
+#   "completedSteps": ["claim", "clone"],
+#   "skippedSteps": {},
+#   "steps": [{"id":"...", "title":"...", "status":"pending|in_progress|completed|skipped"}]
+# }
+
+state_read() {
+  if [ -f "$STATE_FILE" ]; then
+    cat "$STATE_FILE"
+  else
+    echo ""
+  fi
+}
+
+state_write() {
+  local state="$1"
+  echo "$state" > "$STATE_FILE"
+
+  # Persist to S3 for recovery (best-effort)
+  if command -v aws >/dev/null 2>&1 && [ -n "$AGENT_NAME" ]; then
+    local s3_path="s3://${S3_BUCKET}/formulas/${AGENT_NAME}/state.json"
+    echo "$state" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1 || true
+  fi
+}
+
+state_load_from_s3() {
+  local agent="${1:-$AGENT_NAME}"
+  local s3_path="s3://${S3_BUCKET}/formulas/${agent}/state.json"
+  aws s3 cp "$s3_path" - 2>/dev/null || echo ""
+}
+
+# ── Formula Start ─────────────────────────────────────────────────────────────
+formula_start() {
+  local formula_name="$1"
+
+  # Find formula file
+  local formula_file
+  formula_file=$(formula_find "$formula_name") || {
+    ax_error "Formula '$formula_name' not found."
+    ax_error "Run 'ax formula list' to see available formulas."
+    return 1
+  }
+
+  # Parse formula
+  local parsed
+  parsed=$(toml_parse "$formula_file") || return 1
+
+  # Extract formula metadata
+  local name desc version role
+  name=$(echo "$parsed" | grep "^formula_name=" | cut -d= -f2-)
+  desc=$(echo "$parsed" | grep "^formula_description=" | cut -d= -f2-)
+  version=$(echo "$parsed" | grep "^formula_version=" | cut -d= -f2-)
+  role=$(echo "$parsed" | grep "^formula_role=" | cut -d= -f2-)
+
+  # Build steps array
+  local steps_json="[]"
+  local step_count=0
+  while true; do
+    local step_id step_title step_desc step_verify step_needs
+    step_id=$(echo "$parsed" | grep "^step_${step_count}_id=" | cut -d= -f2-)
+    [ -z "$step_id" ] && break
+
+    step_title=$(echo "$parsed" | grep "^step_${step_count}_title=" | cut -d= -f2-)
+    step_desc=$(echo "$parsed" | grep "^step_${step_count}_description=" | cut -d= -f2-)
+    step_verify=$(echo "$parsed" | grep "^step_${step_count}_verify=" | cut -d= -f2-)
+    step_needs=$(echo "$parsed" | grep "^step_${step_count}_needs=" | cut -d= -f2-)
+
+    local step_json
+    step_json=$(jq -n \
+      --arg id "$step_id" \
+      --arg title "$step_title" \
+      --arg desc "$step_desc" \
+      --arg verify "$step_verify" \
+      --arg needs "$step_needs" \
+      --arg status "pending" \
+      '{id: $id, title: $title, description: $desc, verify: $verify, needs: ($needs | split(" ") | map(select(. != ""))), status: $status}')
+
+    steps_json=$(echo "$steps_json" | jq --argjson step "$step_json" '. + [$step]')
+    step_count=$((step_count + 1))
+  done
+
+  # Build initial state
+  local first_step_id
+  first_step_id=$(echo "$steps_json" | jq -r '.[0].id // ""')
+
+  local state
+  state=$(jq -n \
+    --arg formulaName "$name" \
+    --arg description "$desc" \
+    --arg version "${version:-1}" \
+    --arg role "${role:-any}" \
+    --arg agentName "$AGENT_NAME" \
+    --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg currentStep "$first_step_id" \
+    --argjson steps "$steps_json" \
+    '{
+      formulaName: $formulaName,
+      description: $description,
+      version: $version,
+      role: $role,
+      agentName: $agentName,
+      startedAt: $startedAt,
+      currentStep: $currentStep,
+      completedSteps: [],
+      skippedSteps: {},
+      steps: $steps
+    }')
+
+  state_write "$state"
+
+  ax_info "Started formula: ${name} v${version:-1}"
+  ax_info "Role: ${role:-any}"
+  ax_info "Agent: ${AGENT_NAME}"
+  ax_info ""
+  ax_info "First step: ${first_step_id}"
+  ax_info ""
+  formula_progress_display "$state"
+}
+
+# ── Formula Current Step ──────────────────────────────────────────────────────
+formula_current() {
+  local state
+  state=$(state_read)
+
+  if [ -z "$state" ]; then
+    ax_error "No active formula. Run 'ax formula start <name>' to begin."
+    return 1
+  fi
+
+  local current_step formula_name
+  current_step=$(echo "$state" | jq -r '.currentStep // ""')
+  formula_name=$(echo "$state" | jq -r '.formulaName // ""')
+
+  if [ -z "$current_step" ]; then
+    ax_info "Formula '${formula_name}' is complete! All steps finished."
+    return 0
+  fi
+
+  local step_info
+  step_info=$(echo "$state" | jq --arg id "$current_step" '.steps[] | select(.id == $id)')
+
+  local step_title step_desc step_verify total completed
+  step_title=$(echo "$step_info" | jq -r '.title // ""')
+  step_desc=$(echo "$step_info" | jq -r '.description // ""')
+  step_verify=$(echo "$step_info" | jq -r '.verify // ""')
+  total=$(echo "$state" | jq '.steps | length')
+  completed=$(echo "$state" | jq '.completedSteps | length')
+
+  ax_info "Formula: ${formula_name} [${completed}/${total} steps done]"
+  ax_info ""
+  ax_info "→ Current step: ${current_step}"
+  ax_info "  Title: ${step_title}"
+  ax_info "  Description: ${step_desc}"
+  if [ -n "$step_verify" ]; then
+    ax_info "  Verify: ${step_verify}"
+  fi
+}
+
+# ── Formula Mark Step Done ────────────────────────────────────────────────────
+formula_done() {
+  local step_id="$1"
+  local notes="${2:-}"
+
+  local state
+  state=$(state_read)
+
+  if [ -z "$state" ]; then
+    ax_error "No active formula. Run 'ax formula start <name>' to begin."
+    return 1
+  fi
+
+  local current_step
+  current_step=$(echo "$state" | jq -r '.currentStep // ""')
+
+  # Default to current step if not specified
+  [ -z "$step_id" ] && step_id="$current_step"
+
+  # Verify the step exists
+  local step_exists
+  step_exists=$(echo "$state" | jq --arg id "$step_id" '.steps[] | select(.id == $id) | .id' 2>/dev/null)
+  if [ -z "$step_exists" ]; then
+    ax_error "Step '$step_id' not found in formula."
+    return 1
+  fi
+
+  # Run verify command if present
+  local step_verify
+  step_verify=$(echo "$state" | jq -r --arg id "$step_id" '.steps[] | select(.id == $id) | .verify // ""')
+  if [ -n "$step_verify" ]; then
+    ax_log "Running verify: $step_verify"
+    if ! bash -c "$step_verify" 2>/dev/null; then
+      ax_error "Verify command failed for step '$step_id'."
+      ax_error "Verify: $step_verify"
+      ax_error "Fix the issue and retry, or use 'ax formula skip $step_id' to skip verification."
+      return 1
+    fi
+    ax_log "Verify passed ✓"
+  fi
+
+  # Mark step complete and advance
+  local completed_at
+  completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # Update state: mark step completed
+  state=$(echo "$state" | jq \
+    --arg id "$step_id" \
+    --arg ts "$completed_at" \
+    --arg notes "$notes" \
+    '
+    .completedSteps += [$id] |
+    .steps = [.steps[] | if .id == $id then .status = "completed" | .completedAt = $ts | .notes = $notes else . end]
+    ')
+
+  # Find the next step to work on (first step whose needs are all completed)
+  local completed_steps
+  completed_steps=$(echo "$state" | jq -r '[.completedSteps[]]')
+  local skipped_steps
+  skipped_steps=$(echo "$state" | jq -r '[.skippedSteps | keys[]]')
+  local done_steps
+  done_steps=$(echo "$state" | jq -r '[(.completedSteps + (.skippedSteps | keys))[] ]')
+
+  local next_step=""
+  next_step=$(echo "$state" | jq -r \
+    --argjson done "$done_steps" \
+    '.steps[] | select(.status == "pending") | select(
+      (.needs | length == 0) or
+      (.needs | all(. as $need | $done | index($need) != null))
+    ) | .id' | head -1)
+
+  state=$(echo "$state" | jq --arg next "$next_step" '.currentStep = $next')
+
+  state_write "$state"
+
+  local total completed_count
+  total=$(echo "$state" | jq '.steps | length')
+  completed_count=$(echo "$state" | jq '.completedSteps | length')
+
+  ax_info "✓ Step '${step_id}' completed"
+
+  if [ -z "$next_step" ]; then
+    ax_info ""
+    ax_info "🎉 Formula '$(echo "$state" | jq -r '.formulaName')' COMPLETE!"
+    ax_info "All ${total} steps finished."
+    _formula_complete_hook "$state"
+  else
+    ax_info "→ Next step: ${next_step} [${completed_count}/${total} done]"
+    local next_title
+    next_title=$(echo "$state" | jq -r --arg id "$next_step" '.steps[] | select(.id == $id) | .title')
+    ax_info "  ${next_title}"
+  fi
+}
+
+# Hook called when formula completes — saves completion record to S3
+_formula_complete_hook() {
+  local state="$1"
+  local formula_name
+  formula_name=$(echo "$state" | jq -r '.formulaName // "unknown"')
+  local completed_at
+  completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # Write completion record to S3
+  local completion_json
+  completion_json=$(echo "$state" | jq --arg ts "$completed_at" '. + {completedAt: $ts, status: "completed"}')
+
+  if command -v aws >/dev/null 2>&1; then
+    local s3_path="s3://${S3_BUCKET}/formulas/${AGENT_NAME}/completed/${formula_name}-${completed_at}.json"
+    echo "$completion_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1 || true
+    ax_log "Formula completion saved to S3: ${s3_path}"
+  fi
+
+  # Clean up local state
+  rm -f "$STATE_FILE" 2>/dev/null || true
+}
+
+# ── Formula Skip Step ─────────────────────────────────────────────────────────
+formula_skip() {
+  local step_id="$1"
+  local reason="${2:-no reason given}"
+
+  local state
+  state=$(state_read)
+
+  if [ -z "$state" ]; then
+    ax_error "No active formula."
+    return 1
+  fi
+
+  local step_exists
+  step_exists=$(echo "$state" | jq --arg id "$step_id" '.steps[] | select(.id == $id) | .id' 2>/dev/null)
+  if [ -z "$step_exists" ]; then
+    ax_error "Step '$step_id' not found."
+    return 1
+  fi
+
+  local skipped_at
+  skipped_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  state=$(echo "$state" | jq \
+    --arg id "$step_id" \
+    --arg ts "$skipped_at" \
+    --arg reason "$reason" \
+    '
+    .skippedSteps[$id] = {at: $ts, reason: $reason} |
+    .steps = [.steps[] | if .id == $id then .status = "skipped" | .skippedAt = $ts | .skipReason = $reason else . end]
+    ')
+
+  # Advance to next eligible step
+  local done_steps
+  done_steps=$(echo "$state" | jq -r '[(.completedSteps + (.skippedSteps | keys))[] ]')
+  local next_step=""
+  next_step=$(echo "$state" | jq -r \
+    --argjson done "$done_steps" \
+    '.steps[] | select(.status == "pending") | select(
+      (.needs | length == 0) or
+      (.needs | all(. as $need | $done | index($need) != null))
+    ) | .id' | head -1)
+
+  state=$(echo "$state" | jq --arg next "$next_step" '.currentStep = $next')
+  state_write "$state"
+
+  ax_info "⏭ Step '${step_id}' skipped (${reason})"
+  [ -n "$next_step" ] && ax_info "→ Next step: ${next_step}"
+}
+
+# ── Formula Resume (for successor agents) ─────────────────────────────────────
+formula_resume() {
+  local predecessor="${1:-}"
+
+  # Try to load state from S3 if no local state
+  local state
+  state=$(state_read)
+
+  if [ -z "$state" ] && [ -n "$predecessor" ]; then
+    ax_info "Loading formula state from predecessor: ${predecessor}"
+    state=$(state_load_from_s3 "$predecessor")
+    if [ -n "$state" ]; then
+      # Update agent name in resumed state
+      state=$(echo "$state" | jq --arg agent "$AGENT_NAME" '.agentName = $agent | .resumedBy = $agent | .resumedAt = now | todate')
+      state_write "$state"
+      ax_info "Resumed formula from predecessor ${predecessor}"
+    fi
+  fi
+
+  if [ -z "$state" ]; then
+    ax_error "No formula state to resume."
+    ax_error "Usage: ax formula resume [predecessor-agent-name]"
+    return 1
+  fi
+
+  ax_info "Resumed formula: $(echo "$state" | jq -r '.formulaName')"
+  ax_info "Original agent: $(echo "$state" | jq -r '.agentName')"
+  formula_progress_display "$state"
+}
+
+# ── Formula Progress Display ──────────────────────────────────────────────────
+formula_progress_display() {
+  local state="${1:-$(state_read)}"
+
+  if [ -z "$state" ]; then
+    ax_error "No active formula."
+    return 1
+  fi
+
+  local formula_name current_step total completed_count
+  formula_name=$(echo "$state" | jq -r '.formulaName // "unknown"')
+  current_step=$(echo "$state" | jq -r '.currentStep // ""')
+  total=$(echo "$state" | jq '.steps | length')
+  completed_count=$(echo "$state" | jq '.completedSteps | length')
+
+  # Progress bar
+  local bar_width=20
+  local filled=$(( (completed_count * bar_width) / total ))
+  local bar=""
+  local i=0
+  while [ $i -lt $bar_width ]; do
+    if [ $i -lt $filled ]; then bar="${bar}█"; else bar="${bar}░"; fi
+    i=$((i + 1))
+  done
+
+  ax_info "Formula: ${formula_name}"
+  ax_info "Progress: ${bar} ${completed_count}/${total} steps"
+  ax_info ""
+
+  # Print all steps with status
+  echo "$state" | jq -r '.steps[] | "\(.status) \(.id) \(.title)"' | while read -r status id title; do
+    local marker
+    case "$status" in
+      "completed") marker="✓" ;;
+      "skipped")   marker="⏭" ;;
+      "in_progress") marker="→" ;;
+      *)
+        if [ "$id" = "$current_step" ]; then
+          marker="→"
+        else
+          marker="○"
+        fi
+        ;;
+    esac
+    ax_info "  ${marker} [${id}] ${title}"
+  done
+}
+
+formula_progress() {
+  formula_progress_display
+}
+
+formula_status() {
+  local state
+  state=$(state_read)
+
+  if [ -z "$state" ]; then
+    ax_error "No active formula."
+    return 1
+  fi
+
+  echo "$state" | jq .
+}
+
+# ── Other ax subcommands ───────────────────────────────────────────────────────
+
+ax_tasks() {
+  local mine=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mine) mine=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  if $mine; then
+    ax_info "Tasks assigned to ${AGENT_NAME}:"
+    timeout 10s kubectl get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.activeAssignments}' 2>/dev/null | \
+      tr ',' '\n' | grep "^${AGENT_NAME}:" | while read -r entry; do
+        local issue="${entry#*:}"
+        ax_info "  Issue #${issue}"
+      done
+  else
+    ax_info "Task queue:"
+    timeout 10s kubectl get configmap coordinator-state -n "$NAMESPACE" \
+      -o jsonpath='{.data.taskQueue}' 2>/dev/null | tr ',' '\n' | while read -r issue; do
+        [ -n "$issue" ] && ax_info "  Issue #${issue}"
+      done
+  fi
+}
+
+ax_status() {
+  # Source helpers.sh for civilization_status
+  if [ -f /agent/helpers.sh ]; then
+    # shellcheck source=/dev/null
+    source /agent/helpers.sh 2>/dev/null && civilization_status
+  else
+    ax_info "Civilization status (basic):"
+    ax_info "  Coordinator queue: $(timeout 10s kubectl get configmap coordinator-state -n "$NAMESPACE" -o jsonpath='{.data.taskQueue}' 2>/dev/null)"
+    ax_info "  Active assignments: $(timeout 10s kubectl get configmap coordinator-state -n "$NAMESPACE" -o jsonpath='{.data.activeAssignments}' 2>/dev/null)"
+  fi
+}
+
+ax_thought() {
+  local content="$1"
+  local type="${2:-insight}"
+  local confidence="${3:-8}"
+
+  if [ -z "$content" ]; then
+    ax_error "Usage: ax thought <content> [type] [confidence]"
+    return 1
+  fi
+
+  if [ -f /agent/helpers.sh ]; then
+    # shellcheck source=/dev/null
+    source /agent/helpers.sh 2>/dev/null && post_thought "$content" "$type" "$confidence"
+  else
+    timeout 10s kubectl apply -f - <<EOF >/dev/null
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: thought-${AGENT_NAME}-$(date +%s)
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: "${AGENT_NAME}"
+  taskRef: "${TASK_CR_NAME:-}"
+  thoughtType: "${type}"
+  confidence: ${confidence}
+  content: |
+$(echo "$content" | sed 's/^/    /')
+EOF
+    ax_log "Posted thought: type=${type}"
+  fi
+}
+
+ax_plan() {
+  local my_work="$1"
+  local n1="$2"
+  local n2="$3"
+  local blockers="${4:-none}"
+
+  if [ -z "$my_work" ] || [ -z "$n1" ] || [ -z "$n2" ]; then
+    ax_error "Usage: ax plan <my-work> <n1-priority> <n2-priority> [blockers]"
+    return 1
+  fi
+
+  if [ -f /agent/helpers.sh ]; then
+    # shellcheck source=/dev/null
+    source /agent/helpers.sh 2>/dev/null && plan_for_n_plus_2 "$my_work" "$n1" "$n2" "$blockers"
+  else
+    ax_error "helpers.sh not found — cannot write planning state"
+    return 1
+  fi
+}
+
+# ── Help ───────────────────────────────────────────────────────────────────────
+ax_help() {
+  cat <<'EOF'
+ax — Agentex CLI v${AX_VERSION}
+
+USAGE:
+  ax <command> [args...]
+
+FORMULA COMMANDS:
+  ax formula list                 List available formulas
+  ax formula start <name>         Start a formula run (creates local state)
+  ax formula current              Show current step description
+  ax formula done [step-id]       Mark current/named step complete, advance
+  ax formula progress             Show progress bar and all steps
+  ax formula resume [predecessor] Resume a formula (from S3 if predecessor given)
+  ax formula skip <step-id>       Skip a step with optional reason
+  ax formula status               Print full formula state as JSON
+
+TASK COMMANDS:
+  ax tasks                        Show task queue
+  ax tasks --mine                 Show tasks assigned to this agent
+
+AGENT COMMANDS:
+  ax status                       Civilization status overview
+  ax thought <content> [type]     Post a Thought CR (type: insight/blocker/debate)
+  ax plan <work> <n1> <n2>        Write 3-step planning state to S3 + thought
+
+ENVIRONMENT:
+  AX_FORMULA_DIR   Directory containing formula TOML files (default: /agent/formulas)
+  AX_STATE_FILE    Path for local formula state JSON (default: /tmp/ax-formula-state.json)
+  AGENT_NAME       This agent's name (default: unknown)
+  NAMESPACE        Kubernetes namespace (default: agentex)
+  S3_BUCKET        S3 bucket for state persistence (default: agentex-thoughts)
+
+FORMULA FILES:
+  Formulas are TOML files with a [formula] section and [[steps]] arrays.
+  See /agent/formulas/*.toml for examples.
+
+EXAMPLES:
+  # Start the standard worker formula
+  ax formula start worker-implement
+
+  # See what you need to do next
+  ax formula current
+
+  # After claiming issue #789:
+  ax formula done claim
+
+  # After implementing:
+  ax formula done implement
+
+  # After opening PR:
+  ax formula done pr
+
+  # Check overall progress
+  ax formula progress
+
+EOF
+}
+
+# ── Main Dispatcher ────────────────────────────────────────────────────────────
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    formula)
+      local subcmd="${1:-list}"
+      shift || true
+      case "$subcmd" in
+        list)     formula_list ;;
+        start)    formula_start "$@" ;;
+        current)  formula_current ;;
+        done)     formula_done "$@" ;;
+        progress) formula_progress ;;
+        resume)   formula_resume "$@" ;;
+        skip)     formula_skip "$@" ;;
+        status)   formula_status ;;
+        *)
+          ax_error "Unknown formula subcommand: $subcmd"
+          ax_help
+          return 1
+          ;;
+      esac
+      ;;
+    tasks)     ax_tasks "$@" ;;
+    status)    ax_status ;;
+    thought)   ax_thought "$@" ;;
+    plan)      ax_plan "$@" ;;
+    version)   ax_info "ax version ${AX_VERSION}" ;;
+    help|--help|-h) ax_help ;;
+    *)
+      ax_error "Unknown command: $cmd"
+      ax_help
+      return 1
+      ;;
+  esac
+}
+
+main "$@"

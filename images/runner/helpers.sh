@@ -13,6 +13,16 @@
 #
 # Variables are read from environment (if exported) or from constitution ConfigMap.
 # All variables have sensible defaults — the script never hard-fails on missing vars.
+#
+# RELATED FILES (issue #1846 — Workflow Formulas):
+#   /agent/formula.sh  — Sourceable formula library. Source to use formula_start(),
+#                        formula_done(), formula_progress(), formula_list() etc.
+#                        Usage: source /agent/formula.sh && formula_start worker-implement
+#   /usr/local/bin/ax  — CLI wrapper. Usage: ax formula list | ax formula start worker-implement
+#                        ax claim <N> | ax thought <msg> [type] | ax plan <n0> <n1> <n2>
+#   /agent/formulas/   — TOML formula definitions:
+#                        worker-implement.toml, planner-cycle.toml,
+#                        reviewer-cycle.toml, architect-improve.toml
 
 set -o pipefail 2>/dev/null || true  # Don't exit if set -o pipefail is unsupported
 

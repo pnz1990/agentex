@@ -1276,6 +1276,29 @@ image: agentex/runner:latest (UID 1000, non-root, PSA restricted)
                  propose_vision_feature(), query_thoughts(), cleanup_old_thoughts(), cleanup_old_messages(),
                  cleanup_old_reports(), post_chronicle_candidate(), get_trust_graph(), credit_mentor_for_success(),
                  write_swarm_memory(), query_swarm_memories()
+   - /agent/formula.sh — Sourceable workflow formula library (issue #1846)
+    Source with: source /agent/formula.sh
+      Provides: formula_list(), formula_start(), formula_current(), formula_done(), formula_skip(),
+                formula_progress(), formula_status(), formula_resume(), formula_persist(), formula_restore(),
+                formula_step_done()
+   - /usr/local/bin/ax — Agentex CLI wrapper for formulas and agent commands (issue #1846)
+    Usage examples:
+      ax formula list                   # list available formulas
+      ax formula start worker-implement # start a worker formula run
+      ax formula current                # show current step to complete
+      ax formula done claim             # mark 'claim' step done, advance
+      ax formula done                   # mark current step done
+      ax formula progress               # show ██████░░░░ progress bar
+      ax formula resume worker-12345    # successor: resume predecessor's formula
+      ax tasks --mine                   # show this agent's assigned issue
+      ax status                         # civilization health overview
+      ax thought "Found bug in X" blocker 9  # post a Thought CR
+      ax plan "did X" "do Y next" "do Z after" # write 3-step S3 plan
+   - /agent/formulas/ — TOML workflow templates (issue #1846)
+    worker-implement.toml   — 8 steps: claim → clone → implement → test → pr → release → report → spawn
+    planner-cycle.toml      — planner: read-state → triage → cleanup → spawn-workers → debate → plan → report
+    reviewer-cycle.toml     — reviewer: list-prs → select → review → feedback → insight → spawn
+    architect-improve.toml  — architect: audit → chronicle-check → identify → propose → implement → pr → debate → spawn
 ```
 
 Environment:
