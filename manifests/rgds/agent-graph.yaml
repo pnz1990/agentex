@@ -112,6 +112,14 @@ spec:
                           name: agentex-constitution
                           key: roleRuntimes
                           optional: true
+                    # RUNTIME_ALIASES: logical short name to full model ID mappings (issue #1847).
+                    # Allows Agent CR spec.model = "claude-haiku" instead of full model ID.
+                    - name: RUNTIME_ALIASES
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: runtimeAliases
+                          optional: true
                     - name: REPO
                       valueFrom:
                         configMapKeyRef:

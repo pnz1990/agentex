@@ -28,6 +28,9 @@ BEDROCK_REGION="${BEDROCK_REGION:-}"  # Will be overridden by constitution.awsRe
 # ROLE_RUNTIMES: constitution.roleRuntimes injected by agent-graph RGD (role:model CSV pairs).
 BEDROCK_MODEL_OVERRIDE="${BEDROCK_MODEL_OVERRIDE:-}"
 ROLE_RUNTIMES="${ROLE_RUNTIMES:-}"
+# Issue #1847: Runtime aliases from constitution.runtimeAliases for logical short names.
+# Populated from env var (set by agent-graph RGD via ConfigMapKeyRef) or fetched at startup.
+RUNTIME_ALIASES="${RUNTIME_ALIASES:-}"
 BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
@@ -134,13 +137,50 @@ export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT
 # Issue #1847: Resolve effective BEDROCK_MODEL from roleRuntimes.
 # Priority order:
 #   1. BEDROCK_MODEL_OVERRIDE (explicit Agent CR spec.model — highest priority)
+#      Note: BEDROCK_MODEL_OVERRIDE can be a logical alias (e.g., "claude-haiku") or full model ID.
+#      Aliases are resolved via constitution.runtimeAliases.
 #   2. ROLE_RUNTIMES lookup for this agent's role (constitution.roleRuntimes)
 #   3. agentModel from constitution
 #   4. Hard-coded default (backward compat fallback)
+# Issue #1847 enhancement: resolve_runtime_alias() expands logical short names
+# (e.g., "claude-haiku") to full model IDs (e.g., "us.anthropic.claude-haiku-3-5").
+# This allows Agent CRs to use short names from constitution.runtimeAliases.
+RUNTIME_ALIASES="${RUNTIME_ALIASES:-}"
+
+# Fetch runtime aliases from constitution if not already set via env var
+if [ -z "$RUNTIME_ALIASES" ]; then
+  RUNTIME_ALIASES=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.runtimeAliases}' 2>/dev/null || echo "")
+fi
+
+resolve_runtime_alias() {
+  local candidate="$1"
+  # If looks like a full model ID (contains dots), return as-is
+  if [[ "$candidate" == *"."* ]]; then
+    echo "$candidate"
+    return
+  fi
+  # Try to resolve as alias from RUNTIME_ALIASES (populated from constitution.runtimeAliases)
+  if [ -n "$RUNTIME_ALIASES" ]; then
+    IFS=',' read -ra ALIAS_PAIRS <<< "$RUNTIME_ALIASES"
+    for pair in "${ALIAS_PAIRS[@]}"; do
+      local alias_name="${pair%%:*}"
+      local alias_model="${pair#*:}"
+      if [ "$alias_name" = "$candidate" ] && [ -n "$alias_model" ]; then
+        echo "$alias_model"
+        return
+      fi
+    done
+  fi
+  # Return as-is (may be a full model ID or will fall through to default)
+  echo "$candidate"
+}
+
 resolve_bedrock_model() {
   # Priority 1: explicit Agent CR override
   if [ -n "${BEDROCK_MODEL_OVERRIDE:-}" ]; then
-    echo "$BEDROCK_MODEL_OVERRIDE"
+    # Issue #1847: expand alias if set to a short name
+    resolve_runtime_alias "$BEDROCK_MODEL_OVERRIDE"
     return
   fi
   # Priority 2: per-role lookup from constitution.roleRuntimes
@@ -153,7 +193,8 @@ resolve_bedrock_model() {
       local rt_role="${pair%%:*}"
       local rt_model="${pair#*:}"
       if [ "$rt_role" = "$AGENT_ROLE" ] && [ -n "$rt_model" ]; then
-        echo "$rt_model"
+        # Resolve alias in roleRuntimes entry as well
+        resolve_runtime_alias "$rt_model"
         return
       fi
     done
