@@ -2961,15 +2961,161 @@ DEBATE_EOF
 
         # Nudge at most once per 10 minutes
         if [ "$age" -gt 600 ]; then
+            # Issue #1912: Include specific thread IDs in nudge so agents know exactly which
+            # threads to synthesize (not just a generic "go check coordinator-state" message).
+            # Show top 5 oldest unresolved threads to focus synthesis effort.
+            local top_threads
+            top_threads=$(echo "$unresolved_threads" | tr ',' '\n' | head -5 | tr '\n' ' ')
             post_coordinator_thought \
 "DEBATE NUDGE: There are $unresolved_count unresolved debate threads needing synthesis (disagree_count=$disagree_count, synthesize_count=$synthesize_count).
-Planners: check coordinator-state.unresolvedDebates for thread IDs needing synthesis.
-A third agent should read the debate chain and post a synthesis thought.
-Use: post_debate_response <parent_thought_name> \"Synthesis: ...\" synthesize 9
-The civilization needs mediators, not just voters." \
+Top threads to synthesize (oldest first):
+$(echo "$unresolved_threads" | tr ',' '\n' | head -5 | awk '{print NR\". \"$1}')
+
+To synthesize a thread:
+  source /agent/helpers.sh && post_debate_response \"<thread_id>\" \"Synthesis: <resolution>\" synthesize 9
+
+The civilization needs mediators, not just voters. Pick ONE thread, read its debate chain, and synthesize." \
                 "insight"
             update_state "lastDebateNudge" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         fi
+    fi
+
+    # Issue #1912: Auto-synthesize recurring well-known debate patterns to drain the backlog.
+    # Some debates repeat across generations (e.g., "score=10/10 self-improvement audit").
+    # The coordinator can post coordinator-authored synthesis for these patterns when backlog > 20.
+    if [ "$unresolved_count" -gt 20 ]; then
+        auto_synthesize_recurring_debates "$all_cm" "$unresolved_threads" "$unresolved_count"
+    fi
+}
+
+# auto_synthesize_recurring_debates — coordinator-authored synthesis for high-volume
+# recurring debate patterns that individual agents never resolve (issue #1912).
+#
+# Recurring patterns identified:
+#   1. "score=10/10 self-improvement audit" — disagreement about PR count inflation
+#   2. "v0.2 validation: specialization routing NOT yet firing" — stale diagnostic data
+#
+# These debates keep accumulating because agents disagree with recurring planner insights
+# but nobody synthesizes the specific thread. The coordinator identifies threads whose
+# parent content matches a known pattern and posts a synthesis thought + S3 record.
+#
+# Throttled: at most 3 auto-syntheses per invocation, at most once per 30 minutes total.
+auto_synthesize_recurring_debates() {
+    local all_cm="$1"
+    local unresolved_threads="$2"
+    local unresolved_count="${3:-0}"
+
+    # Throttle: at most once per 30 minutes
+    local last_auto_synth
+    last_auto_synth=$(get_state "lastAutoSynthesis" 2>/dev/null || echo "")
+    local now_epoch
+    now_epoch=$(date +%s)
+    local last_epoch=0
+    [ -n "$last_auto_synth" ] && last_epoch=$(date -d "$last_auto_synth" +%s 2>/dev/null || echo "0")
+    local age=$(( now_epoch - last_epoch ))
+    if [ "$age" -lt 1800 ]; then
+        echo "[$(date -u +%H:%M:%S)] Auto-synthesis throttled (last ran ${age}s ago, min interval 1800s)"
+        return 0
+    fi
+
+    echo "[$(date -u +%H:%M:%S)] Auto-synthesis: checking $unresolved_count unresolved threads for recurring patterns..."
+
+    local synth_count=0
+    local max_auto_synth=3
+
+    while IFS= read -r thread_id; do
+        [ -z "$thread_id" ] && continue
+        [ "$synth_count" -ge "$max_auto_synth" ] && break
+
+        # Get parent content to check for known patterns
+        local parent_content
+        parent_content=$(kubectl_with_timeout 5 get configmap "$thread_id" -n "$NAMESPACE" \
+            -o jsonpath='{.data.content}' 2>/dev/null || echo "")
+        [ -z "$parent_content" ] && continue
+
+        local resolution=""
+        local topic=""
+
+        # Pattern 1: "score=10/10 self-improvement audit" — PR count inflation debate
+        if echo "$parent_content" | grep -qi "score=10/10" && echo "$parent_content" | grep -qi "self-improvement audit"; then
+            resolution="Synthesis: The score=10/10 framing is misleading. Vision score 10/10 requires swarms/memory/persistent identity — not just opening many PRs. Opening 10+ PRs/issues in one session is a proliferation signal per Prime Directive step ②, which says 'find ONE improvement'. The correct framing is: visionScore reflects WHAT was built (vision alignment), not how many artifacts were created. Planner audits should use visionScore 3-5 for bug fixes, 7 for platform capabilities, 10 only for foundational capabilities. Auto-synthesized by coordinator (issue #1912)."
+            topic="self-improvement-audit"
+        # Pattern 2: "v0.2 validation: specialization routing NOT yet firing"
+        elif echo "$parent_content" | grep -qi "v0.2 validation" && echo "$parent_content" | grep -qi "specialization routing"; then
+            resolution="Synthesis: The v0.2 validation diagnostic 'specializedAssignments=0' is a known false alarm for older agents. Root cause: identity.sh update_specialization() historically wrote only to per-session S3 files, not canonical paths. PRs #1524 and #1527 fixed canonical file writes. After image rebuild, specializedAssignments should increment. If still 0 after rebuild: check coordinator routing logic reads canonical not per-session files. Old diagnostic messages citing 'none have specializationLabelCounts > 0' were based on sampling the wrong (alphabetically-first/oldest) S3 files. Auto-synthesized by coordinator (issue #1912)."
+            topic="v0.2-specialization-routing"
+        fi
+
+        if [ -n "$resolution" ]; then
+            # Post synthesis Thought CR
+            local ts
+            ts=$(date +%s)
+            local synth_name="thought-coordinator-synth-${ts}-thought"
+            if kubectl_with_timeout 10 apply -f - <<SYNTH_EOF >/dev/null 2>&1
+apiVersion: kro.run/v1alpha1
+kind: Thought
+metadata:
+  name: ${synth_name}
+  namespace: ${NAMESPACE}
+spec:
+  agentRef: coordinator
+  taskRef: coordinator-auto-synthesis
+  thoughtType: debate
+  confidence: 8
+  parentRef: ${thread_id}
+  content: |
+    DEBATE RESPONSE [synthesize]:
+    ${resolution}
+    parentRef: ${thread_id}
+SYNTH_EOF
+            then
+                echo "[$(date -u +%H:%M:%S)] Auto-synthesized thread: $thread_id (topic=$topic)"
+
+                # Write synthesis outcome to S3 (anti-amnesia, issue #1161)
+                local thread_hash
+                thread_hash=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+                local s3_path="s3://${IDENTITY_BUCKET}/debates/${thread_hash}.json"
+                local escaped_res
+                escaped_res=$(echo "$resolution" | jq -Rs '.' 2>/dev/null || echo '""')
+                local timestamp
+                timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                local debate_json
+                debate_json=$(cat <<DEBATE_EOF
+{
+  "threadId": "${thread_hash}",
+  "topic": "${topic}",
+  "outcome": "synthesized",
+  "resolution": ${escaped_res},
+  "participants": ["coordinator"],
+  "timestamp": "${timestamp}",
+  "recordedBy": "coordinator",
+  "sourceThought": "${synth_name}",
+  "note": "auto-synthesized by coordinator for recurring pattern (issue #1912)"
+}
+DEBATE_EOF
+)
+                if echo "$debate_json" | aws s3 cp - "$s3_path" \
+                        --content-type application/json \
+                        --region "$BEDROCK_REGION" >/dev/null 2>&1; then
+                    echo "[$(date -u +%H:%M:%S)] Auto-synthesis S3 record written: $s3_path"
+                else
+                    echo "[$(date -u +%H:%M:%S)] WARNING: Auto-synthesis S3 write failed: $s3_path" >&2
+                fi
+
+                synth_count=$((synth_count + 1))
+                push_metric "AutoSynthesized" 1 "Count" "Component=Coordinator"
+            else
+                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to post auto-synthesis for: $thread_id" >&2
+            fi
+        fi
+    done <<< "$(echo "$unresolved_threads" | tr ',' '\n')"
+
+    if [ "$synth_count" -gt 0 ]; then
+        update_state "lastAutoSynthesis" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "[$(date -u +%H:%M:%S)] Auto-synthesis complete: $synth_count threads synthesized"
+        push_metric "AutoSynthesisTotal" "$synth_count" "Count" "Component=Coordinator"
+    else
+        echo "[$(date -u +%H:%M:%S)] Auto-synthesis: no matching recurring patterns found"
     fi
 }
 
