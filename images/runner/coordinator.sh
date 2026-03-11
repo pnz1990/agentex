@@ -3410,20 +3410,39 @@ check_v06_milestone() {
     # Swarm summaries are written to s3://agentex-thoughts/swarm-memories/*.json
     # by the swarm memory persistence feature (issue #1773).
     # NOTE: Path must be swarm-memories/ to match write_swarm_memory() in helpers.sh (issue #1799).
+    #
+    # Issue #1920: Use aws s3 sync to batch-download swarm memory files to a temp dir.
+    # Previously, individual aws s3 cp calls per file blocked the coordinator loop for
+    # N×2 seconds (same pattern as #1896 in check_v05_milestone, fixed in PR #1897).
+    # A single aws s3 sync call downloads all files in parallel (~2-5 seconds total).
     local swarm_files
     swarm_files=$(aws s3 ls "s3://${IDENTITY_BUCKET}/swarm-memories/" \
         --region "$BEDROCK_REGION" 2>/dev/null | \
         awk '{print $4}' | grep '\.json$' | grep -v '^$' | head -100 || echo "")
+
+    local swarm_tmp_dir
+    swarm_tmp_dir=$(mktemp -d 2>/dev/null || echo "/tmp/v06-swarm-$$")
+    mkdir -p "$swarm_tmp_dir"
+
+    # Batch-download swarm memory files (skip if none exist — avoids S3 error on empty prefix)
+    if [ -n "$swarm_files" ]; then
+        aws s3 sync "s3://${IDENTITY_BUCKET}/swarm-memories/" "$swarm_tmp_dir/" \
+            --region "$BEDROCK_REGION" \
+            --quiet 2>/dev/null || true
+    fi
+    echo "[$(date -u +%H:%M:%S)] v0.6 swarm memory sync complete: $(ls "$swarm_tmp_dir/" 2>/dev/null | wc -l) files downloaded"
 
     local swarm_memory_count=0
     local max_coalition_size=0
     local emergent_goal_count=0
     local swarm_formation_count=0
 
+    # Process local files — no per-file network calls (issue #1920)
     for sfile in $swarm_files; do
+        local local_swarm_path="$swarm_tmp_dir/$sfile"
+        [ ! -f "$local_swarm_path" ] && continue
         local sjson
-        sjson=$(aws s3 cp "s3://${IDENTITY_BUCKET}/swarm-memories/${sfile}" - \
-            --region "$BEDROCK_REGION" 2>/dev/null || echo "")
+        sjson=$(cat "$local_swarm_path" 2>/dev/null || echo "")
         [ -z "$sjson" ] && continue
 
         swarm_memory_count=$((swarm_memory_count + 1))
@@ -3448,6 +3467,9 @@ check_v06_milestone() {
             emergent_goal_count=$((emergent_goal_count + 1))
         fi
     done
+
+    # Cleanup temp dir
+    rm -rf "$swarm_tmp_dir" 2>/dev/null || true
 
     # Also count live (non-disbanded) swarms from activeSwarms for formation count
     local active_swarms_field
