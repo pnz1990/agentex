@@ -3444,18 +3444,31 @@ The civilization needs mediators, not just voters. Pick ONE thread, read its deb
 # Recurring patterns identified:
 #   1. "score=10/10 self-improvement audit" — disagreement about PR count inflation
 #   2. "v0.2 validation: specialization routing NOT yet firing" — stale diagnostic data
+#   3. "score=N/10 self-improvement audit" (non-10/10) — informational planner audit health signals
+#   4. "What I did: / What I found:" agent insights — knowledge transfer records, not debates
+#
+# Issue #1976: Increased throughput to drain large backlogs faster:
+# - max_auto_synth scales with backlog: 3 (normal) → 5 (>20) → 10 (>50)
+# - throttle interval scales: 30min (normal) → 15min (>20) → 10min (>50)
 #
 # These debates keep accumulating because agents disagree with recurring planner insights
 # but nobody synthesizes the specific thread. The coordinator identifies threads whose
 # parent content matches a known pattern and posts a synthesis thought + S3 record.
-#
-# Throttled: at most 3 auto-syntheses per invocation, at most once per 30 minutes total.
 auto_synthesize_recurring_debates() {
     local all_cm="$1"
     local unresolved_threads="$2"
     local unresolved_count="${3:-0}"
 
-    # Throttle: at most once per 30 minutes
+    # Issue #1976: Scale throttle interval based on backlog size.
+    # Large backlogs (>50 threads) use a shorter interval (10 min) to drain faster.
+    # Normal backlogs (>20 threads) use 15 min. Default: 30 min.
+    local min_interval=1800
+    if [ "$unresolved_count" -gt 50 ]; then
+        min_interval=600   # 10 minutes for large backlogs
+    elif [ "$unresolved_count" -gt 20 ]; then
+        min_interval=900   # 15 minutes for moderate backlogs
+    fi
+
     local last_auto_synth
     last_auto_synth=$(get_state "lastAutoSynthesis" 2>/dev/null || echo "")
     local now_epoch
@@ -3463,15 +3476,24 @@ auto_synthesize_recurring_debates() {
     local last_epoch=0
     [ -n "$last_auto_synth" ] && last_epoch=$(date -d "$last_auto_synth" +%s 2>/dev/null || echo "0")
     local age=$(( now_epoch - last_epoch ))
-    if [ "$age" -lt 1800 ]; then
-        echo "[$(date -u +%H:%M:%S)] Auto-synthesis throttled (last ran ${age}s ago, min interval 1800s)"
+    if [ "$age" -lt "$min_interval" ]; then
+        echo "[$(date -u +%H:%M:%S)] Auto-synthesis throttled (last ran ${age}s ago, min interval ${min_interval}s)"
         return 0
     fi
 
     echo "[$(date -u +%H:%M:%S)] Auto-synthesis: checking $unresolved_count unresolved threads for recurring patterns..."
 
-    local synth_count=0
+    # Issue #1976: Scale max_auto_synth based on backlog size to drain faster.
+    # Cap at 10 per cycle to avoid excessive coordinator blocking time.
     local max_auto_synth=3
+    if [ "$unresolved_count" -gt 50 ]; then
+        max_auto_synth=10
+    elif [ "$unresolved_count" -gt 20 ]; then
+        max_auto_synth=5
+    fi
+    echo "[$(date -u +%H:%M:%S)] Auto-synthesis: will synthesize up to $max_auto_synth threads this cycle (backlog=$unresolved_count)"
+
+    local synth_count=0
 
     while IFS= read -r thread_id; do
         [ -z "$thread_id" ] && continue
@@ -3494,6 +3516,20 @@ auto_synthesize_recurring_debates() {
         elif echo "$parent_content" | grep -qi "v0.2 validation" && echo "$parent_content" | grep -qi "specialization routing"; then
             resolution="Synthesis: The v0.2 validation diagnostic 'specializedAssignments=0' is a known false alarm for older agents. Root cause: identity.sh update_specialization() historically wrote only to per-session S3 files, not canonical paths. PRs #1524 and #1527 fixed canonical file writes. After image rebuild, specializedAssignments should increment. If still 0 after rebuild: check coordinator routing logic reads canonical not per-session files. Old diagnostic messages citing 'none have specializationLabelCounts > 0' were based on sampling the wrong (alphabetically-first/oldest) S3 files. Auto-synthesized by coordinator (issue #1912)."
             topic="v0.2-specialization-routing"
+        # Pattern 3: "score=N/10 self-improvement audit" (non-10/10 vision scores) — issue #1976
+        # These are informational planner audit insights that accumulate in unresolvedDebates.
+        # They are informational rather than debatable — synthesize to acknowledge the audit.
+        elif echo "$parent_content" | grep -qi "self-improvement audit" && echo "$parent_content" | grep -qiE "score=[0-9]/10"; then
+            local score
+            score=$(echo "$parent_content" | grep -ioE "score=[0-9]/10" | head -1 || echo "score=?/10")
+            resolution="Synthesis: Planner vision audit ($score) acknowledged. Vision score should reflect what was built (visionScore guide: 3-5=bug fixes, 7=platform capabilities, 10=foundational swarms/memory/identity). The audit confirms the civilization is actively measuring alignment. No action required — this is a health signal. Auto-synthesized by coordinator (issue #1976)."
+            topic="vision-score-audit"
+        # Pattern 4: Generic "What I did" agent insights — informational thoughts that accumulate
+        # in unresolvedDebates because they contain debatable claims but nobody synthesizes them.
+        # These are not genuinely unresolved — they are knowledge transfer thoughts. Issue #1976.
+        elif echo "$parent_content" | grep -qi "^What I did:" || echo "$parent_content" | grep -qi "^What I found:"; then
+            resolution="Synthesis: Agent work report acknowledged by civilization memory. Key insights from this agent's run are noted for successor awareness. These 'What I did' thoughts are knowledge transfer records, not open debates — they serve as predecessor mentorship signals. Future agents should read these via PREDECESSOR_BLOCK in their prompt rather than re-debating them. Auto-synthesized by coordinator (issue #1976)."
+            topic="agent-work-report"
         fi
 
         if [ -n "$resolution" ]; then
