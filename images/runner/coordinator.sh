@@ -618,7 +618,11 @@ refresh_task_queue() {
     fi
 
     local issues_json
-    issues_json=$(gh api "/repos/${GITHUB_REPO}/issues?state=open&per_page=50" 2>/dev/null) || true
+    # Issue #1994: Use --paginate to fetch ALL open issues (not just the first 50).
+    # GitHub REST API per_page max is 100. Without --paginate, issues beyond per_page
+    # are never queued. With --paginate, gh api fetches all pages and concatenates results.
+    # We also pipe through jq -s '.[0]' to merge paginated JSON arrays into a single array.
+    issues_json=$(gh api --paginate "/repos/${GITHUB_REPO}/issues?state=open&per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) || true
 
     [ -z "$issues_json" ] && return 0
 
@@ -720,7 +724,7 @@ refresh_task_queue() {
     numbers=$(echo "$issues_json" | jq -r '.[] |
         select(.pull_request == null) |
         select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
-        .number' 2>/dev/null | head -20)
+        .number' 2>/dev/null | head -50)
 
     for num in $numbers; do
         # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
