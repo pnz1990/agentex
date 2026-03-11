@@ -3163,43 +3163,50 @@ track_debate_activity() {
     local unresolved_count=0
     [ -n "$unresolved_threads" ] && unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . || echo "0")
 
-    # ── Issue #1916: Cap unresolvedDebates to max 50 entries ─────────────────
-    # When the backlog exceeds 50, auto-synthesize the oldest excess threads to
-    # prevent unbounded growth. Oldest = first entries in the comma-separated list
-    # (they were added earliest). Each auto-synthesized thread gets a coordinator
-    # synthesis Thought CR + S3 record so query_debate_outcomes() returns data.
-    local MAX_UNRESOLVED=50
-    if [ "$unresolved_count" -gt "$MAX_UNRESOLVED" ]; then
-        local excess=$(( unresolved_count - MAX_UNRESOLVED ))
-        echo "[$(date -u +%H:%M:%S)] Synthesis backlog: $unresolved_count threads > cap $MAX_UNRESOLVED — auto-synthesizing $excess oldest threads (issue #1916)"
+     # ── Issue #1916: Cap unresolvedDebates to max 50 entries ─────────────────
+     # When the backlog exceeds 50, auto-synthesize the oldest excess threads to
+     # prevent unbounded growth. Oldest = first entries in the comma-separated list
+     # (they were added earliest). Each auto-synthesized thread gets a coordinator
+     # synthesis Thought CR + S3 record so query_debate_outcomes() returns data.
+     local MAX_UNRESOLVED=50
+     if [ "$unresolved_count" -gt "$MAX_UNRESOLVED" ]; then
+         local excess=$(( unresolved_count - MAX_UNRESOLVED ))
+         echo "[$(date -u +%H:%M:%S)] Synthesis backlog: $unresolved_count threads > cap $MAX_UNRESOLVED — auto-synthesizing $excess oldest threads (issue #1916)"
 
-        # Prefetch existing S3 thread IDs (single LIST call, not per-thread)
-        local existing_synth_ids=""
-        existing_synth_ids=$(aws s3 ls "s3://${IDENTITY_BUCKET}/debates/" --region "$BEDROCK_REGION" 2>/dev/null \
-            | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
+         # Issue #1979: Per-cycle cap raised from 5 to 20 to allow convergence when backlog is large.
+         # Previous cap of 5 meant 36+ excess threads would take 7+ coordinator cycles (~3.5 min)
+         # to drain, during which new debates could be added faster than we drain them.
+         # At 20/cycle: each synthesis takes ~1-2s, so 20 syntheses = ~20-40s extra per cycle,
+         # still within acceptable bounds given the coordinator's 30s sleep.
+         local SYNTH_PER_CYCLE_CAP=20
 
-        local synth_written=0
-        local trimmed_threads="$unresolved_threads"
-        while IFS= read -r thread_id; do
-            [ -z "$thread_id" ] && continue
-            [ "$synth_written" -ge "$excess" ] && break
+         # Prefetch existing S3 thread IDs (single LIST call, not per-thread)
+         local existing_synth_ids=""
+         existing_synth_ids=$(aws s3 ls "s3://${IDENTITY_BUCKET}/debates/" --region "$BEDROCK_REGION" 2>/dev/null \
+             | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
 
-            # Derive S3 thread_id: sha256(parentRef)[0:16]
-            local s3_thread_id
-            s3_thread_id=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+         local synth_written=0
+         local trimmed_threads="$unresolved_threads"
+         while IFS= read -r thread_id; do
+             [ -z "$thread_id" ] && continue
+             [ "$synth_written" -ge "$excess" ] && break
 
-            # Skip if already recorded in S3
-            if echo " $existing_synth_ids " | grep -qF " ${s3_thread_id} "; then
-                # Remove from unresolved list since it's already synthesized in S3
-                trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
-                synth_written=$(( synth_written + 1 ))
-                continue
-            fi
+             # Derive S3 thread_id: sha256(parentRef)[0:16]
+             local s3_thread_id
+             s3_thread_id=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
 
-            # Post a coordinator-authored synthesis Thought CR
-            local synth_ts
-            synth_ts=$(date +%s)
-            kubectl_with_timeout 10 apply -f - <<SYNTH_EOF 2>/dev/null || true
+             # Skip if already recorded in S3
+             if echo " $existing_synth_ids " | grep -qF " ${s3_thread_id} "; then
+                 # Remove from unresolved list since it's already synthesized in S3
+                 trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
+                 synth_written=$(( synth_written + 1 ))
+                 continue
+             fi
+
+             # Post a coordinator-authored synthesis Thought CR
+             local synth_ts
+             synth_ts=$(date +%s)
+             kubectl_with_timeout 10 apply -f - <<SYNTH_EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Thought
 metadata:
@@ -3220,30 +3227,30 @@ spec:
     parentRef: ${thread_id}
 SYNTH_EOF
 
-            # Write synthesis outcome to S3 for query_debate_outcomes()
-            local ts_iso
-            ts_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            local json_payload
-            json_payload=$(printf '{"threadId":"%s","topic":"auto-synthesized","outcome":"synthesized","resolution":"Auto-synthesis by coordinator: thread unresolved beyond observation window. Original claim stands.","participants":["coordinator"],"timestamp":"%s","recordedBy":"coordinator"}' \
-                "$s3_thread_id" "$ts_iso")
-            echo "$json_payload" | aws s3 cp - "s3://${IDENTITY_BUCKET}/debates/${s3_thread_id}.json" \
-                --region "$BEDROCK_REGION" --content-type application/json 2>/dev/null && \
-                echo "[$(date -u +%H:%M:%S)] Auto-synthesized thread: $thread_id → S3 thread_id=$s3_thread_id" || \
-                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write auto-synthesis to S3: $s3_thread_id" >&2
+             # Write synthesis outcome to S3 for query_debate_outcomes()
+             local ts_iso
+             ts_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+             local json_payload
+             json_payload=$(printf '{"threadId":"%s","topic":"auto-synthesized","outcome":"synthesized","resolution":"Auto-synthesis by coordinator: thread unresolved beyond observation window. Original claim stands.","participants":["coordinator"],"timestamp":"%s","recordedBy":"coordinator"}' \
+                 "$s3_thread_id" "$ts_iso")
+             echo "$json_payload" | aws s3 cp - "s3://${IDENTITY_BUCKET}/debates/${s3_thread_id}.json" \
+                 --region "$BEDROCK_REGION" --content-type application/json 2>/dev/null && \
+                 echo "[$(date -u +%H:%M:%S)] Auto-synthesized thread: $thread_id → S3 thread_id=$s3_thread_id" || \
+                 echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write auto-synthesis to S3: $s3_thread_id" >&2
 
-            # Remove from unresolved list
-            trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
-            synth_written=$(( synth_written + 1 ))
+             # Remove from unresolved list
+             trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
+             synth_written=$(( synth_written + 1 ))
 
-            # Rate limit: max 5 auto-syntheses per cycle to avoid cluster overload
-            [ "$synth_written" -ge 5 ] && break
-        done <<< "$(echo "$unresolved_threads" | tr ',' '\n' | head -n "$excess")"
+             # Rate limit: cap per-cycle syntheses to avoid flooding the cluster
+             [ "$synth_written" -ge "$SYNTH_PER_CYCLE_CAP" ] && break
+         done <<< "$(echo "$unresolved_threads" | tr ',' '\n' | head -n "$excess")"
 
-        unresolved_threads="$trimmed_threads"
-        unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
-        echo "[$(date -u +%H:%M:%S)] After auto-synthesis: $unresolved_count unresolved threads remain (wrote $synth_written syntheses)"
-    fi
-    # ── End Issue #1916 ───────────────────────────────────────────────────────
+         unresolved_threads="$trimmed_threads"
+         unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+         echo "[$(date -u +%H:%M:%S)] After auto-synthesis: $unresolved_count unresolved threads remain (wrote $synth_written syntheses)"
+     fi
+     # ── End Issue #1916 ───────────────────────────────────────────────────────
 
     echo "[$(date -u +%H:%M:%S)] Unresolved debate threads: $unresolved_count"
     update_state "unresolvedDebates" "$unresolved_threads"
@@ -3257,7 +3264,10 @@ SYNTH_EOF
     # Cap: max 5 auto-syntheses per cycle to avoid flooding the thought stream.
     if [ "$unresolved_count" -gt 0 ] && [ -n "$all_cm" ]; then
         local auto_synth_ttl_seconds=14400  # 4 hours
-        local auto_synth_cap=5
+        # Issue #1979: Raised cap from 5 to 20 to match issue #1916 cap increase.
+        # The two auto-synthesis loops (#1915 and #1916) should have consistent caps to
+        # ensure stale debate threads can drain fast enough to stay below MAX_UNRESOLVED=50.
+        local auto_synth_cap=20
         local auto_synth_count=0
         local now_epoch
         now_epoch=$(date +%s)
