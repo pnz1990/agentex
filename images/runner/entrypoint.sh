@@ -1844,10 +1844,19 @@ proactive_consensus_scan() {
   if [ -n "$unresolved" ]; then
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
-      log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
-      file_proactive_issue "consensus" \
-        "debate backlog: $count unresolved debate threads need synthesis" \
-        "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
+      # Issue #1934: Dedup check — use stable keyword (not count-varying title) before filing.
+      # Without this, concurrent agents each file a new issue as the count changes each run.
+      local existing_consensus
+      existing_consensus=$(gh issue list --repo "$REPO" --state open \
+        --search "debate backlog unresolved debate threads need synthesis" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_consensus:-0}" -gt 0 ]; then
+        log "Consensus scan: debate-backlog issue already open — skipping duplicate (count=$count)"
+      else
+        log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
+        file_proactive_issue "consensus" \
+          "debate backlog: $count unresolved debate threads need synthesis" \
+          "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1859,8 +1868,8 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h" \
-        "debate backlog unresolved debate threads need synthesis"
+3. Update coordinator to prune debates older than 48h" || true
+      fi
       return 0
     fi
   fi
