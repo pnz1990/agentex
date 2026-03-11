@@ -1900,10 +1900,18 @@ proactive_coordinator_scan() {
       fi
     done
     if [ "$stale_count" -ge 1 ]; then
-      log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
-      file_proactive_issue "bug" \
-        "coordinator state: $stale_count assignments persisted >2h past job completion" \
-        "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
+      # Dedup check: use stable keyword (not count-varying title) — issue #1934
+      local existing_stale
+      existing_stale=$(gh issue list --repo "$REPO" --state open \
+        --search "coordinator state assignments persisted past job completion" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_stale:-0}" -gt 0 ]; then
+        log "Coordinator scan: stale-assignments issue already open — skipping duplicate"
+      else
+        log "Coordinator scan: found $stale_count very-stale assignments (>2h) — filing issue..."
+        file_proactive_issue "bug" \
+          "coordinator state: $stale_count assignments persisted >2h past job completion" \
+          "The coordinator has $stale_count assignments for agents whose Jobs completed >2 hours ago.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1915,7 +1923,8 @@ This issue was proactively filed by a domain specialist during systematic scan.
 ## Action Required
 1. Review \`cleanup_stale_assignments()\` in coordinator.sh
 2. Check coordinator logs for cleanup failures
-3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)"
+3. Verify coordinator heartbeat is current (check \`coordinator-state.lastHeartbeat\`)" || true
+      fi
       return 0
     fi
   fi
@@ -1930,10 +1939,18 @@ This issue was proactively filed by a domain specialist during systematic scan.
     heartbeat_epoch=$(date -d "$heartbeat" +%s 2>/dev/null || echo "$now_epoch")
     local heartbeat_age=$(( now_epoch - heartbeat_epoch ))
     if [ "$heartbeat_age" -gt 600 ]; then
-      log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
-      file_proactive_issue "bug" \
-        "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
-        "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
+      # Dedup check: use stable keyword — issue #1934
+      local existing_heartbeat
+      existing_heartbeat=$(gh issue list --repo "$REPO" --state open \
+        --search "coordinator liveness heartbeat stale coordinator may be stuck" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_heartbeat:-0}" -gt 0 ]; then
+        log "Coordinator scan: heartbeat-stale issue already open — skipping duplicate"
+      else
+        log "Coordinator scan: coordinator heartbeat is ${heartbeat_age}s old (>10min) — filing issue..."
+        file_proactive_issue "bug" \
+          "coordinator liveness: heartbeat stale by ${heartbeat_age}s — coordinator may be stuck" \
+          "The coordinator's \`lastHeartbeat\` is ${heartbeat_age} seconds old (threshold: 600s).
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1945,7 +1962,8 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
 ## Action Required
 1. Check coordinator pod status: \`kubectl get pods -n agentex -l app=coordinator\`
 2. Check coordinator logs for errors
-3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`"
+3. If stuck, restart: \`kubectl rollout restart deployment/coordinator -n agentex\`" || true
+      fi
       return 0
     fi
   fi
@@ -1959,10 +1977,18 @@ The coordinator updates \`lastHeartbeat\` every iteration (~30s). A stale heartb
     local debate_count
     debate_count=$(echo "$unresolved_debates" | tr ',' '\n' | grep -c '.' 2>/dev/null || echo "0")
     if [ "$debate_count" -gt 50 ]; then
-      log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
-      file_proactive_issue "enhancement" \
-        "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
-        "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
+      # Dedup check: stable keyword (not count-varying title) — issue #1934
+      local existing_debates
+      existing_debates=$(gh issue list --repo "$REPO" --state open \
+        --search "civilization health unresolved debates synthesis backlog" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_debates:-0}" -gt 0 ]; then
+        log "Coordinator scan: synthesis-backlog issue already open — skipping duplicate"
+      else
+        log "Coordinator scan: $debate_count unresolved debate threads (>50) — filing issue..."
+        file_proactive_issue "enhancement" \
+          "civilization health: $debate_count unresolved debates — synthesis backlog growing" \
+          "The coordinator reports $debate_count unresolved debate threads in \`unresolvedDebates\`.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1974,7 +2000,8 @@ The coordinator tracks unresolved debate threads and nudges agents to synthesize
 ## Action Required
 1. Spawn an agent specifically to synthesize the oldest unresolved threads
 2. Check if \`post_debate_response\` S3 writes are working (query_debate_outcomes returns data)
-3. Consider increasing synthesis frequency in agent instructions"
+3. Consider increasing synthesis frequency in agent instructions" || true
+      fi
       return 0
     fi
   fi
