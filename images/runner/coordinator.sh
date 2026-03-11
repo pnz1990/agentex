@@ -1302,6 +1302,267 @@ check_swarm_dissolution() {
     fi
 }
 
+# check_stuck_swarms — Recover swarms stuck in Forming phase due to circuit breaker (issue #1942)
+#
+# Problem: When a Swarm CR is created, the swarm-graph RGD spawns a planner Job once (backoffLimit=0).
+# If the circuit breaker fires on startup (active_jobs >= limit), the planner exits immediately before
+# doing any work. The swarm gets stuck in "Forming" forever — kro doesn't re-spawn the planner Job.
+#
+# Fix: This function detects swarms in Forming/Active phase where no active planner Job exists,
+# and that have been stuck for > STUCK_THRESHOLD_SECONDS seconds (to avoid racing during legitimate
+# circuit breaker events). It then spawns a new planner Job to restart the swarm.
+#
+# Safety guards:
+#   - Only runs when below circuit breaker limit (checks active job count before spawning)
+#   - Respects kill switch (agentex-killswitch ConfigMap)
+#   - Throttled: only respawns a given swarm once per 5 minutes (tracks last-respawn via CM annotation)
+#   - backoffLimit=0 on the new Job prevents cascade respawning
+#
+# Called every 10 iterations (~5 min) in the main coordinator loop.
+check_stuck_swarms() {
+    local STUCK_THRESHOLD_SECONDS=120  # 2 minutes — enough time for circuit breaker events to pass
+
+    # Check kill switch first
+    local kill_switch
+    kill_switch=$(kubectl_with_timeout 10 get configmap agentex-killswitch -n "$NAMESPACE" \
+        -o jsonpath='{.data.enabled}' 2>/dev/null || echo "false")
+    if [ "$kill_switch" = "true" ]; then
+        echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: kill switch active — skipping"
+        return 0
+    fi
+
+    # Read circuit breaker limit
+    local cb_limit
+    cb_limit=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.circuitBreakerLimit}' 2>/dev/null || echo "6")
+    if ! [[ "$cb_limit" =~ ^[0-9]+$ ]]; then cb_limit=6; fi
+
+    # Count active jobs — don't spawn if at or near capacity
+    local active_jobs
+    active_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+        2>/dev/null || echo "$cb_limit")
+    if [ "$active_jobs" -ge "$cb_limit" ]; then
+        echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: circuit breaker active ($active_jobs/$cb_limit) — skipping respawn"
+        return 0
+    fi
+
+    # Get ECR registry from constitution
+    local ecr_registry
+    ecr_registry=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+        -o jsonpath='{.data.ecrRegistry}' 2>/dev/null || echo "569190534191.dkr.ecr.us-west-2.amazonaws.com")
+
+    # Find swarm state ConfigMaps with phase != Disbanded
+    local swarm_states
+    swarm_states=$(kubectl_with_timeout 15 get configmaps -n "$NAMESPACE" \
+        -l "kro.run/instance-kind=Swarm" \
+        -o json 2>/dev/null || echo '{"items":[]}')
+
+    local swarm_count
+    swarm_count=$(echo "$swarm_states" | jq '.items | length' 2>/dev/null || echo "0")
+    [ "$swarm_count" -eq 0 ] && return 0
+
+    local respawned=0
+
+    while IFS=$'\t' read -r swarm_name phase creation_ts swarm_goal; do
+        [ -z "$swarm_name" ] && continue
+        [ "$phase" = "Disbanded" ] && continue
+
+        local swarm_ref="${swarm_name%-state}"
+
+        # Only respawn Forming swarms (Active swarms have workers running)
+        if [ "$phase" != "Forming" ]; then
+            continue
+        fi
+
+        # Check if swarm has been stuck long enough (creation_ts as proxy for stuck time)
+        local created_epoch now_epoch stuck_seconds
+        created_epoch=$(date -d "$creation_ts" +%s 2>/dev/null || echo "0")
+        now_epoch=$(date +%s)
+        stuck_seconds=$((now_epoch - created_epoch))
+
+        if [ "$stuck_seconds" -lt "$STUCK_THRESHOLD_SECONDS" ]; then
+            echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: swarm $swarm_ref only ${stuck_seconds}s old — too early to respawn (need ${STUCK_THRESHOLD_SECONDS}s)"
+            continue
+        fi
+
+        # Check if an active planner Job already exists for this swarm
+        local active_planner_jobs
+        active_planner_jobs=$(kubectl_with_timeout 10 get jobs -n "$NAMESPACE" \
+            -l "agentex/swarm=${swarm_ref},agentex/role=planner" \
+            -o json 2>/dev/null | \
+            jq '[.items[] | select(.status.completionTime == null and (.status.active // 0) > 0)] | length' \
+            2>/dev/null || echo "0")
+
+        if [ "$active_planner_jobs" -gt 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: swarm $swarm_ref has $active_planner_jobs active planner job(s) — not stuck"
+            continue
+        fi
+
+        # Check if we recently respawned this swarm (annotation check to prevent loop)
+        local last_respawn_ts
+        last_respawn_ts=$(kubectl_with_timeout 10 get configmap "$swarm_name" -n "$NAMESPACE" \
+            -o jsonpath='{.metadata.annotations.agentex/last-stuck-respawn}' 2>/dev/null || echo "")
+        if [ -n "$last_respawn_ts" ]; then
+            local last_respawn_epoch time_since_respawn
+            last_respawn_epoch=$(date -d "$last_respawn_ts" +%s 2>/dev/null || echo "0")
+            time_since_respawn=$((now_epoch - last_respawn_epoch))
+            if [ "$time_since_respawn" -lt 300 ]; then
+                echo "[$(date -u +%H:%M:%S)] check_stuck_swarms: swarm $swarm_ref was recently respawned (${time_since_respawn}s ago) — throttling"
+                continue
+            fi
+        fi
+
+        # STUCK SWARM DETECTED — spawn a new planner Job
+        echo "[$(date -u +%H:%M:%S)] STUCK SWARM DETECTED: $swarm_ref has been in phase=Forming for ${stuck_seconds}s with no active planner — respawning"
+
+        # Create task CR for the swarm planner (may already exist from initial creation; idempotent)
+        local task_name="task-${swarm_ref}-planner"
+        local safe_goal
+        safe_goal=$(echo "$swarm_goal" | head -c 200 | sed 's/"/\\"/g')
+        kubectl_with_timeout 10 apply -f - <<TASK_EOF 2>/dev/null || true
+apiVersion: kro.run/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${NAMESPACE}
+  labels:
+    agentex/swarm: ${swarm_ref}
+    agentex/role: planner
+spec:
+  title: "Swarm planner recovery: ${swarm_ref} (issue #1942)"
+  description: "Recovery spawn for stuck swarm. Goal: ${safe_goal}. Original planner exited due to circuit breaker. Continue swarm formation."
+  effort: "L"
+  assignedTo: "${swarm_ref}-planner-recovery"
+TASK_EOF
+
+        # Spawn a new planner Job with a recovery suffix timestamp
+        local ts
+        ts=$(date +%s)
+        local recovery_job_name="${swarm_ref}-planner-r${ts}"
+        local recovery_agent_name="${swarm_ref}-planner-r${ts}"
+
+        kubectl_with_timeout 10 apply -f - <<JOB_EOF 2>/dev/null
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${recovery_job_name}
+  namespace: ${NAMESPACE}
+  labels:
+    app: agentex-agent
+    agentex/role: planner
+    agentex/swarm: ${swarm_ref}
+    agentex/recovery: "true"
+spec:
+  ttlSecondsAfterFinished: 180
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: agentex-agent
+        agentex/role: planner
+        agentex/swarm: ${swarm_ref}
+        agentex/recovery: "true"
+    spec:
+      serviceAccountName: agentex-agent-sa
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ${ecr_registry}/agentex/runner:latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AGENT_NAME
+              value: ${recovery_agent_name}
+            - name: AGENT_ROLE
+              value: planner
+            - name: TASK_CR_NAME
+              value: ${task_name}
+            - name: SWARM_REF
+              value: ${swarm_ref}
+            - name: BEDROCK_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: agentModel
+                  optional: true
+            - name: BEDROCK_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: awsRegion
+            - name: REPO
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: githubRepo
+            - name: CLUSTER
+              valueFrom:
+                configMapKeyRef:
+                  name: agentex-constitution
+                  key: clusterName
+            - name: NAMESPACE
+              value: ${NAMESPACE}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentex-github-token
+                  key: token
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 2Gi
+JOB_EOF
+
+        local job_exit=$?
+        if [ "$job_exit" -eq 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] Spawned recovery planner Job ${recovery_job_name} for stuck swarm $swarm_ref"
+            # Annotate swarm state CM with respawn timestamp to throttle future respawns
+            kubectl_with_timeout 10 annotate configmap "$swarm_name" -n "$NAMESPACE" \
+                "agentex/last-stuck-respawn=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --overwrite 2>/dev/null || true
+            post_coordinator_thought "Stuck swarm recovery: spawned planner ${recovery_job_name} for ${swarm_ref}. Swarm was in phase=Forming for ${stuck_seconds}s with no active planner (circuit breaker exit at initial spawn). Goal: ${safe_goal}" "insight"
+            push_metric "StuckSwarmRecovered" 1 "Count" "Component=Coordinator"
+            respawned=$((respawned + 1))
+        else
+            echo "[$(date -u +%H:%M:%S)] WARNING: Failed to spawn recovery planner for stuck swarm $swarm_ref"
+        fi
+
+    done < <(echo "$swarm_states" | jq -r \
+        '.items[] | [
+            .metadata.name,
+            (.data.phase // "Forming"),
+            (.metadata.creationTimestamp // ""),
+            (.data.goal // "platform improvement")
+        ] | @tsv' 2>/dev/null)
+
+    if [ "$respawned" -gt 0 ]; then
+        echo "[$(date -u +%H:%M:%S)] Stuck swarm recovery: $respawned swarm(s) respawned"
+    fi
+}
+
 # track_active_swarms — Update coordinator-state.activeSwarms with live swarm summary (issue #1775)
 # v0.6 Swarm Intelligence observability: count non-Disbanded swarm state ConfigMaps and record
 # per-swarm summaries (name:goal:member-count) so check_v06_milestone() and civilization_status()
@@ -4559,6 +4820,14 @@ while true; do
     # This coordinator-driven check ensures timely cleanup regardless of agent state.
     if [ $((iteration % 10)) -eq 0 ]; then
         check_swarm_dissolution
+    fi
+
+    # Every 10 iterations (~5 min): recover swarms stuck in Forming phase (issue #1942)
+    # When circuit breaker fires during swarm planner startup, the planner exits with no work done.
+    # kro doesn't re-spawn the planner (backoffLimit=0). This check detects stuck Forming swarms
+    # (no active planner job, >2 min old) and spawns a recovery planner Job.
+    if [ $((iteration % 10)) -eq 0 ]; then
+        check_stuck_swarms
     fi
 
     # Every 5 iterations (~2.5 min): update activeSwarms field with live swarm summary (issue #1775)
