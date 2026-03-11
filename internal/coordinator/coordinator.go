@@ -12,6 +12,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/pnz1990/agentex/internal/audit"
 	"github.com/pnz1990/agentex/internal/config"
 	"github.com/pnz1990/agentex/internal/health"
 	k8sclient "github.com/pnz1990/agentex/internal/k8s"
@@ -31,6 +32,13 @@ type Coordinator struct {
 	running       atomic.Bool
 	metrics       *Metrics
 	healthMonitor *health.Monitor
+
+	// Completion tracking for coordinator-controlled spawning (#2061)
+	tracker                  *completionTracker
+	coordinatorSpawnsEnabled bool
+
+	// Audit logger for durable action trail (#2062)
+	auditLog *audit.Logger
 }
 
 // NewCoordinator creates a new Coordinator instance.
@@ -43,6 +51,7 @@ func NewCoordinator(client *k8sclient.Client, cfg *config.Config, logger *slog.L
 		githubFetcher: newHTTPGitHubFetcher(logger),
 		logger:        logger,
 		stopCh:        make(chan struct{}),
+		tracker:       newCompletionTracker(),
 	}
 }
 
@@ -57,6 +66,13 @@ func (c *Coordinator) WithMetrics(m *Metrics) *Coordinator {
 // coordinator main loop and stopped when the coordinator stops.
 func (c *Coordinator) WithHealthMonitor(m *health.Monitor) *Coordinator {
 	c.healthMonitor = m
+	return c
+}
+
+// WithAuditLogger attaches a durable audit logger (#2062).
+// If set, the coordinator logs dispatch, spawn, kill, and remediation decisions.
+func (c *Coordinator) WithAuditLogger(l *audit.Logger) *Coordinator {
+	c.auditLog = l
 	return c
 }
 
@@ -95,10 +111,19 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		c.logger.Error("early spawn slot reconciliation failed", "error", err)
 	}
 
+	// Read coordinator-spawns feature flag (#2061 Phase 2)
+	c.refreshCoordinatorSpawnsFlag(ctx)
+
 	// Start health monitor if configured (#2059)
 	if c.healthMonitor != nil {
 		go c.healthMonitor.Run(ctx)
 		c.logger.Info("health monitor started")
+	}
+
+	// Start audit logger if configured (#2062)
+	if c.auditLog != nil {
+		go c.auditLog.Start(ctx)
+		c.logger.Info("audit logger started")
 	}
 
 	ticker := time.NewTicker(c.config.HeartbeatInterval)
@@ -156,6 +181,14 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		tickErr = true
 	}
 
+	// Every 2 ticks: handle completed agents and optionally respawn (#2061)
+	if iteration%2 == 0 {
+		if err := c.handleCompletedAgents(ctx); err != nil {
+			c.logger.Error("handle completed agents failed", "error", err)
+			tickErr = true
+		}
+	}
+
 	// Every 3 ticks: tally governance votes
 	if iteration%3 == 0 {
 		if err := c.tallyGovernanceVotes(ctx); err != nil {
@@ -164,7 +197,7 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		}
 	}
 
-	// Every 4 ticks: reconcile spawn slots + cleanup active agents
+	// Every 4 ticks: reconcile spawn slots + cleanup active agents + remediate
 	if iteration%4 == 0 {
 		if err := c.reconcileSpawnSlots(ctx); err != nil {
 			c.logger.Error("spawn slot reconciliation failed", "error", err)
@@ -172,6 +205,10 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		}
 		if err := c.cleanupActiveAgents(ctx); err != nil {
 			c.logger.Error("cleanup active agents failed", "error", err)
+			tickErr = true
+		}
+		if err := c.runRemediation(ctx); err != nil {
+			c.logger.Error("remediation cycle failed", "error", err)
 			tickErr = true
 		}
 	}

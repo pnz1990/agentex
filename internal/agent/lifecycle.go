@@ -274,7 +274,18 @@ func PostReport(ctx context.Context, client *k8s.Client, namespace, agentName st
 }
 
 // SpawnSuccessor creates the next Task+Agent CR pair.
+// If AGENTEX_COORDINATOR_SPAWNS is set to "true" in the environment, this function
+// is a no-op — the coordinator handles all spawning decisions (#2061 Phase 2).
 func SpawnSuccessor(ctx context.Context, client *k8s.Client, namespace, currentAgent, role string) error {
+	// Phase 2 feature flag: coordinator is the sole spawner
+	if os.Getenv("AGENTEX_COORDINATOR_SPAWNS") == "true" {
+		slog.Info("coordinator-spawns mode: skipping self-perpetuation",
+			"agent", currentAgent,
+			"role", role,
+		)
+		return nil
+	}
+
 	ts := time.Now().Unix()
 	taskName := fmt.Sprintf("task-successor-%s-%d", currentAgent, ts)
 	agentName := fmt.Sprintf("agent-successor-%s-%d", currentAgent, ts)

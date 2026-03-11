@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pnz1990/agentex/internal/audit"
 )
 
 // GitHubIssueFetcher abstracts the GitHub API call to fetch open issues.
@@ -282,6 +284,17 @@ func (c *Coordinator) dispatchNextTask(ctx context.Context) error {
 		"agent", agentName,
 		"issue", issueNumber,
 	)
+
+	// Audit: record dispatch decision (#2062)
+	if c.auditLog != nil {
+		c.auditLog.Log(
+			audit.ActionDispatch,
+			"success",
+			fmt.Sprintf("agent=%s task=%s", agentName, taskName),
+			issueNumber,
+			0,
+		)
+	}
 
 	// Update metrics (#2058)
 	if c.metrics != nil {
