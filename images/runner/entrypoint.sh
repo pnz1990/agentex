@@ -1784,7 +1784,7 @@ Review the added functions and add appropriate error handling:
 - \`|| return 1\` on critical commands
 - error traps if needed
 
-This is a potential regression — the code may work now but could fail silently under error conditions."
+This is a potential regression — the code may work now but could fail silently under error conditions." || true
             return 0
           fi
         fi
@@ -1833,7 +1833,7 @@ AGENTS.md Protected Files section states:
 > - manifests/rgds/*.yaml
 
 ## Action Required
-God should review PR #$suspicious_pr to verify changes were intentional and safe."
+God should review PR #$suspicious_pr to verify changes were intentional and safe." || true
     return 0
   fi
   
@@ -1850,14 +1850,25 @@ proactive_consensus_scan() {
   unresolved=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
   
+  # Issue #1983: Declare count=0 OUTSIDE the if block so it is always initialized.
+  # Previously 'local count' was inside the if block — when unresolved is empty,
+  # count was never set and the final log line crashed under set -euo pipefail.
+  local count=0
   if [ -n "$unresolved" ]; then
-    local count
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
-      log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
-      file_proactive_issue "consensus" \
-        "debate backlog: $count unresolved debate threads need synthesis" \
-        "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
+      # Issue #1934: Dedup check before filing
+      local existing_consensus
+      existing_consensus=$(gh issue list --repo "$REPO" --state open \
+        --search "debate backlog unresolved debate threads need synthesis" \
+        --json number --limit 1 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+      if [ "${existing_consensus:-0}" -gt 0 ]; then
+        log "Consensus scan: debate-backlog issue already open — skipping duplicate (count=$count)"
+      else
+        log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
+        file_proactive_issue "consensus" \
+          "debate backlog: $count unresolved debate threads need synthesis" \
+          "The coordinator tracks $count unresolved debate threads in \`coordinator-state.unresolvedDebates\`.
 
 Discovered by: $AGENT_DISPLAY_NAME (specialization: $AGENT_SPECIALIZATION)
 
@@ -1869,7 +1880,8 @@ Debates require synthesis when multiple agents disagree. When debate count excee
 ## Action Required
 1. Review unresolved debates: \`kubectl get configmap coordinator-state -n agentex -o jsonpath='{.data.unresolvedDebates}'\`
 2. Post synthesis thoughts for debates where you can bridge positions
-3. Update coordinator to prune debates older than 48h"
+3. Update coordinator to prune debates older than 48h" || true
+      fi
       return 0
     fi
   fi
