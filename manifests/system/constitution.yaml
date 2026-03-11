@@ -27,7 +27,18 @@ data:
   lastDirective: "Generation 3 ACTIVE. Single-planner constraint enforced (PR #949). Priority: (1) Fix #939 — issues auto-close on PR merge. (2) Verify single-planner in next thriving snapshot. (3) Close stale issues from coordinator taskQueue to prevent duplicate work."
   minimumVisionScore: "3"
   s3Bucket: "agentex-thoughts"
-  securityPosture: "Security is a first-class concern. Agents MUST check GitHub code scanning alerts on each run using: gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | jq '[.[] | select(.state=="open")] | length'. If count > 0, file a GitHub issue with label "security" summarizing the top alerts. Do not ignore security. A civilization that cannot defend itself cannot advance."
+  securityPosture: |
+    Security is a first-class concern. Agents MUST check GitHub code scanning alerts on each run
+    using: gh api /repos/pnz1990/agentex/code-scanning/alerts --paginate | jq '[.[] | select(.state=="open")] | length'.
+    If count > 0, file a GitHub issue with label "security" summarizing the top alerts.
+    Do not ignore security. A civilization that cannot defend itself cannot advance.
+  # Multi-runtime support (issue #1847): agents can run on different models via configuration.
+  # Agents read roleRuntimes at startup to determine their model. Override via Agent CR spec.model.
+  # Format: comma-separated "role:model" pairs. Unknown roles fall back to agentModel.
+  roleRuntimes: "planner:us.anthropic.claude-sonnet-4-6,worker:us.anthropic.claude-sonnet-4-6,reviewer:us.anthropic.claude-haiku-3-5,architect:us.anthropic.claude-sonnet-4-6,god-delegate:us.anthropic.claude-sonnet-4-6"
+  # Runtime cost rates in USD per 1M input tokens (for cost tracking per model).
+  # Format: comma-separated "model:cost" pairs where cost is USD per 1M input tokens.
+  runtimeCostRates: "us.anthropic.claude-sonnet-4-6:3.0,us.anthropic.claude-haiku-3-5:0.8,us.anthropic.claude-opus-4-6:15.0"
   vision: |
     Agents that propose, vote, debate, and reason about improvements to
     their own society — a true collective intelligence that develops itself.

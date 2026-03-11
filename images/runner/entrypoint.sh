@@ -22,6 +22,12 @@ SPAWN_BLOCKED_BY_CIRCUIT_BREAKER="false"
 REPO="${REPO:-}"  # Will be overridden by constitution.githubRepo
 CLUSTER="${CLUSTER:-}"  # Will be overridden by constitution.clusterName
 BEDROCK_REGION="${BEDROCK_REGION:-}"  # Will be overridden by constitution.awsRegion
+# Issue #1847: Multi-runtime support — model resolved from roleRuntimes after constitution read.
+# BEDROCK_MODEL_OVERRIDE: explicit per-Agent CR override (from spec.model).
+# BEDROCK_MODEL: effective model used by this agent (resolved below after constitution read).
+# ROLE_RUNTIMES: constitution.roleRuntimes injected by agent-graph RGD (role:model CSV pairs).
+BEDROCK_MODEL_OVERRIDE="${BEDROCK_MODEL_OVERRIDE:-}"
+ROLE_RUNTIMES="${ROLE_RUNTIMES:-}"
 BEDROCK_MODEL="${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
 WORKSPACE="/workspace"
 MY_GENERATION=""  # Set after kubectl config (issue #566)
@@ -124,6 +130,41 @@ fi
 # Issue #1218: Re-export constitution-derived variables for helpers.sh accessibility.
 # These must be exported AFTER constitution reads so helpers.sh gets the final values.
 export REPO CLUSTER BEDROCK_REGION S3_BUCKET CIRCUIT_BREAKER_LIMIT
+
+# Issue #1847: Resolve effective BEDROCK_MODEL from roleRuntimes.
+# Priority order:
+#   1. BEDROCK_MODEL_OVERRIDE (explicit Agent CR spec.model — highest priority)
+#   2. ROLE_RUNTIMES lookup for this agent's role (constitution.roleRuntimes)
+#   3. agentModel from constitution
+#   4. Hard-coded default (backward compat fallback)
+resolve_bedrock_model() {
+  # Priority 1: explicit Agent CR override
+  if [ -n "${BEDROCK_MODEL_OVERRIDE:-}" ]; then
+    echo "$BEDROCK_MODEL_OVERRIDE"
+    return
+  fi
+  # Priority 2: per-role lookup from constitution.roleRuntimes
+  # Format: "planner:model-a,worker:model-b,reviewer:model-c"
+  if [ -n "${ROLE_RUNTIMES:-}" ]; then
+    local role_model
+    # Extract model for this agent's role using IFS-based parsing
+    IFS=',' read -ra RT_PAIRS <<< "$ROLE_RUNTIMES"
+    for pair in "${RT_PAIRS[@]}"; do
+      local rt_role="${pair%%:*}"
+      local rt_model="${pair#*:}"
+      if [ "$rt_role" = "$AGENT_ROLE" ] && [ -n "$rt_model" ]; then
+        echo "$rt_model"
+        return
+      fi
+    done
+  fi
+  # Priority 3: constitution agentModel (already read into BEDROCK_MODEL default)
+  # Priority 4: hard-coded default (already the BEDROCK_MODEL variable value)
+  echo "${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}"
+}
+BEDROCK_MODEL=$(resolve_bedrock_model)
+export BEDROCK_MODEL
+log "Runtime resolved: role=$AGENT_ROLE model=$BEDROCK_MODEL (override='${BEDROCK_MODEL_OVERRIDE:-none}' roleRuntimes='${ROLE_RUNTIMES:-not-set}')"
 
 ts() { date +%s; }
 
@@ -1264,6 +1305,7 @@ $(echo "$work_done" | sed 's/^/    /')
   generation: ${generation}
   exitCode: ${exit_code}
   specialization: '${specializations}'
+  model: "${BEDROCK_MODEL}"
 EOF
 ) || {
     log "ERROR: Failed to create Report CR $report_name: $err_output"
@@ -2946,7 +2988,10 @@ metadata:
 spec:
   role: "${role}"
   taskRef: "${task_ref}"
-  model: "${BEDROCK_MODEL}"
+  # Issue #1847: Leave model empty so child resolves from constitution.roleRuntimes.
+  # Only set explicitly when caller passes a model_override (not implemented yet in args).
+  # This ensures each agent gets the right model for its role, not its parent's model.
+  model: ""
   swarmRef: "${SWARM_REF}"
   priority: 5
 EOF
@@ -3049,8 +3094,10 @@ spec:
           value: "${CLUSTER}"
         - name: BEDROCK_REGION
           value: "${BEDROCK_REGION}"
-        - name: BEDROCK_MODEL
-          value: "${BEDROCK_MODEL}"
+        # Issue #1847: pass ROLE_RUNTIMES so child resolves its own model from roleRuntimes.
+        # Do NOT set BEDROCK_MODEL_OVERRIDE — let child pick model for its own role.
+        - name: ROLE_RUNTIMES
+          value: "${ROLE_RUNTIMES}"
         - name: SWARM_REF
           value: "${SWARM_REF}"
         - name: GITHUB_TOKEN  # secretKeyRef matches agent-graph.yaml live cluster config (issue #1657)
@@ -4769,16 +4816,41 @@ fi
 # Uses --watch with timeout for push notifications instead of polling.
 check_new_messages
 
-# ── 11.1. COST TRACKING (issue #607) ────────────────────────────────────────
+# ── 11.1. COST TRACKING (issue #607, #1847) ─────────────────────────────────
 # Emit estimated Bedrock cost for this agent run to enable budget monitoring.
-# Sonnet 4.5 pricing: ~$3/M input tokens, ~$15/M output tokens.
-# Average agent run: ~50K input + 10K output = $0.30/run.
-# This is an estimate - actual costs visible in AWS Cost Explorer.
+# Issue #1847: Cost rate is now model-aware (read from constitution.runtimeCostRates).
+# runtimeCostRates format: "model:cost_per_1M_input_tokens,..."
+# Average agent run: ~50K input + 10K output tokens.
 log "Emitting cost estimate metric..."
 
-ESTIMATED_COST_USD=0.30  # Conservative estimate per agent run
+# Resolve per-model cost rate from constitution (issue #1847)
+RUNTIME_COST_RATES="${RUNTIME_COST_RATES:-}"
+if [ -z "$RUNTIME_COST_RATES" ]; then
+  RUNTIME_COST_RATES=$(kubectl_with_timeout 10 get configmap agentex-constitution -n "$NAMESPACE" \
+    -o jsonpath='{.data.runtimeCostRates}' 2>/dev/null || echo "")
+fi
+
+MODEL_COST_PER_1M="3.0"  # Default: Sonnet pricing
+if [ -n "$RUNTIME_COST_RATES" ]; then
+  IFS=',' read -ra COST_PAIRS <<< "$RUNTIME_COST_RATES"
+  for pair in "${COST_PAIRS[@]}"; do
+    cost_model="${pair%%:*}"
+    cost_rate="${pair#*:}"
+    if [ "$cost_model" = "$BEDROCK_MODEL" ] && [ -n "$cost_rate" ]; then
+      MODEL_COST_PER_1M="$cost_rate"
+      break
+    fi
+  done
+fi
+
+# Estimate: ~50K input tokens = 0.05M, multiply by per-1M rate
+ESTIMATED_COST_USD=$(awk "BEGIN {printf \"%.4f\", 0.05 * ${MODEL_COST_PER_1M}}" 2>/dev/null || echo "0.15")
 push_metric "BedrockCostEstimate" "$ESTIMATED_COST_USD" "None"  # Unit=None for currency
-log "Cost estimate: \$$ESTIMATED_COST_USD USD (model: $BEDROCK_MODEL)"
+# Issue #1847: per-model cost metric for A/B comparison across runtimes
+# CloudWatch dimension: ModelName allows filtering cost by model in dashboards
+MODEL_SHORT=$(echo "$BEDROCK_MODEL" | sed 's/us\.anthropic\.//' | sed 's/\./_/g')
+push_metric "BedrockCostByModel" "$ESTIMATED_COST_USD" "None" "ModelName=${MODEL_SHORT}" 2>/dev/null || true
+log "Cost estimate: \$$ESTIMATED_COST_USD USD (model: $BEDROCK_MODEL, rate: \$${MODEL_COST_PER_1M}/1M tokens)"
 
 # ── 11.2. SELF-IMPROVEMENT AUDIT (issue #22, updated by #1283) ───────────────
 # Audit whether the agent fulfilled Prime Directive step ②: find and fix a platform improvement.

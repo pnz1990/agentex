@@ -9,7 +9,11 @@ spec:
     spec:
       role: string | default="worker"
       taskRef: string | required=true
-      model: string | default="us.anthropic.claude-sonnet-4-6"
+      # model: AI model identifier (issue #1847 — multi-runtime support).
+      # Overrides the role-default model from constitution.roleRuntimes.
+      # Empty string means "use role default from constitution.roleRuntimes".
+      # Examples: "us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-haiku-3-5"
+      model: string | default=""
       swarmRef: string | default=""
       priority: integer | default=5
       imageRegistry: string | default="569190534191.dkr.ecr.us-west-2.amazonaws.com"
@@ -91,13 +95,23 @@ spec:
                       value: ${schema.spec.taskRef}
                     - name: SWARM_REF
                       value: ${schema.spec.swarmRef}
-                    - name: BEDROCK_MODEL
+                    # BEDROCK_MODEL: explicit model override from Agent CR spec.model (issue #1847).
+                    # Empty means entrypoint.sh will resolve from constitution.roleRuntimes.
+                    - name: BEDROCK_MODEL_OVERRIDE
                       value: ${schema.spec.model}
                     - name: BEDROCK_REGION
                       valueFrom:
                         configMapKeyRef:
                           name: agentex-constitution
                           key: awsRegion
+                    # ROLE_RUNTIMES: per-role model config from constitution (issue #1847).
+                    # entrypoint.sh reads this to resolve the effective model for each role.
+                    - name: ROLE_RUNTIMES
+                      valueFrom:
+                        configMapKeyRef:
+                          name: agentex-constitution
+                          key: roleRuntimes
+                          optional: true
                     - name: REPO
                       valueFrom:
                         configMapKeyRef:
