@@ -679,7 +679,7 @@ refresh_task_queue() {
         select(.title | test("\\[GOD-REPORT\\]|\\[GOD-DELEGATE\\]"; "i") | not) |
         .number' 2>/dev/null | head -20)
 
-    for num in $numbers; do
+     for num in $numbers; do
         # Issue #1384: Skip issues that already have an open PR to prevent duplicate work.
         if echo " $covered_issues " | grep -q " $num "; then
             echo "[$(date -u +%H:%M:%S)] Issue #1384: Skipping issue #$num — open PR already exists"
@@ -689,6 +689,15 @@ refresh_task_queue() {
         # Score based on labels already fetched (avoid extra API calls)
         local labels
         labels=$(echo "$issues_json" | jq -r --argjson n "$num" '.[] | select(.pull_request == null) | select(.number == $n) | [.labels[].name] | join(",")' 2>/dev/null || echo "")
+
+        # Issue #1966: Skip issues with the "god-locked" label — these are locked by god directive
+        # and agents must not implement them. God applies this label to prevent wasted work on
+        # epics that require scaffolding (e.g., v1.0 Go rewrites). This check uses labels already
+        # fetched from the bulk issues query — no extra API calls needed.
+        if echo "$labels" | grep -q "god-locked"; then
+            echo "[$(date -u +%H:%M:%S)] Issue #1966: Skipping issue #$num — has god-locked label (directive violation prevention)"
+            continue
+        fi
 
         # Issue #1442: Accumulate label data for issueLabels cache (only for labeled issues)
         if [ -n "$labels" ]; then
@@ -4703,6 +4712,12 @@ route_tasks_by_specialization() {
         if [ -z "$issue_labels" ]; then
             issue_labels=$(gh issue view "$issue_num" --repo "${GITHUB_REPO}" \
                 --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+        fi
+
+        # Issue #1966: Skip issues with the "god-locked" label — locked by god directive.
+        if echo "$issue_labels" | grep -q "god-locked"; then
+            echo "[$(date -u +%H:%M:%S)] Issue #1966: Skipping routing for issue #$issue_num — has god-locked label"
+            continue
         fi
 
         # Find best specialized agent
