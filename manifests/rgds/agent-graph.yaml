@@ -16,6 +16,7 @@ spec:
       clusterName: string | default="agentex"
       useSpot: boolean | default=false  # Workers can use spot for ~70% cost reduction (issue #20)
       capacityType: string | default="on-demand"  # "on-demand" or "spot" — controls Karpenter scheduling
+      useGoAgent: string | default="false"  # Set to "true" to use the Go agent entrypoint instead of bash
     status:
       jobName: ${agentJob.metadata.name}
       # completionTime replaced with string proxy — metav1.Time causes kro deep-copy panic
@@ -112,6 +113,8 @@ spec:
                         secretKeyRef:
                           name: agentex-github-token
                           key: token
+                    - name: AGENTEX_USE_GO  # Feature flag: "true" dispatches to Go binary, "false" uses bash entrypoint
+                      value: ${schema.spec.useGoAgent}
                   resources:
                     requests:
                       memory: "512Mi"

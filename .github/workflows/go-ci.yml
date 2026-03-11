@@ -8,7 +8,10 @@ on:
       - 'go.sum'
       - 'cmd/**'
       - 'internal/**'
+      - 'roles/**'
       - 'Makefile'
+      - 'images/runner/Dockerfile'
+      - 'images/coordinator-go/Dockerfile'
       - '.github/workflows/go-ci.yml'
   pull_request:
     paths:
@@ -16,7 +19,10 @@ on:
       - 'go.sum'
       - 'cmd/**'
       - 'internal/**'
+      - 'roles/**'
       - 'Makefile'
+      - 'images/runner/Dockerfile'
+      - 'images/coordinator-go/Dockerfile'
       - '.github/workflows/go-ci.yml'
 
 jobs:
@@ -49,8 +55,14 @@ jobs:
           go-version: '1.25'
           cache: true
 
+      - name: Build agent binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent/
+
       - name: Build coordinator binary
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/coordinator ./cmd/coordinator/
 
-      - name: Build Docker image
+      - name: Build coordinator-go Docker image
         run: docker build -t agentex/coordinator-go:test -f images/coordinator-go/Dockerfile .
+
+      - name: Build runner Docker image (Go stage only)
+        run: docker build --target go-builder -t agentex/runner-go-builder:test -f images/runner/Dockerfile .

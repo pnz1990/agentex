@@ -1,6 +1,15 @@
 #!/bin/bash
 set -uo pipefail
 
+# ── Go coordinator dispatch ────────────────────────────────────────────────
+# When AGENTEX_USE_GO_COORDINATOR=true, bypass the entire bash coordinator
+# and exec the Go binary. The Go coordinator handles: reconciliation loop,
+# state management, agent lifecycle, health monitoring — all in tested Go.
+if [ "${AGENTEX_USE_GO_COORDINATOR:-false}" = "true" ] && [ -x /usr/local/bin/agentex-coordinator ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [coordinator] Dispatching to Go coordinator binary" >&2
+  exec /usr/local/bin/agentex-coordinator --namespace="${NAMESPACE:-agentex}"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # COORDINATOR — The Civilization's Persistent Brain
 # ═══════════════════════════════════════════════════════════════════════════

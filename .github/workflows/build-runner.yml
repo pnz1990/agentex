@@ -5,9 +5,19 @@ on:
     branches: [main]
     paths:
       - 'images/runner/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'roles/**'
   pull_request:
     paths:
       - 'images/runner/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'roles/**'
 
 env:
   AWS_REGION: us-west-2
@@ -36,10 +46,13 @@ jobs:
 
       - name: Build image
         run: |
+          # Build context is repo root (not images/runner/) because the Dockerfile
+          # has a Go build stage that needs access to go.mod, cmd/, internal/, roles/
           docker build \
             -t $ECR_REGISTRY/$ECR_REPO:${{ github.sha }} \
             -t $ECR_REGISTRY/$ECR_REPO:latest \
-            images/runner/
+            -f images/runner/Dockerfile \
+            .
 
       - name: Scan with Trivy
         uses: aquasecurity/trivy-action@master
