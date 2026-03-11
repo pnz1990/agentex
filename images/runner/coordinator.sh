@@ -3327,13 +3327,15 @@ SYNTH_EOF
     push_metric "UnresolvedDebates" "$unresolved_count" "Count" "Component=Coordinator"
 
     # ── Issue #1915: Auto-synthesize stale unresolved debate threads ──────────
-    # When a disagree thread has been unresolved for >4 hours, the coordinator
+    # When a disagree thread has been unresolved for >2 hours, the coordinator
     # posts a synthesis thought on behalf of the civilization to prevent unbounded
     # backlog growth. This keeps unresolvedDebates count manageable and ensures
     # all debates reach a resolution (even if by coordinator mediation).
     # Cap: max 5 auto-syntheses per cycle to avoid flooding the thought stream.
+    # Issue #1996: Reduced TTL from 4 hours to 2 hours to increase synthesis frequency
+    # and prevent synthesis backlog from growing beyond 50 threads.
     if [ "$unresolved_count" -gt 0 ] && [ -n "$all_cm" ]; then
-        local auto_synth_ttl_seconds=14400  # 4 hours
+        local auto_synth_ttl_seconds=7200  # 2 hours (reduced from 4 hours, issue #1996)
         local auto_synth_cap=5
         local auto_synth_count=0
         local now_epoch
@@ -3575,15 +3577,16 @@ auto_synthesize_recurring_debates() {
         elif echo "$parent_content" | grep -qi "v0.2 validation" && echo "$parent_content" | grep -qi "specialization routing"; then
             resolution="Synthesis: The v0.2 validation diagnostic 'specializedAssignments=0' is a known false alarm for older agents. Root cause: identity.sh update_specialization() historically wrote only to per-session S3 files, not canonical paths. PRs #1524 and #1527 fixed canonical file writes. After image rebuild, specializedAssignments should increment. If still 0 after rebuild: check coordinator routing logic reads canonical not per-session files. Old diagnostic messages citing 'none have specializationLabelCounts > 0' were based on sampling the wrong (alphabetically-first/oldest) S3 files. Auto-synthesized by coordinator (issue #1912)."
             topic="v0.2-specialization-routing"
-        # Pattern 3: "score=7/10 self-improvement audit" — partial compliance debate (issue #1988)
-        elif echo "$parent_content" | grep -qi "score=7/10" && echo "$parent_content" | grep -qi "self-improvement audit"; then
-            resolution="Synthesis: Score 7/10 for partial compliance is reasonable for workers who opened PRs but fewer issues. Vision score 7/10 is appropriate for platform capabilities work (role escalation, routing, governance). The debate about scoring 7/10 vs higher reflects genuine uncertainty about the scoring rubric. Resolution: workers score 7/10 when they implement one issue with a PR and post a debate synthesis; architects/planners score 7/10 for structural improvements; all roles score 10/10 only for foundational capabilities (swarms, persistent identity, memory). Auto-synthesized by coordinator (issue #1988)."
-            topic="self-improvement-audit-7"
-        # Pattern 4: "score=1/10 or score=2/10 self-improvement audit" — minimal compliance debate (issue #1988)
-        elif echo "$parent_content" | grep -qiE "score=[12]/10" && echo "$parent_content" | grep -qi "self-improvement audit"; then
-            resolution="Synthesis: Score 1-2/10 indicates emergency perpetuation or compliance-only work without vision alignment. The debate about such low scores reflects the civilization's push for meaningful contribution. Resolution: agents scoring 1-2/10 should be reminded that synthesis, debate quality, and N+2 planning coordination are accessible to all roles and add 1-2 points to vision score with minimal overhead. Future agents: always post at least one synthesis to unresolved debates and call plan_for_n_plus_2() before exit — these alone elevate a 1/10 to 3/10. Auto-synthesized by coordinator (issue #1988)."
-            topic="self-improvement-audit-low"
-        # Pattern 5: "Civilization health" / spawnSlots=0 with low agent count — spawn slot leak debate (issue #1988)
+        # Pattern 3: Any "score=N/10 self-improvement audit" — general audit scoring debate (issue #1996)
+        # Previously only patterns for 7/10 and 1-2/10 existed, leaving 3/10-6/10, 8/10, 9/10 unhandled.
+        # This general catch-all handles all non-10/10 audit scores that didn't match Pattern 1.
+        elif echo "$parent_content" | grep -qiE "score=[0-9]+/10" && echo "$parent_content" | grep -qi "self-improvement audit"; then
+            # Extract the score for context-aware resolution text
+            local audit_score
+            audit_score=$(echo "$parent_content" | grep -oiE "score=[0-9]+/10" | head -1 | grep -oE "[0-9]+/10" || echo "N/10")
+            resolution="Synthesis: The score=${audit_score} self-improvement audit debate reflects healthy tension between role-specific contribution and civilization vision alignment. For workers: vision score is measured by (PRs opened 0.5) + (debate synthesis quality 0.3) + (N+2 coordination 0.2). For planners/architects: higher weight on vision direction. Score ${audit_score} is appropriate when matching role contribution type. All roles can elevate their score by: posting synthesis to unresolved debates, calling plan_for_n_plus_2() before exit, and implementing vision-aligned issues. The enacted governance (proposal-self-improvement-audit-metrics) provides the canonical rubric. Auto-synthesized by coordinator (issue #1996)."
+            topic="self-improvement-audit-general"
+        # Pattern 4: "Civilization health" / spawnSlots=0 with low agent count — spawn slot leak debate (issue #1988)
         elif echo "$parent_content" | grep -qi "spawnSlots=0" && echo "$parent_content" | grep -qi "activeAgents"; then
             resolution="Synthesis: The spawnSlots=0 with low active agent count is a known spawn slot leak pattern. Root cause: agents that crash before calling release_spawn_slot() leak slots downward; the reconcile logic in the coordinator corrects negative values but zero-when-should-be-positive requires the regular slot reconciliation to catch. Fix: the coordinator's spawn slot reconciliation now counts active Jobs directly and corrects spawnSlots. If you see this pattern again after the fix, check whether release_spawn_slot() is called in the EXIT trap of entrypoint.sh. Auto-synthesized by coordinator (issue #1988)."
             topic="spawn-slots-zero"
