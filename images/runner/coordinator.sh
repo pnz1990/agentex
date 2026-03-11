@@ -654,6 +654,48 @@ refresh_task_queue() {
             echo "[$(date -u +%H:%M:%S)] Issue #1809: WARNING — $dup_count issue(s) have 2+ open PRs: ${dup_issues//$'\n'/ }"
             # Post a warning Thought CR so planners can identify duplicates to close
             post_coordinator_thought "DUPLICATE PR WARNING (issue #1809): The following issue(s) each have 2+ open PRs, creating duplicate work. Consider closing the older PR for each: ${dup_issues//$'\n'/ }" "insight"
+
+            # Issue #1999: Auto-close older duplicate PRs — keep the newest, close the rest.
+            # Guard: only close PRs created >30 minutes ago to avoid closing PRs still being pushed to.
+            local now_ts
+            now_ts=$(date +%s)
+            local auto_closed_count=0
+            while IFS= read -r dup_issue_num; do
+                [ -z "$dup_issue_num" ] && continue
+                # Get all open PRs referencing this issue, sorted by creation time (newest first)
+                local dup_pr_data
+                dup_pr_data=$(echo "$prs_json" | jq -r \
+                    --arg n "$dup_issue_num" \
+                    '[.[] | select(.body // "" | test("(C|c)loses? #\($n)\\b|(F|f)ixes? #\($n)\\b|(R|r)esolves? #\($n)\\b"))] |
+                     sort_by(.created_at) | reverse | .[1:] | .[] | "\(.number) \(.created_at)"' \
+                    2>/dev/null || true)
+                # dup_pr_data now contains all PRs except the newest (oldest to be closed)
+                while IFS=' ' read -r pr_num pr_created_at; do
+                    [ -z "$pr_num" ] && continue
+                    # Convert created_at to epoch for age check
+                    local pr_epoch
+                    pr_epoch=$(date -d "$pr_created_at" +%s 2>/dev/null || echo "0")
+                    local pr_age_secs=$(( now_ts - pr_epoch ))
+                    if [ "$pr_age_secs" -lt 1800 ]; then
+                        # Less than 30 minutes old — skip, agent may still be pushing
+                        echo "[$(date -u +%H:%M:%S)] Issue #1999: Skipping auto-close of PR #$pr_num (age=${pr_age_secs}s < 1800s grace window)"
+                        continue
+                    fi
+                    echo "[$(date -u +%H:%M:%S)] Issue #1999: Auto-closing older duplicate PR #$pr_num for issue #$dup_issue_num (age=${pr_age_secs}s)"
+                    if gh pr close "$pr_num" --repo "$GITHUB_REPO" \
+                        --comment "Auto-closed by coordinator (issue #1999): A newer open PR already covers issue #${dup_issue_num}. Keeping the most recently created PR to avoid duplicate work. If you believe this was closed in error, please reopen." \
+                        2>/dev/null; then
+                        auto_closed_count=$(( auto_closed_count + 1 ))
+                        echo "[$(date -u +%H:%M:%S)] Issue #1999: Auto-closed duplicate PR #$pr_num"
+                    else
+                        echo "[$(date -u +%H:%M:%S)] Issue #1999: WARNING — failed to auto-close PR #$pr_num (may lack permissions)"
+                    fi
+                done <<< "$dup_pr_data"
+            done <<< "$dup_issues"
+            if [ "$auto_closed_count" -gt 0 ]; then
+                echo "[$(date -u +%H:%M:%S)] Issue #1999: Auto-closed $auto_closed_count duplicate PR(s)"
+                post_coordinator_thought "AUTO-CLOSED $auto_closed_count duplicate PR(s) (issue #1999): Kept newest PR per issue, closed older duplicates to prevent waste. Issues affected: ${dup_issues//$'\n'/ }" "insight"
+            fi
         fi
     fi
 
