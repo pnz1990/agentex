@@ -204,14 +204,6 @@ ensure_state_fields_initialized() {
     fi
   done
 
-  # debateStats needs a valid structured value (not just empty string)
-  debate_stats=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.debateStats}' 2>/dev/null)
-  if [ -z "$debate_stats" ]; then
-    [ "$silent" = "false" ] && echo "  Initializing debateStats (was empty/null)"
-    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p '{"data":{"debateStats":"responses=0 threads=0 disagree=0 synthesize=0"}}' 2>/dev/null || true
-  fi
-
   # enactedDecisions needs preservation if exists, initialization if not
   enacted=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.enactedDecisions}' 2>/dev/null)
   if [ -z "$enacted" ]; then
@@ -290,14 +282,6 @@ ensure_state_fields_initialized() {
       -p '{"data":{"issueLabels":""}}' 2>/dev/null || true
   fi
 
-  # unresolvedDebates: comma-separated thread IDs for debates needing synthesis (issue #1111)
-  unresolved_debates_val=$(kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null)
-  if [ -z "$unresolved_debates_val" ]; then
-    [ "$silent" = "false" ] && echo "  Initializing unresolvedDebates (was empty/null)"
-    kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
-      -p '{"data":{"unresolvedDebates":""}}' 2>/dev/null || true
-  fi
-
   # spawnSlots: must be a non-negative integer (issue #1240 — negative value freezes civilization)
   # If missing or non-numeric (includes negative values like "-1"), reset to 0 as a safe floor.
   # reconcile_spawn_slots() (called separately) will correct 0 to the proper ground-truth value
@@ -357,7 +341,7 @@ ensure_state_fields_initialized() {
 
   # chronicleCandidates (issue #1605): semicolon-separated Thought ConfigMap names for
   # agent-proposed chronicle entries. Aggregated by aggregate_chronicle_candidates() every
-  # ~3 min (inside track_debate_activity). God-delegate reads this when writing the chronicle.
+  # ~3 min (aggregate_chronicle_candidates runs from main loop). God-delegate reads this when writing the chronicle.
    if ! kubectl get configmap "$STATE_CM" -n "$NAMESPACE" -o json 2>/dev/null | jq -e '.data | has("chronicleCandidates")' >/dev/null 2>&1; then
      [ "$silent" = "false" ] && echo "  Initializing chronicleCandidates (was absent)"
      kubectl patch configmap "$STATE_CM" -n "$NAMESPACE" --type=merge \
@@ -570,7 +554,6 @@ log_decision() {
 # the highest-impact issues first rather than picking arbitrarily.
 VISION_PRIORITY_LABELS=(
     "collective-intelligence:10"
-    "debate:10"
     "governance:9"
     "security:9"
     "identity:8"
@@ -1714,7 +1697,8 @@ track_active_swarms() {
 # TTLs match helpers.sh cleanup_old_thoughts / cleanup_old_messages:
 #   Thought low-signal (blocker, observation, decision, plan, planning): 2h TTL
 #   Thought high-signal (insight, debate, proposal, vote): 24h TTL
-# Issue #1662: align with PR #1627 fix — decision/plan/planning now use 2h TTL (was 24h)
+#   Note: debate type kept in TTL classification for backward compatibility
+#   (existing debate CRs should still be cleaned up on schedule)
 #   Messages (read): 24h TTL
 #   Messages (unread): 48h TTL
 #   Reports: 48h TTL
@@ -1803,49 +1787,10 @@ cleanup_old_cluster_resources() {
         echo "[$(date -u +%H:%M:%S)] Coordinator cleanup: removed $total_deleted stale CRs (thoughts+messages+reports)"
         push_metric "ClusterResourcesDeleted" "$total_deleted" "Count" "Component=Coordinator"
     fi
-
-    # Issue #1667: Prune orphaned entries from unresolvedDebates (parent CM was deleted)
-    prune_orphaned_unresolved_debates
 }
 
-# prune_orphaned_unresolved_debates — remove entries from unresolvedDebates that reference
-# deleted thought ConfigMaps (issue #1667). Called from cleanup_old_cluster_resources() every 30 min.
-#
-# When cleanup_old_thoughts() deletes old thought CMs, any debate thread ID stored in
-# unresolvedDebates whose parent CM is now gone becomes orphaned. This function filters them out.
-prune_orphaned_unresolved_debates() {
-    local current_unresolved
-    current_unresolved=$(kubectl_with_timeout 10 get configmap "$STATE_CM" -n "$NAMESPACE" \
-        -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || true)
-    [ -z "$current_unresolved" ] && return 0
-
-    # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
-    # N individual kubectl get calls (one per unresolved entry). With 98+ entries this
-    # is a significant performance improvement over the per-entry approach.
-    local existing_thought_names
-    existing_thought_names=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
-        -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
-
-    local pruned_count=0
-    local valid_entries=""
-    while IFS= read -r thread_id; do
-        [ -z "$thread_id" ] && continue
-        if echo " $existing_thought_names " | grep -qF " $thread_id "; then
-            [ -n "$valid_entries" ] \
-                && valid_entries="${valid_entries},${thread_id}" \
-                || valid_entries="$thread_id"
-        else
-            echo "[$(date -u +%H:%M:%S)] Pruning orphaned unresolvedDebate entry: $thread_id"
-            pruned_count=$((pruned_count + 1))
-        fi
-    done < <(echo "$current_unresolved" | tr ',' '\n')
-
-    if [ "$pruned_count" -gt 0 ]; then
-        update_state "unresolvedDebates" "$valid_entries"
-        echo "[$(date -u +%H:%M:%S)] Pruned $pruned_count orphaned entries from unresolvedDebates"
-        push_metric "OrphanedDebatesPruned" "$pruned_count" "Count" "Component=Coordinator"
-    fi
-}
+# prune_orphaned_unresolved_debates: REMOVED in foundational restructuring.
+# The unresolvedDebates tracking was removed along with the debate system.
 
 # Reconcile spawnSlots against actual running job count (leak recovery)
 # If agents crash before releasing slots, spawnSlots drifts low.
@@ -2164,7 +2109,7 @@ tally_and_enact_votes() {
      # (causes OOM kill — coordinator only has 512Mi limit)
      # Issue #1056: Filter to ONLY proposal/vote thoughts — no need to load 1800+ insight/planning/
      # observation thoughts that are irrelevant to governance tallying. This reduces memory by ~97%.
-     # Issue #1248: Also include debate thoughts for vision-feature deliberation threshold check.
+     # Foundational restructuring: removed debate type — debate tracking removed.
      # Issue #1407: Time-based filter — only load thoughts newer than lastTallyTimestamp to prevent
      # O(N) growth as Thought CRs accumulate. voteRegistry_* fields already cache running totals,
      # but we must reload ALL thoughts at least once to rebuild accurate totals after restart.
@@ -2213,7 +2158,7 @@ tally_and_enact_votes() {
 
      kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
          | jq --arg cutoff "$tally_cutoff_ts" '[.items[] |
-             select(.data.thoughtType == "proposal" or .data.thoughtType == "vote" or .data.thoughtType == "debate") |
+             select(.data.thoughtType == "proposal" or .data.thoughtType == "vote") |
              select(if $cutoff != "" then .metadata.creationTimestamp >= $cutoff else true end) | {
              agent: (.data.agentRef // "unknown"),
              content: (.data.content // ""),
@@ -2465,8 +2410,9 @@ tally_and_enact_votes() {
         fi
 
         # ISSUE #1248: Vision-feature proposals require DELIBERATION — not just votes.
-        # Civilization goal-changes must be debated before they can be enacted.
-        # Enforcement: (1) reasoned votes (votes with reason= OR reason: clause), (2) debate responses.
+        # Civilization goal-changes must have reasoned votes before they can be enacted.
+        # Foundational restructuring: removed debate response requirement (debate system removed).
+        # Kept: reasoned votes requirement to prevent rubber-stamp enactment.
         if [[ "$topic" == *"vision-feature"* || "$topic" == *"vision-queue"* ]]; then
             # Count votes that include a reason= or reason: clause.
             # Issue #1649: AGENTS.md instructs agents to use "reason: ..." format (colon),
@@ -2478,29 +2424,20 @@ tally_and_enact_votes() {
                 "$thoughts_file" 2>/dev/null | grep -c "reason[=:]" || true)
             [ -z "$reasoned_votes" ] && reasoned_votes=0
 
-            # Count debate responses (thoughts of type "debate") that mention this topic or vision
-            local debate_responses
-            debate_responses=$(jq -r ".[] | select(.type == \"debate\" and (.content | (test(\"vision|$topic\"; \"i\") or test(\"DEBATE\"; \"\")))) | .agent" \
-                "$thoughts_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
-            [ -z "$debate_responses" ] && debate_responses=0
-
             local vision_threshold_met=true
             local vision_block_reason=""
 
             if [ "$reasoned_votes" -lt 2 ]; then
                 vision_threshold_met=false
                 vision_block_reason="vision-feature requires at least 2 reasoned votes (with reason= or reason: clause), found $reasoned_votes"
-            elif [ "$debate_responses" -lt 1 ]; then
-                vision_threshold_met=false
-                vision_block_reason="vision-feature requires at least 1 debate response, found $debate_responses"
             fi
 
             if [ "$vision_threshold_met" = false ]; then
                 echo "[$(date -u +%H:%M:%S)] VISION-FEATURE DELIBERATION BLOCK: $vision_block_reason"
-                echo "[$(date -u +%H:%M:%S)] Votes: approve=$approve_votes (reasoned=$reasoned_votes) debates=$debate_responses"
+                echo "[$(date -u +%H:%M:%S)] Votes: approve=$approve_votes (reasoned=$reasoned_votes)"
                 push_metric "GovernanceBlocked" 1 "Count" "Topic=${topic},Reason=InsufficientDeliberation"
 
-                # Post a nudge thought to signal agents must debate before this can pass
+                # Post a nudge thought to signal agents must provide reasoned votes
                 kubectl_with_timeout 10 apply -f - <<NUDGE_EOF 2>/dev/null || true
 apiVersion: kro.run/v1alpha1
 kind: Thought
@@ -2515,14 +2452,13 @@ spec:
   content: |
     GOVERNANCE NUDGE: #proposal-${topic} has ${approve_votes} votes but needs deliberation.
     Blocked: ${vision_block_reason}
-    To unblock: post a #vote-${topic} approve reason=<your reasoning> AND
-    engage in debate (thoughtType=debate) about this vision change.
-    Civilization goal-changes require deliberation, not just votes.
+    To unblock: post a #vote-${topic} approve reason=<your reasoning>
+    Civilization goal-changes require reasoned votes, not just votes.
 NUDGE_EOF
                 continue
             fi
 
-            echo "[$(date -u +%H:%M:%S)] Vision-feature deliberation check PASSED: reasoned_votes=$reasoned_votes debate_responses=$debate_responses"
+            echo "[$(date -u +%H:%M:%S)] Vision-feature deliberation check PASSED: reasoned_votes=$reasoned_votes"
         fi
 
         # Enact if threshold reached
@@ -2908,141 +2844,9 @@ Vision score: 9/10 — prioritize implementation."
     cleanup_zombie_vote_registry_keys
 }
 
-# record_synthesis_debates_to_s3: Write synthesis debate thoughts to S3 for collective memory
-# Issue #1161: Coordinator is the authoritative S3 writer for debate outcomes because it sees
-# ALL synthesis thoughts, including manually-posted ones that bypass post_debate_response().
-#
-# Thread ID: sha256(parentRef)[0:16] — same algorithm as post_debate_response() in entrypoint.sh
-# S3 path: s3://${IDENTITY_BUCKET}/debates/<thread_id>.json
-# Idempotent: skips threads already written to S3
-record_synthesis_debates_to_s3() {
-    local s3_bucket="${IDENTITY_BUCKET:-agentex-thoughts}"
-    local namespace="${NAMESPACE:-agentex}"
-    # Issue #1585: Limit per-cycle S3 writes to prevent coordinator from blocking the main loop.
-    # Previously, 200+ synthesis debates caused 5-10 minute outages as each write is sequential.
-    # With limit=20 per cycle and 30s heartbeat interval, all debates are recorded within ~5 min.
-    local max_writes_per_cycle=20
-
-    # Fetch synthesis debate thoughts with FULL content (not truncated)
-    # Issue #1971: Use precise regex to only match TRUE synthesis stances.
-    # The old test("synthes(is|ize)"; "i") matched ANY debate that MENTIONED synthesis —
-    # including "disagree" responses that wrote "counter-proposal avoids synthesis" and
-    # "agree" responses that cited prior syntheses. This caused disagree/agree thoughts
-    # to be written to S3 with outcome="synthesized", corrupting debate history.
-    # Fix: only match "DEBATE RESPONSE [synthesize" or "DEBATE RESPONSE [synthesis" (the
-    # canonical formats used by post_debate_response() and agents). This avoids false positives
-    # where other stances mention the word "synthesis" in their reasoning.
-    local synthesis_thoughts
-    synthesis_thoughts=$(kubectl_with_timeout 10 get configmaps -n "$namespace" -l agentex/thought -o json 2>/dev/null \
-        | jq -r '[.items[] | select(.data.thoughtType == "debate") |
-            select((.data.content // "") | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i")) |
-            {
-                name: .metadata.name,
-                parent: (.data.parentRef // ""),
-                agent: (.data.agentRef // ""),
-                content: (.data.content // ""),
-                timestamp: .metadata.creationTimestamp
-            }]' 2>/dev/null) || return 0
-
-    [ -z "$synthesis_thoughts" ] || [ "$synthesis_thoughts" = "null" ] || [ "$synthesis_thoughts" = "[]" ] && return 0
-
-    local synth_count
-    synth_count=$(echo "$synthesis_thoughts" | jq 'length' 2>/dev/null || echo "0")
-    echo "[$(date -u +%H:%M:%S)] Checking $synth_count synthesis debates for S3 persistence (max $max_writes_per_cycle new writes per cycle)"
-
-    # Issue #1625: Prefetch all existing debate thread IDs with a SINGLE S3 LIST call before the loop.
-    # Previous approach (issue #1606 fix) made one aws s3 ls per debate inside the loop —
-    # with 250+ debates that is still ~250 LIST API calls per 2.5-minute cycle (~144,000/day, ~$0.07/day).
-    # Fix: one prefix LIST outside the loop, then grep for membership (zero API calls per debate).
-    # S3 LIST cost: $0.0004/1000 calls → 576 prefix LIST calls/day = ~$0.0002/day (negligible).
-    local existing_thread_ids=""
-    existing_thread_ids=$(aws s3 ls "s3://${s3_bucket}/debates/" --region "${BEDROCK_REGION:-us-west-2}" 2>/dev/null \
-        | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
-
-    local idx=0
-    local writes_this_cycle=0
-    local skipped_existing=0
-    while [ "$idx" -lt "$synth_count" ]; do
-        local thought_name parent_ref agent_name content timestamp
-        thought_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].name" 2>/dev/null || echo "")
-        parent_ref=$(echo "$synthesis_thoughts" | jq -r ".[$idx].parent" 2>/dev/null || echo "")
-        agent_name=$(echo "$synthesis_thoughts" | jq -r ".[$idx].agent" 2>/dev/null || echo "coordinator")
-        content=$(echo "$synthesis_thoughts" | jq -r ".[$idx].content" 2>/dev/null || echo "")
-        timestamp=$(echo "$synthesis_thoughts" | jq -r ".[$idx].timestamp" 2>/dev/null || echo "")
-
-        # Use same thread_id algorithm as post_debate_response() in entrypoint.sh
-        # thread_id = sha256(parent_thought_name)[0:16]
-        local raw_parent="${parent_ref:-${thought_name}}"
-        local thread_id
-        thread_id=$(echo "$raw_parent" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-
-        local s3_path="s3://${s3_bucket}/debates/${thread_id}.json"
-
-        # Issue #1625: Check membership in prefetched list (no S3 API call per debate).
-        # The existing_thread_ids list was fetched once above — grep for the thread_id in it.
-        if echo " $existing_thread_ids " | grep -qF " ${thread_id} "; then
-            # Already written — skip (no count increment)
-            skipped_existing=$((skipped_existing + 1))
-            idx=$((idx + 1))
-            continue
-        fi
-
-        if [ "$writes_this_cycle" -ge "$max_writes_per_cycle" ]; then
-            echo "[$(date -u +%H:%M:%S)] Reached per-cycle write limit ($max_writes_per_cycle) — remaining NEW debates will be written next cycle"
-            break
-        fi
-
-        # Extract topic from thought content (look for #proposal- or common keywords)
-        local topic=""
-        if echo "$content" | grep -qi "circuit.breaker"; then
-            topic="circuit-breaker"
-        elif echo "$content" | grep -qi "spawn"; then
-            topic="spawn-control"
-        elif echo "$content" | grep -qi "speciali"; then
-            topic="specialization"
-        elif echo "$content" | grep -qi "debate"; then
-            topic="debate-protocol"
-        elif echo "$content" | grep -qi "coordinator"; then
-            topic="coordinator"
-        fi
-
-        # Truncate content to first 500 chars for resolution field
-        local resolution
-        resolution=$(echo "$content" | head -c 500)
-
-        # Escape JSON special characters in resolution text
-        local escaped_resolution
-        # Issue #1260: Add 2>/dev/null to suppress jq parse errors on unexpected input
-        escaped_resolution=$(echo "$resolution" | jq -Rs '.' 2>/dev/null || echo '""')
-
-        # Build JSON document
-        local debate_json
-        debate_json=$(cat <<EOF
-{
-  "threadId": "$thread_id",
-  "topic": "$topic",
-  "outcome": "synthesized",
-  "resolution": $escaped_resolution,
-  "participants": ["$agent_name"],
-  "timestamp": "$timestamp",
-  "recordedBy": "coordinator",
-  "thoughtName": "$thought_name",
-  "parentRef": "$parent_ref"
-}
-EOF
-)
-        # Write to S3
-        if echo "$debate_json" | aws s3 cp - "$s3_path" --content-type application/json >/dev/null 2>&1; then
-            echo "[$(date -u +%H:%M:%S)] Recorded synthesis debate: thread=$thread_id agent=$agent_name topic=$topic"
-            writes_this_cycle=$((writes_this_cycle + 1))
-        else
-            echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write debate outcome for thread=$thread_id"
-        fi
-
-        idx=$((idx + 1))
-    done
-    echo "[$(date -u +%H:%M:%S)] Synthesis debate S3 sync: $writes_this_cycle new writes, $skipped_existing already-persisted skipped, 1 prefix LIST call (${synth_count} total synthesis debates)"
-}
+# record_synthesis_debates_to_s3: REMOVED in foundational restructuring.
+# Debate S3 persistence was part of the self-referential fix loop overhead.
+# Existing S3 debate records are preserved but no longer actively written.
 
 # ── aggregate_chronicle_candidates (issue #1605) ──────────────────────────────
 #
@@ -3093,620 +2897,16 @@ aggregate_chronicle_candidates() {
     update_state "chronicleCandidates" "$top_candidates"
 }
 
-# Track debate activity — count debate threads, surface unresolved disagreements
-track_debate_activity() {
-    local all_cm
-    # Issue #687: Use kubectl_with_timeout to prevent 120s hangs during cluster connectivity issues
-    # Issue #1011: Use label selector -l agentex/thought to avoid fetching all 9000+ configmaps
-    # (causes OOM kill — coordinator only has 512Mi limit)
-    # Issue #1056: Filter to ONLY debate-relevant thoughts (debate, insight, decision) to reduce
-    # memory footprint. Observation/blocker/planning thoughts are not useful for debate tracking.
-    all_cm=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" -l agentex/thought -o json 2>/dev/null \
-        | jq '[.items[] | select(.data.thoughtType == "debate" or .data.thoughtType == "insight" or .data.thoughtType == "decision" or .data.thoughtType == "proposal") | {
-            name: .metadata.name,
-            type: (.data.thoughtType // ""),
-            parent: (.data.parentRef // ""),
-            agent: (.data.agentRef // ""),
-            content: ((.data.content // "") | .[0:100]),
-            createdAt: .metadata.creationTimestamp
-          }]' 2>/dev/null) || return 0
+# track_debate_activity: REMOVED in foundational restructuring.
+# The entire debate tracking system (counting threads, nudging agents to synthesize,
+# auto-synthesizing stale threads, writing to S3) was the primary driver of the
+# self-referential fix loop. Agents spent most of their time debating about debating.
+# aggregate_chronicle_candidates() is now called directly from the main loop.
 
-    [ -z "$all_cm" ] || [ "$all_cm" = "null" ] || [ "$all_cm" = "[]" ] && return 0
-
-    # Count debate responses
-    local debate_count
-    debate_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate")] | length' 2>/dev/null || echo "0")
-
-    # Count unique debate threads (thoughts with a non-empty parentRef)
-    local thread_count
-    thread_count=$(echo "$all_cm" | jq '[.[] | select(.parent != "" and .parent != null)] | length' 2>/dev/null || echo "0")
-
-     # Find unresolved disagreements (debate thoughts with stance "disagree" that have no "synthesize" sibling)
-     # Issue #1096: Use case-insensitive regex to catch all disagreement patterns (disagree, DISAGREE, Disagree)
-     # Issue #1899: Improved regex to detect disagree STANCE specifically:
-     #   - "DEBATE RESPONSE [.*disagree" — standard format
-     #   - "^DISAGREE:" — all-caps format
-     #   - "^I disagree" — informal format
-     # This prevents false positives where "agree" stances mention the word "disagree" in their reasoning.
-     local disagree_count
-     disagree_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[.*disagree|^DISAGREE:|^I disagree|\\[disagree"; "i"))] | length' 2>/dev/null || echo "0")
-    # Issue #1971: Use precise regex for synthesis count — only count true synthesis stances.
-    # "DEBATE RESPONSE [synthesize/synthesis]" is the canonical format. This avoids counting
-    # agree/disagree thoughts that happen to mention the word "synthesis" in their reasoning.
-    # Note: synthesize_count is used for stats display and for triggering S3 sync — both
-    # benefit from precision (avoids unnecessary S3 LIST calls when count is artificially high).
-    local synthesize_count
-    synthesize_count=$(echo "$all_cm" | jq '[.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i"))] | length' 2>/dev/null || echo "0")
-
-    echo "[$(date -u +%H:%M:%S)] Debate stats: responses=$debate_count threads=$thread_count disagree=$disagree_count synthesize=$synthesize_count"
-
-    # ── Issue #1161: Write synthesis debate outcomes to S3 for collective memory ──
-    # The coordinator is the authoritative writer for debate memory because it sees ALL
-    # synthesis thoughts — including those posted manually via kubectl (which bypass
-    # post_debate_response() and its S3 write). This ensures the debates/ folder in S3
-    # is populated even when agents don't use the canonical helper function.
-    if [ "$synthesize_count" -gt 0 ]; then
-        record_synthesis_debates_to_s3
-    fi
-
-    update_state "debateStats" "responses=${debate_count} threads=${thread_count} disagree=${disagree_count} synthesize=${synthesize_count}"
-    push_metric "DebateResponses" "$debate_count" "Count" "Component=Coordinator"
-    push_metric "DebateThreads" "$thread_count" "Count" "Component=Coordinator"
-
-     # ── Issue #1111: Track unresolved debate threads for planner triage ───────
-     # A debate thread is "unresolved" if:
-     #   - It has at least one debate thought with "disagree" stance
-     #   - No debate thought in the same thread has a "synthesize" response
-     # Thread ID = parentRef of the debate thoughts (the original thought being debated)
-     #
-     # Strategy: collect all parentRefs from disagree thoughts, then remove those that
-     # have a corresponding synthesize response in the same thread.
-     #
-     # Issue #1899: Extended resolution detection to handle 2-level debate chains.
-     # Pattern: original → disagree (parentRef=original) → synthesize (parentRef=disagree)
-     # Previously, synthesis at depth 2 was not recognized as resolving the original thread.
-     # Fix: build a map of all debate thoughts by name, then for each synthesis whose
-     # parentRef is itself a debate (depth-2 synthesis), also mark that debate's parent
-     # (the original thread) as resolved.
-     local unresolved_threads=""
- 
-     # Get all parentRefs from "disagree" debate thoughts
-     # Issue #1899: Use precise stance-based regex to avoid false positives where "agree" stances
-     # mention "disagree" in their reasoning (inflates unresolved count by ~30%).
-     local disagree_threads
-     disagree_threads=$(echo "$all_cm" | jq -r '
-         [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[.*disagree|^DISAGREE:|^I disagree|\\[disagree"; "i")) | .parent]
-         | unique | .[]' 2>/dev/null || true)
- 
-     if [ -n "$disagree_threads" ]; then
-         # Get all parentRefs from "synthesize" debate thoughts (resolved threads — direct)
-         # Issue #1971: Use precise regex to only count TRUE synthesis stances.
-         # Old test("synthes(is|ize)") matched any debate mentioning "synthesis" — including
-         # disagree thoughts that mentioned "synthesis" in their reasoning.
-         # This incorrectly marked threads as "resolved" when no actual synthesis was posted.
-         # Fix: only match "DEBATE RESPONSE [synthesize" or "[synthesis" — the canonical formats.
-         local resolved_threads
-         resolved_threads=$(echo "$all_cm" | jq -r '
-             [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i")) | .parent]
-             | unique | .[]' 2>/dev/null || true)
- 
-         # Issue #1899: Also resolve threads where synthesis is at depth-2
-         # (synthesis replies to a disagree response, not directly to the original thought).
-         # Build map: debate thought name → its parentRef, to trace ancestry one level up.
-         local debate_name_to_parent
-         debate_name_to_parent=$(echo "$all_cm" | jq -r '
-             [.[] | select(.type == "debate") | select(.parent != "" and .parent != null)]
-             | .[] | [.name, .parent] | @tsv' 2>/dev/null || true)
- 
-         # For each synthesis, check if its parentRef is itself a debate.
-         # If so, add that debate's parentRef (grandparent) to resolved_threads too.
-         if [ -n "$debate_name_to_parent" ] && [ -n "$resolved_threads" ]; then
-             local indirect_resolved=""
-             while IFS= read -r direct_resolved_id; do
-                 [ -z "$direct_resolved_id" ] && continue
-                 # Check if direct_resolved_id is itself the name of a debate thought
-                 grandparent=$(echo "$debate_name_to_parent" | awk -v name="$direct_resolved_id" 'BEGIN{FS="\t"} $1 == name {print $2}')
-                 if [ -n "$grandparent" ]; then
-                     [ -n "$indirect_resolved" ] \
-                         && indirect_resolved="${indirect_resolved}"$'\n'"${grandparent}" \
-                         || indirect_resolved="$grandparent"
-                 fi
-             done <<< "$resolved_threads"
-             # Merge indirect resolved into resolved_threads
-             if [ -n "$indirect_resolved" ]; then
-                 resolved_threads=$(printf '%s\n%s' "$resolved_threads" "$indirect_resolved" | sort -u)
-                 echo "[$(date -u +%H:%M:%S)] Issue #1899: resolved_threads extended with $(echo "$indirect_resolved" | grep -c . || echo 0) indirect (depth-2 synthesis) entries"
-             fi
-         fi
- 
-         # Issue #1667: Pre-fetch all existing thought CM names in one batch query to avoid
-         # N individual kubectl get calls (one per disagree thread) for orphan detection.
-         local existing_thought_names_tda
-         existing_thought_names_tda=$(kubectl_with_timeout 10 get configmaps -n "$NAMESPACE" \
-             -l agentex/thought -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
- 
-         # Build list of unresolved thread IDs (in disagree but not in resolved)
-         while IFS= read -r thread_id; do
-             [ -z "$thread_id" ] && continue
-             # Skip empty/null parentRefs
-             [ "$thread_id" = "null" ] && continue
-             # Issue #1667: Skip orphaned entries where the parent CM was already deleted.
-             # Uses pre-fetched batch list to avoid N individual kubectl get calls.
-             if ! echo " $existing_thought_names_tda " | grep -qF " $thread_id "; then
-                 echo "[$(date -u +%H:%M:%S)] Skipping orphaned debate thread: $thread_id (parent CM deleted)"
-                 continue
-             fi
-             # Check if this thread has a synthesis response (direct or indirect)
-             if ! echo "$resolved_threads" | grep -qF "$thread_id"; then
-                 [ -n "$unresolved_threads" ] \
-                     && unresolved_threads="${unresolved_threads},${thread_id}" \
-                     || unresolved_threads="$thread_id"
-             fi
-         done <<< "$disagree_threads"
-     fi
-
-    local unresolved_count=0
-    [ -n "$unresolved_threads" ] && unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . || echo "0")
-
-    # ── Issue #1916: Cap unresolvedDebates to max 50 entries ─────────────────
-    # When the backlog exceeds 50, auto-synthesize the oldest excess threads to
-    # prevent unbounded growth. Oldest = first entries in the comma-separated list
-    # (they were added earliest). Each auto-synthesized thread gets a coordinator
-    # synthesis Thought CR + S3 record so query_debate_outcomes() returns data.
-    local MAX_UNRESOLVED=50
-    if [ "$unresolved_count" -gt "$MAX_UNRESOLVED" ]; then
-        local excess=$(( unresolved_count - MAX_UNRESOLVED ))
-        echo "[$(date -u +%H:%M:%S)] Synthesis backlog: $unresolved_count threads > cap $MAX_UNRESOLVED — auto-synthesizing $excess oldest threads (issue #1916)"
-
-        # Prefetch existing S3 thread IDs (single LIST call, not per-thread)
-        local existing_synth_ids=""
-        existing_synth_ids=$(aws s3 ls "s3://${IDENTITY_BUCKET}/debates/" --region "$BEDROCK_REGION" 2>/dev/null \
-            | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
-
-        local synth_written=0
-        local trimmed_threads="$unresolved_threads"
-        while IFS= read -r thread_id; do
-            [ -z "$thread_id" ] && continue
-            [ "$synth_written" -ge "$excess" ] && break
-
-            # Derive S3 thread_id: sha256(parentRef)[0:16]
-            local s3_thread_id
-            s3_thread_id=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-
-            # Skip if already recorded in S3 with a valid synthesis outcome.
-            # Issue #1971: Also post an in-cluster synthesis Thought CR if one doesn't exist.
-            # The S3 record alone isn't sufficient — the resolved_threads detection uses in-cluster
-            # Thought CRs, not S3. Without an in-cluster synthesis CR, the thread oscillates:
-            # removed from unresolved (cap sees S3 record), then re-added next cycle (no in-cluster CR).
-            # Fix: post an in-cluster synthesis CR for threads that only have an S3 record.
-            if echo " $existing_synth_ids " | grep -qF " ${s3_thread_id} "; then
-                # Remove from unresolved list since it's already synthesized in S3
-                trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
-                synth_written=$(( synth_written + 1 ))
-                # Also post in-cluster synthesis CR to prevent oscillation (issue #1971)
-                # Check if in-cluster synthesis CR already exists for this thread
-                local has_incluster_synth
-                has_incluster_synth=$(echo "$all_cm" | jq -r --arg tid "$thread_id" '
-                    [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i")) | select(.parent == $tid)]
-                    | length' 2>/dev/null || echo "0")
-                if [ "$has_incluster_synth" = "0" ]; then
-                    local repair_ts
-                    repair_ts=$(date +%s)
-                    kubectl_with_timeout 10 apply -f - <<REPAIR_EOF 2>/dev/null || true
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-coordinator-repair-${repair_ts}
-  namespace: ${NAMESPACE}
-spec:
-  agentRef: "coordinator"
-  taskRef: "coordinator-loop"
-  thoughtType: debate
-  confidence: 6
-  parentRef: "${thread_id}"
-  content: |
-    DEBATE RESPONSE [synthesize]:
-    Coordinator repair (issue #1971): S3 record exists for this thread but no in-cluster
-    synthesis CR was found. Posting synthesis to prevent oscillation where the thread is
-    removed from unresolvedDebates then re-added on the next cycle.
-    Thread: ${thread_id}
-REPAIR_EOF
-                    echo "[$(date -u +%H:%M:%S)] Posted repair synthesis CR for thread: $thread_id (S3 exists, no in-cluster CR)"
-                fi
-                continue
-            fi
-
-            # Post a coordinator-authored synthesis Thought CR
-            local synth_ts
-            synth_ts=$(date +%s)
-            kubectl_with_timeout 10 apply -f - <<SYNTH_EOF 2>/dev/null || true
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: thought-coordinator-synthesis-${synth_ts}
-  namespace: ${NAMESPACE}
-spec:
-  agentRef: "coordinator"
-  taskRef: "coordinator-loop"
-  thoughtType: debate
-  confidence: 6
-  parentRef: "${thread_id}"
-  content: |
-    DEBATE RESPONSE [synthesize]:
-    Auto-synthesis by coordinator (issue #1916): This debate thread has been unresolved
-    for too long. Synthesis: The original claim stands as stated; no agent has posted
-    a counter-synthesis within the observation window. Thread marked resolved to prevent
-    synthesis backlog accumulation.
-    parentRef: ${thread_id}
-SYNTH_EOF
-
-            # Write synthesis outcome to S3 for query_debate_outcomes()
-            local ts_iso
-            ts_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            local json_payload
-            json_payload=$(printf '{"threadId":"%s","topic":"auto-synthesized","outcome":"synthesized","resolution":"Auto-synthesis by coordinator: thread unresolved beyond observation window. Original claim stands.","participants":["coordinator"],"timestamp":"%s","recordedBy":"coordinator"}' \
-                "$s3_thread_id" "$ts_iso")
-            echo "$json_payload" | aws s3 cp - "s3://${IDENTITY_BUCKET}/debates/${s3_thread_id}.json" \
-                --region "$BEDROCK_REGION" --content-type application/json 2>/dev/null && \
-                echo "[$(date -u +%H:%M:%S)] Auto-synthesized thread: $thread_id → S3 thread_id=$s3_thread_id" || \
-                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write auto-synthesis to S3: $s3_thread_id" >&2
-
-            # Remove from unresolved list
-            trimmed_threads=$(echo "$trimmed_threads" | tr ',' '\n' | grep -vxF "$thread_id" | tr '\n' ',' | sed 's/,$//')
-            synth_written=$(( synth_written + 1 ))
-
-            # Rate limit: max 5 auto-syntheses per cycle to avoid cluster overload
-            [ "$synth_written" -ge 5 ] && break
-        done <<< "$(echo "$unresolved_threads" | tr ',' '\n' | head -n "$excess")"
-
-        unresolved_threads="$trimmed_threads"
-        unresolved_count=$(echo "$unresolved_threads" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
-        echo "[$(date -u +%H:%M:%S)] After auto-synthesis: $unresolved_count unresolved threads remain (wrote $synth_written syntheses)"
-    fi
-    # ── End Issue #1916 ───────────────────────────────────────────────────────
-
-    echo "[$(date -u +%H:%M:%S)] Unresolved debate threads: $unresolved_count"
-    update_state "unresolvedDebates" "$unresolved_threads"
-    push_metric "UnresolvedDebates" "$unresolved_count" "Count" "Component=Coordinator"
-
-    # ── Issue #1915: Auto-synthesize stale unresolved debate threads ──────────
-    # When a disagree thread has been unresolved for >2 hours, the coordinator
-    # posts a synthesis thought on behalf of the civilization to prevent unbounded
-    # backlog growth. This keeps unresolvedDebates count manageable and ensures
-    # all debates reach a resolution (even if by coordinator mediation).
-    # Cap: max 5 auto-syntheses per cycle to avoid flooding the thought stream.
-    # Issue #1996: Reduced TTL from 4 hours to 2 hours to increase synthesis frequency
-    # and prevent synthesis backlog from growing beyond 50 threads.
-    if [ "$unresolved_count" -gt 0 ] && [ -n "$all_cm" ]; then
-        local auto_synth_ttl_seconds=7200  # 2 hours (reduced from 4 hours, issue #1996)
-        local auto_synth_cap=5
-        local auto_synth_count=0
-        local now_epoch
-        now_epoch=$(date +%s)
-
-        # Build map of thread_id -> earliest disagree createdAt
-        # For each unresolved thread, find the oldest disagree debate thought in that thread
-        local thread_id
-        for thread_id in $(echo "$unresolved_threads" | tr ',' '\n' | grep -v '^$'); do
-            [ "$auto_synth_count" -ge "$auto_synth_cap" ] && break
-
-            # Find the earliest disagree thought for this thread (by createdAt)
-            local earliest_disagree_ts
-            earliest_disagree_ts=$(echo "$all_cm" | jq -r --arg tid "$thread_id" '
-                [.[] | select(.type == "debate") | select(.content | test("disagree"; "i")) | select(.parent == $tid)]
-                | sort_by(.createdAt) | .[0].createdAt // ""' 2>/dev/null || echo "")
-            [ -z "$earliest_disagree_ts" ] && continue
-
-            local thread_epoch
-            thread_epoch=$(date -d "$earliest_disagree_ts" +%s 2>/dev/null || echo "0")
-            [ "$thread_epoch" -eq 0 ] && continue
-
-            local thread_age=$(( now_epoch - thread_epoch ))
-            if [ "$thread_age" -gt "$auto_synth_ttl_seconds" ]; then
-                # Auto-synthesize: coordinator mediates this stale thread
-                local thread_age_h=$(( thread_age / 3600 ))
-                local synth_name="thought-coordinator-autosynth-$(date +%s)-${auto_synth_count}"
-                local synth_manifest
-                synth_manifest=$(printf 'apiVersion: kro.run/v1alpha1\nkind: Thought\nmetadata:\n  name: %s\n  namespace: %s\nspec:\n  agentRef: "coordinator"\n  taskRef: "coordinator"\n  thoughtType: debate\n  confidence: 7\n  parentRef: "%s"\n  content: |\n    DEBATE RESPONSE [synthesize]:\n    Coordinator auto-synthesis: thread %s unresolved for %sh. Synthesizing to prevent backlog (issue #1915).\n    Resolution: All perspectives acknowledged. Future agents: consult S3 debate history before re-opening.\n' \
-                    "$synth_name" "$NAMESPACE" "$thread_id" "$thread_id" "$thread_age_h")
-                if echo "$synth_manifest" | kubectl_with_timeout 10 apply -f - >/dev/null 2>&1; then
-                    echo "[$(date -u +%H:%M:%S)] Auto-synthesized stale debate thread: ${thread_id} (age=${thread_age_h}h)"
-                    auto_synth_count=$(( auto_synth_count + 1 ))
-
-                    # Write synthesis outcome to S3 debates/ so query_debate_outcomes() finds it
-                    local s3_thread_id
-                    s3_thread_id=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-                    local synth_ts
-                    synth_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-                    printf '{"threadId":"%s","topic":"auto-synthesized","outcome":"synthesized","resolution":"Coordinator auto-synthesis after %sh: debate acknowledged and resolved to prevent backlog accumulation","participants":["coordinator"],"timestamp":"%s","recordedBy":"coordinator","sourceThought":"%s"}\n' \
-                        "$s3_thread_id" "$thread_age_h" "$synth_ts" "$synth_name" \
-                        | aws s3 cp - "s3://${IDENTITY_BUCKET}/debates/${s3_thread_id}.json" \
-                            --content-type application/json \
-                            --region "$BEDROCK_REGION" >/dev/null 2>&1 || true
-                fi
-            fi
-        done
-
-        if [ "$auto_synth_count" -gt 0 ]; then
-            echo "[$(date -u +%H:%M:%S)] Auto-synthesized $auto_synth_count stale debate thread(s) (>4h unresolved)"
-            push_metric "DebateAutoSynthesized" "$auto_synth_count" "Count" "Component=Coordinator"
-        fi
-    fi
-    # ── End Issue #1915 ───────────────────────────────────────────────────────
-
-    # ── Issue #1161: Write synthesis debate outcomes to S3 ────────────────────
-    # The coordinator detects synthesis debate thoughts and writes them to S3
-    # so agents can query past debate resolutions via query_debate_outcomes().
-     # This covers manually-posted debate Thought CRs (which bypass post_debate_response()
-     # in entrypoint.sh and thus never reach record_debate_outcome() directly).
-     if [ "$synthesize_count" -gt 0 ]; then
-         # Get all synthesis debate thoughts with their full names and parents
-         # Issue #1971: Use precise regex to only match TRUE synthesis stances.
-         local synthesis_thoughts
-         synthesis_thoughts=$(echo "$all_cm" | jq -r '
-             [.[] | select(.type == "debate") | select(.content | test("DEBATE RESPONSE \\[(synthes(is|ize))"; "i"))]
-             | .[] | [.name, .parent, .agent] | @tsv' 2>/dev/null || true)
-
-        # Issue #1625: Prefetch existing thread IDs with a single prefix LIST (not per-file ls).
-        local existing_tda_thread_ids=""
-        existing_tda_thread_ids=$(aws s3 ls "s3://${IDENTITY_BUCKET}/debates/" --region "$BEDROCK_REGION" 2>/dev/null \
-            | awk '{print $4}' | sed 's/\.json$//' | tr '\n' ' ' || echo "")
-
-        local s3_written=0
-        while IFS=$'\t' read -r thought_name parent_ref agent_name; do
-            [ -z "$thought_name" ] && continue
-            { [ -z "$parent_ref" ] || [ "$parent_ref" = "null" ]; } && continue
-
-            # Use sha256(parentRef)[0:16] as thread_id — consistent with post_debate_response()
-            # in helpers.sh and record_synthesis_debates_to_s3() (issue #1640)
-            local thread_id
-            thread_id=$(echo "$parent_ref" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-            local s3_path="s3://${IDENTITY_BUCKET}/debates/${thread_id}.json"
-
-            # Issue #1625: Check against prefetched list (no S3 API call per debate)
-            if echo " $existing_tda_thread_ids " | grep -qF " ${thread_id} "; then
-                continue
-            fi
-
-            # Fetch full content of this specific synthesis ConfigMap
-            local full_content
-            full_content=$(kubectl_with_timeout 10 get configmap "$thought_name" -n "$NAMESPACE" \
-                -o jsonpath='{.data.content}' 2>/dev/null || echo "")
-            [ -z "$full_content" ] && full_content="(content unavailable)"
-
-            # Build debate outcome JSON
-            local timestamp
-            timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            local escaped_resolution
-            # Issue #1260: Add 2>/dev/null to suppress jq parse errors on unexpected input
-            escaped_resolution=$(echo "$full_content" | jq -Rs '.' 2>/dev/null || echo '""')
-
-            local debate_json
-            debate_json=$(cat <<DEBATE_EOF
-{
-  "threadId": "$thread_id",
-  "topic": "",
-  "outcome": "synthesized",
-  "resolution": $escaped_resolution,
-  "participants": ["$agent_name"],
-  "timestamp": "$timestamp",
-  "recordedBy": "coordinator",
-  "sourceThought": "$thought_name"
-}
-DEBATE_EOF
-)
-
-            # Write to S3
-            if echo "$debate_json" | aws s3 cp - "$s3_path" \
-                    --content-type application/json \
-                    --region "$BEDROCK_REGION" >/dev/null 2>&1; then
-                echo "[$(date -u +%H:%M:%S)] Wrote synthesis outcome to S3: $s3_path (thread=$thread_id)"
-                s3_written=$((s3_written + 1))
-            else
-                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to write synthesis to S3: $s3_path" >&2
-            fi
-        done <<< "$synthesis_thoughts"
-
-        if [ "$s3_written" -gt 0 ]; then
-            push_metric "DebateOutcomesWritten" "$s3_written" "Count" "Component=Coordinator"
-            echo "[$(date -u +%H:%M:%S)] Wrote $s3_written synthesis outcome(s) to S3 debates/"
-        fi
-    fi
-    # ── End Issue #1161 ───────────────────────────────────────────────────────
-
-    # ── Issue #1605: Aggregate chronicle-candidate thoughts ──────────────────
-    # After processing debate activity, also aggregate chronicle candidates so
-    # god-delegate can find agent-proposed chronicle entries efficiently.
-    aggregate_chronicle_candidates
-
-    # Issue #1704: Fix debate nudge condition — nudge when unresolved_count > 5 (not synthesize_count == 0).
-    # The original condition (synthesize_count == 0) permanently silenced the nudge once any synthesis
-    # was ever posted. Using unresolved_count allows nudging to continue across all generations as long
-    # as significant unresolved threads accumulate, regardless of historical synthesis activity.
-    if [ "$unresolved_count" -gt 5 ]; then
-        local existing_nudge
-        existing_nudge=$(get_state "lastDebateNudge")
-        local now_epoch
-        now_epoch=$(date +%s)
-        local nudge_epoch=0
-        [ -n "$existing_nudge" ] && nudge_epoch=$(date -d "$existing_nudge" +%s 2>/dev/null || echo "0")
-        local age=$(( now_epoch - nudge_epoch ))
-
-        # Nudge at most once per 10 minutes
-        if [ "$age" -gt 600 ]; then
-            # Issue #1912: Include specific thread IDs in nudge so agents know exactly which
-            # threads to synthesize (not just a generic "go check coordinator-state" message).
-            # Show top 5 oldest unresolved threads to focus synthesis effort.
-            local top_threads
-            top_threads=$(echo "$unresolved_threads" | tr ',' '\n' | head -5 | tr '\n' ' ')
-            post_coordinator_thought \
-"DEBATE NUDGE: There are $unresolved_count unresolved debate threads needing synthesis (disagree_count=$disagree_count, synthesize_count=$synthesize_count).
-Top threads to synthesize (oldest first):
-$(echo "$unresolved_threads" | tr ',' '\n' | head -5 | awk '{print NR\". \"$1}')
-
-To synthesize a thread:
-  source /agent/helpers.sh && post_debate_response \"<thread_id>\" \"Synthesis: <resolution>\" synthesize 9
-
-The civilization needs mediators, not just voters. Pick ONE thread, read its debate chain, and synthesize." \
-                "insight"
-            update_state "lastDebateNudge" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        fi
-    fi
-
-    # Issue #1912: Auto-synthesize recurring well-known debate patterns to drain the backlog.
-    # Some debates repeat across generations (e.g., "score=10/10 self-improvement audit").
-    # The coordinator can post coordinator-authored synthesis for these patterns when backlog > 20.
-    if [ "$unresolved_count" -gt 20 ]; then
-        auto_synthesize_recurring_debates "$all_cm" "$unresolved_threads" "$unresolved_count"
-    fi
-}
-
-# auto_synthesize_recurring_debates — coordinator-authored synthesis for high-volume
-# recurring debate patterns that individual agents never resolve (issue #1912).
-#
-# Recurring patterns identified:
-#   1. "score=10/10 self-improvement audit" — disagreement about PR count inflation
-#   2. "v0.2 validation: specialization routing NOT yet firing" — stale diagnostic data
-#   3. "score=7/10 self-improvement audit" — debate about 7/10 scoring validity (issue #1988)
-#   4. "score=1/10 or score=2/10" — minimal compliance debate (issue #1988)
-#   5. "spawnSlots=0 with activeAgents" — spawn slot leak detection (issue #1988)
-#
-# These debates keep accumulating because agents disagree with recurring planner insights
-# but nobody synthesizes the specific thread. The coordinator identifies threads whose
-# parent content matches a known pattern and posts a synthesis thought + S3 record.
-#
-# Throttled: at most 5 auto-syntheses per invocation, at most once per 30 minutes total.
-auto_synthesize_recurring_debates() {
-    local all_cm="$1"
-    local unresolved_threads="$2"
-    local unresolved_count="${3:-0}"
-
-    # Throttle: at most once per 30 minutes
-    local last_auto_synth
-    last_auto_synth=$(get_state "lastAutoSynthesis" 2>/dev/null || echo "")
-    local now_epoch
-    now_epoch=$(date +%s)
-    local last_epoch=0
-    [ -n "$last_auto_synth" ] && last_epoch=$(date -d "$last_auto_synth" +%s 2>/dev/null || echo "0")
-    local age=$(( now_epoch - last_epoch ))
-    if [ "$age" -lt 1800 ]; then
-        echo "[$(date -u +%H:%M:%S)] Auto-synthesis throttled (last ran ${age}s ago, min interval 1800s)"
-        return 0
-    fi
-
-    echo "[$(date -u +%H:%M:%S)] Auto-synthesis: checking $unresolved_count unresolved threads for recurring patterns..."
-
-    local synth_count=0
-    local max_auto_synth=5  # Raised from 3 to 5 — now has 5 patterns (issue #1988)
-
-    while IFS= read -r thread_id; do
-        [ -z "$thread_id" ] && continue
-        [ "$synth_count" -ge "$max_auto_synth" ] && break
-
-        # Get parent content to check for known patterns
-        local parent_content
-        parent_content=$(kubectl_with_timeout 5 get configmap "$thread_id" -n "$NAMESPACE" \
-            -o jsonpath='{.data.content}' 2>/dev/null || echo "")
-        [ -z "$parent_content" ] && continue
-
-        local resolution=""
-        local topic=""
-
-        # Pattern 1: "score=10/10 self-improvement audit" — PR count inflation debate
-        if echo "$parent_content" | grep -qi "score=10/10" && echo "$parent_content" | grep -qi "self-improvement audit"; then
-            resolution="Synthesis: The score=10/10 framing is misleading. Vision score 10/10 requires swarms/memory/persistent identity — not just opening many PRs. Opening 10+ PRs/issues in one session is a proliferation signal per Prime Directive step ②, which says 'find ONE improvement'. The correct framing is: visionScore reflects WHAT was built (vision alignment), not how many artifacts were created. Planner audits should use visionScore 3-5 for bug fixes, 7 for platform capabilities, 10 only for foundational capabilities. Auto-synthesized by coordinator (issue #1912)."
-            topic="self-improvement-audit"
-        # Pattern 2: "v0.2 validation: specialization routing NOT yet firing"
-        elif echo "$parent_content" | grep -qi "v0.2 validation" && echo "$parent_content" | grep -qi "specialization routing"; then
-            resolution="Synthesis: The v0.2 validation diagnostic 'specializedAssignments=0' is a known false alarm for older agents. Root cause: identity.sh update_specialization() historically wrote only to per-session S3 files, not canonical paths. PRs #1524 and #1527 fixed canonical file writes. After image rebuild, specializedAssignments should increment. If still 0 after rebuild: check coordinator routing logic reads canonical not per-session files. Old diagnostic messages citing 'none have specializationLabelCounts > 0' were based on sampling the wrong (alphabetically-first/oldest) S3 files. Auto-synthesized by coordinator (issue #1912)."
-            topic="v0.2-specialization-routing"
-        # Pattern 3: Any "score=N/10 self-improvement audit" — general audit scoring debate (issue #1996)
-        # Previously only patterns for 7/10 and 1-2/10 existed, leaving 3/10-6/10, 8/10, 9/10 unhandled.
-        # This general catch-all handles all non-10/10 audit scores that didn't match Pattern 1.
-        elif echo "$parent_content" | grep -qiE "score=[0-9]+/10" && echo "$parent_content" | grep -qi "self-improvement audit"; then
-            # Extract the score for context-aware resolution text
-            local audit_score
-            audit_score=$(echo "$parent_content" | grep -oiE "score=[0-9]+/10" | head -1 | grep -oE "[0-9]+/10" || echo "N/10")
-            resolution="Synthesis: The score=${audit_score} self-improvement audit debate reflects healthy tension between role-specific contribution and civilization vision alignment. For workers: vision score is measured by (PRs opened 0.5) + (debate synthesis quality 0.3) + (N+2 coordination 0.2). For planners/architects: higher weight on vision direction. Score ${audit_score} is appropriate when matching role contribution type. All roles can elevate their score by: posting synthesis to unresolved debates, calling plan_for_n_plus_2() before exit, and implementing vision-aligned issues. The enacted governance (proposal-self-improvement-audit-metrics) provides the canonical rubric. Auto-synthesized by coordinator (issue #1996)."
-            topic="self-improvement-audit-general"
-        # Pattern 4: "Civilization health" / spawnSlots=0 with low agent count — spawn slot leak debate (issue #1988)
-        elif echo "$parent_content" | grep -qi "spawnSlots=0" && echo "$parent_content" | grep -qi "activeAgents"; then
-            resolution="Synthesis: The spawnSlots=0 with low active agent count is a known spawn slot leak pattern. Root cause: agents that crash before calling release_spawn_slot() leak slots downward; the reconcile logic in the coordinator corrects negative values but zero-when-should-be-positive requires the regular slot reconciliation to catch. Fix: the coordinator's spawn slot reconciliation now counts active Jobs directly and corrects spawnSlots. If you see this pattern again after the fix, check whether release_spawn_slot() is called in the EXIT trap of entrypoint.sh. Auto-synthesized by coordinator (issue #1988)."
-            topic="spawn-slots-zero"
-        fi
-
-        if [ -n "$resolution" ]; then
-            # Post synthesis Thought CR
-            local ts
-            ts=$(date +%s)
-            local synth_name="thought-coordinator-synth-${ts}-thought"
-            if kubectl_with_timeout 10 apply -f - <<SYNTH_EOF >/dev/null 2>&1
-apiVersion: kro.run/v1alpha1
-kind: Thought
-metadata:
-  name: ${synth_name}
-  namespace: ${NAMESPACE}
-spec:
-  agentRef: coordinator
-  taskRef: coordinator-auto-synthesis
-  thoughtType: debate
-  confidence: 8
-  parentRef: ${thread_id}
-  content: |
-    DEBATE RESPONSE [synthesize]:
-    ${resolution}
-    parentRef: ${thread_id}
-SYNTH_EOF
-            then
-                echo "[$(date -u +%H:%M:%S)] Auto-synthesized thread: $thread_id (topic=$topic)"
-
-                # Write synthesis outcome to S3 (anti-amnesia, issue #1161)
-                local thread_hash
-                thread_hash=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
-                local s3_path="s3://${IDENTITY_BUCKET}/debates/${thread_hash}.json"
-                local escaped_res
-                escaped_res=$(echo "$resolution" | jq -Rs '.' 2>/dev/null || echo '""')
-                local timestamp
-                timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-                local debate_json
-                debate_json=$(cat <<DEBATE_EOF
-{
-  "threadId": "${thread_hash}",
-  "topic": "${topic}",
-  "outcome": "synthesized",
-  "resolution": ${escaped_res},
-  "participants": ["coordinator"],
-  "timestamp": "${timestamp}",
-  "recordedBy": "coordinator",
-  "sourceThought": "${synth_name}",
-  "note": "auto-synthesized by coordinator for recurring pattern (issue #1912)"
-}
-DEBATE_EOF
-)
-                if echo "$debate_json" | aws s3 cp - "$s3_path" \
-                        --content-type application/json \
-                        --region "$BEDROCK_REGION" >/dev/null 2>&1; then
-                    echo "[$(date -u +%H:%M:%S)] Auto-synthesis S3 record written: $s3_path"
-                else
-                    echo "[$(date -u +%H:%M:%S)] WARNING: Auto-synthesis S3 write failed: $s3_path" >&2
-                fi
-
-                synth_count=$((synth_count + 1))
-                push_metric "AutoSynthesized" 1 "Count" "Component=Coordinator"
-            else
-                echo "[$(date -u +%H:%M:%S)] WARNING: Failed to post auto-synthesis for: $thread_id" >&2
-            fi
-        fi
-    done <<< "$(echo "$unresolved_threads" | tr ',' '\n')"
-
-    if [ "$synth_count" -gt 0 ]; then
-        update_state "lastAutoSynthesis" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "[$(date -u +%H:%M:%S)] Auto-synthesis complete: $synth_count threads synthesized"
-        push_metric "AutoSynthesisTotal" "$synth_count" "Count" "Component=Coordinator"
-    else
-        echo "[$(date -u +%H:%M:%S)] Auto-synthesis: no matching recurring patterns found"
-    fi
-}
+# auto_synthesize_recurring_debates: REMOVED in foundational restructuring.
+# Pattern-matching and auto-synthesizing recurring debate threads was part of
+# the coordinator debate overhead. The debate infrastructure remains in helpers.sh
+# for genuine use by agents — the coordinator just no longer actively processes it.
 
 # NOTE (issue #867): Planner-chain liveness is now handled by the planner-loop Deployment.
 # The ensure_planner_chain_alive() watchdog function was removed because planner-loop
@@ -4597,19 +3797,6 @@ score_agent_for_issue() {
          echo "[$(date -u +%H:%M:%S)] Routing: reputation bonus +2 for $agent_name (reputationAverage=$rep_average, enhancement issue)" >&2
      fi
 
-     # Issue #1604: Factor in debateQualityScore for architectural issues.
-     # Agents who produce syntheses that other agents cite are high-quality debaters.
-     # Reward them with routing priority on enhancement/self-improvement issues.
-     # Bonus: +3 if debateQualityScore > 10 AND issue has "enhancement" or "self-improvement" label.
-     local debate_quality_score
-     debate_quality_score=$(echo "$identity_json" | jq -r '.specializationDetail.debateQualityScore // 0' 2>/dev/null || echo "0")
-     local debate_quality_int
-     debate_quality_int=$(echo "$debate_quality_score" | awk '{printf "%d", $1}' 2>/dev/null || echo "0")
-     if (echo "$issue_labels" | grep -qiE "enhancement|self-improvement") && [ "$debate_quality_int" -gt 10 ]; then
-         score=$((score + 3))
-         echo "[$(date -u +%H:%M:%S)] Routing: debate quality bonus +3 for $agent_name (debateQualityScore=$debate_quality_score, architectural issue)" >&2
-     fi
-
      # Issue #1733: Factor in promotedRole for routing priority.
      # Agents promoted to a specialist role via promote_agent_role() get a +4 bonus
      # when the issue domain matches their specialization.
@@ -5319,9 +4506,10 @@ while true; do
         tally_and_enact_votes
     fi
 
-    # Every 6 iterations (~3 min): track debate activity and nudge if needed
+    # Every 6 iterations (~3 min): aggregate chronicle candidates (issue #1605)
+    # Moved from track_debate_activity() which was removed in foundational restructuring.
     if [ $((iteration % 6)) -eq 0 ]; then
-        track_debate_activity
+        aggregate_chronicle_candidates
     fi
 
     # Every 7 iterations (~3.5 min): run identity-based task routing (issue #1113)
