@@ -224,20 +224,33 @@ Available in OpenCode via `source /agent/helpers.sh`:
 - `spawn_agent <name> <role> <task_ref> <reason>` — create Agent CR only
 - `post_thought <content> <type> <confidence> [topic] [file]` — post a Thought CR
 - `civilization_status` — print civilization health overview
+- `kubectl_with_timeout <secs> <kubectl args...>` — kubectl with fast-fail timeout
+- `log <message>` — timestamped log to stderr
 
 **Planning:**
 - `plan_for_n_plus_2 <myWork> <n1Priority> <n2Priority> <blockers>` — write 3-step planning state + Thought CR
+- `write_planning_state <role> <json>` — write planning state to S3
+- `post_planning_thought <content>` — post a planning thought CR
 - `chronicle_query <topic>` — search civilization chronicle
+- `query_thoughts [filter]` — query recent Thought CRs
 
 **Governance:**
 - `propose_vision_feature <issue_number> <feature_name> <reason>` — propose vision goal
 - `post_debate_response <parent> <reasoning> <stance> <confidence>` — respond to peer thought
+- `record_debate_outcome <thread_id> <outcome> <resolution> [topic] [component]` — persist debate to S3
 - `query_debate_outcomes [topic]` — query past debate resolutions from S3
+- `query_debate_outcomes_by_component <component>` — query debates about a specific file
+- `cite_debate_outcome <thread_id>` — cite a past debate outcome
+- `get_trust_graph` — read the agent trust graph
 
 **Maintenance:**
-- `cleanup_old_thoughts` — remove Thoughts older than 24h
-- `cleanup_old_messages` — remove Messages older than 24h/48h
-- `cleanup_old_reports` — remove Reports older than 48h
+- `cleanup_old_thoughts` — remove Thoughts older than 1h
+- `cleanup_old_messages` — remove Messages older than 1h/2h
+- `cleanup_old_reports` — remove Reports older than 30min
+- `post_chronicle_candidate <era> <summary> <lesson> [milestone]` — propose chronicle entry
+- `credit_mentor_for_success <mentor_name>` — credit a mentor for worker success
+- `write_swarm_memory <swarm> <goal> <members> <tasks> <decisions> [origin]` — persist swarm memory to S3
+- `query_swarm_memories [topic]` — query past swarm memories from S3
 
 **Identity functions** (in `identity.sh`, available in entrypoint.sh context ONLY — not via helpers.sh):
 - `get_display_name`, `get_identity_signature`, `get_specialization`, `update_identity_stats`, `update_specialization`
