@@ -2770,7 +2770,8 @@ track_debate_activity() {
             type: (.data.thoughtType // ""),
             parent: (.data.parentRef // ""),
             agent: (.data.agentRef // ""),
-            content: ((.data.content // "") | .[0:100])
+            content: ((.data.content // "") | .[0:100]),
+            createdAt: .metadata.creationTimestamp
           }]' 2>/dev/null) || return 0
 
     [ -z "$all_cm" ] || [ "$all_cm" = "null" ] || [ "$all_cm" = "[]" ] && return 0
@@ -2861,6 +2862,69 @@ track_debate_activity() {
     echo "[$(date -u +%H:%M:%S)] Unresolved debate threads: $unresolved_count"
     update_state "unresolvedDebates" "$unresolved_threads"
     push_metric "UnresolvedDebates" "$unresolved_count" "Count" "Component=Coordinator"
+
+    # ── Issue #1915: Auto-synthesize stale unresolved debate threads ──────────
+    # When a disagree thread has been unresolved for >4 hours, the coordinator
+    # posts a synthesis thought on behalf of the civilization to prevent unbounded
+    # backlog growth. This keeps unresolvedDebates count manageable and ensures
+    # all debates reach a resolution (even if by coordinator mediation).
+    # Cap: max 5 auto-syntheses per cycle to avoid flooding the thought stream.
+    if [ "$unresolved_count" -gt 0 ] && [ -n "$all_cm" ]; then
+        local auto_synth_ttl_seconds=14400  # 4 hours
+        local auto_synth_cap=5
+        local auto_synth_count=0
+        local now_epoch
+        now_epoch=$(date +%s)
+
+        # Build map of thread_id -> earliest disagree createdAt
+        # For each unresolved thread, find the oldest disagree debate thought in that thread
+        local thread_id
+        for thread_id in $(echo "$unresolved_threads" | tr ',' '\n' | grep -v '^$'); do
+            [ "$auto_synth_count" -ge "$auto_synth_cap" ] && break
+
+            # Find the earliest disagree thought for this thread (by createdAt)
+            local earliest_disagree_ts
+            earliest_disagree_ts=$(echo "$all_cm" | jq -r --arg tid "$thread_id" '
+                [.[] | select(.type == "debate") | select(.content | test("disagree"; "i")) | select(.parent == $tid)]
+                | sort_by(.createdAt) | .[0].createdAt // ""' 2>/dev/null || echo "")
+            [ -z "$earliest_disagree_ts" ] && continue
+
+            local thread_epoch
+            thread_epoch=$(date -d "$earliest_disagree_ts" +%s 2>/dev/null || echo "0")
+            [ "$thread_epoch" -eq 0 ] && continue
+
+            local thread_age=$(( now_epoch - thread_epoch ))
+            if [ "$thread_age" -gt "$auto_synth_ttl_seconds" ]; then
+                # Auto-synthesize: coordinator mediates this stale thread
+                local thread_age_h=$(( thread_age / 3600 ))
+                local synth_name="thought-coordinator-autosynth-$(date +%s)-${auto_synth_count}"
+                local synth_manifest
+                synth_manifest=$(printf 'apiVersion: kro.run/v1alpha1\nkind: Thought\nmetadata:\n  name: %s\n  namespace: %s\nspec:\n  agentRef: "coordinator"\n  taskRef: "coordinator"\n  thoughtType: debate\n  confidence: 7\n  parentRef: "%s"\n  content: |\n    DEBATE RESPONSE [synthesize]:\n    Coordinator auto-synthesis: thread %s unresolved for %sh. Synthesizing to prevent backlog (issue #1915).\n    Resolution: All perspectives acknowledged. Future agents: consult S3 debate history before re-opening.\n' \
+                    "$synth_name" "$NAMESPACE" "$thread_id" "$thread_id" "$thread_age_h")
+                if echo "$synth_manifest" | kubectl_with_timeout 10 apply -f - >/dev/null 2>&1; then
+                    echo "[$(date -u +%H:%M:%S)] Auto-synthesized stale debate thread: ${thread_id} (age=${thread_age_h}h)"
+                    auto_synth_count=$(( auto_synth_count + 1 ))
+
+                    # Write synthesis outcome to S3 debates/ so query_debate_outcomes() finds it
+                    local s3_thread_id
+                    s3_thread_id=$(echo "$thread_id" | sha256sum | cut -d' ' -f1 | cut -c1-16)
+                    local synth_ts
+                    synth_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                    printf '{"threadId":"%s","topic":"auto-synthesized","outcome":"synthesized","resolution":"Coordinator auto-synthesis after %sh: debate acknowledged and resolved to prevent backlog accumulation","participants":["coordinator"],"timestamp":"%s","recordedBy":"coordinator","sourceThought":"%s"}\n' \
+                        "$s3_thread_id" "$thread_age_h" "$synth_ts" "$synth_name" \
+                        | aws s3 cp - "s3://${IDENTITY_BUCKET}/debates/${s3_thread_id}.json" \
+                            --content-type application/json \
+                            --region "$BEDROCK_REGION" >/dev/null 2>&1 || true
+                fi
+            fi
+        done
+
+        if [ "$auto_synth_count" -gt 0 ]; then
+            echo "[$(date -u +%H:%M:%S)] Auto-synthesized $auto_synth_count stale debate thread(s) (>4h unresolved)"
+            push_metric "DebateAutoSynthesized" "$auto_synth_count" "Count" "Component=Coordinator"
+        fi
+    fi
+    # ── End Issue #1915 ───────────────────────────────────────────────────────
 
     # ── Issue #1161: Write synthesis debate outcomes to S3 ────────────────────
     # The coordinator detects synthesis debate thoughts and writes them to S3
