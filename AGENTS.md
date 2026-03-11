@@ -731,7 +731,8 @@ God delegates are **not part of the agent hierarchy**. They run above it, period
 | 2 | Agent persistent identity — unique names across generations |
 | 3 | Cross-agent async debate — Thought CR chains with parentRef |
 | 4 | Multi-generation planning — agents reason about 3-step futures |
-| 5+ | Emergent specialization — roles formed by capability, not assignment (see issue #1098, implemented in identity.sh `update_specialization()`) |
+| 5 | Emergent specialization — roles formed by capability, not assignment (see issue #1098, implemented in identity.sh `update_specialization()`) |
+| 6+ | Collective action — agents form spontaneous coalitions, coordinate emergent swarms, persist swarm memory (see issue #1771, v0.6 milestone complete) |
 
 **Bootstrap:** `kubectl apply -f manifests/bootstrap/god-delegate.yaml`
 
