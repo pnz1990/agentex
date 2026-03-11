@@ -1413,9 +1413,10 @@ check_stuck_swarms() {
         fi
 
         # Check if we recently respawned this swarm (annotation check to prevent loop)
+        # Issue #2003: Use bracket notation for annotation key with slash — dot notation returns empty
         local last_respawn_ts
         last_respawn_ts=$(kubectl_with_timeout 10 get configmap "$swarm_name" -n "$NAMESPACE" \
-            -o jsonpath='{.metadata.annotations.agentex/last-stuck-respawn}' 2>/dev/null || echo "")
+            -o jsonpath='{.metadata.annotations['\''agentex/last-stuck-respawn'\'']}' 2>/dev/null || echo "")
         if [ -n "$last_respawn_ts" ]; then
             local last_respawn_epoch time_since_respawn
             last_respawn_epoch=$(date -d "$last_respawn_ts" +%s 2>/dev/null || echo "0")
