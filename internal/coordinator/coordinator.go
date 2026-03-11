@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/pnz1990/agentex/internal/config"
+	"github.com/pnz1990/agentex/internal/health"
 	k8sclient "github.com/pnz1990/agentex/internal/k8s"
 )
 
@@ -20,31 +21,49 @@ import (
 // long-lived process that maintains the canonical task queue, tracks agent
 // assignments, reconciles spawn slots, and tallies governance votes.
 type Coordinator struct {
-	client       *k8sclient.Client
-	namespace    string
-	config       *config.Config
-	stateManager *StateManager
-	logger       *slog.Logger
-	stopCh       chan struct{}
-	running      atomic.Bool
+	client        *k8sclient.Client
+	namespace     string
+	config        *config.Config
+	stateManager  *StateManager
+	githubFetcher GitHubIssueFetcher
+	logger        *slog.Logger
+	stopCh        chan struct{}
+	running       atomic.Bool
+	metrics       *Metrics
+	healthMonitor *health.Monitor
 }
 
 // NewCoordinator creates a new Coordinator instance.
 func NewCoordinator(client *k8sclient.Client, cfg *config.Config, logger *slog.Logger) *Coordinator {
 	return &Coordinator{
-		client:       client,
-		namespace:    cfg.Namespace,
-		config:       cfg,
-		stateManager: NewStateManager(client, cfg.Namespace, logger),
-		logger:       logger,
-		stopCh:       make(chan struct{}),
+		client:        client,
+		namespace:     cfg.Namespace,
+		config:        cfg,
+		stateManager:  NewStateManager(client, cfg.Namespace, logger),
+		githubFetcher: newHTTPGitHubFetcher(logger),
+		logger:        logger,
+		stopCh:        make(chan struct{}),
 	}
+}
+
+// WithMetrics attaches a Metrics instance to the coordinator so the tick loop
+// increments Prometheus-compatible metrics on every reconciliation cycle.
+func (c *Coordinator) WithMetrics(m *Metrics) *Coordinator {
+	c.metrics = m
+	return c
+}
+
+// WithHealthMonitor attaches a health.Monitor that is started alongside the
+// coordinator main loop and stopped when the coordinator stops.
+func (c *Coordinator) WithHealthMonitor(m *health.Monitor) *Coordinator {
+	c.healthMonitor = m
+	return c
 }
 
 // Run starts the coordinator main loop. It blocks until ctx is cancelled or
 // Stop is called. The main loop is tick-based, matching the bash coordinator:
 //
-//	Every tick:          heartbeat, cleanup stale assignments
+//	Every tick:          heartbeat, cleanup stale assignments, dispatch next task
 //	Every 3 ticks:       tally governance votes
 //	Every 4 ticks:       reconcile spawn slots, cleanup active agents
 //	Every 5 ticks:       refresh task queue
@@ -76,6 +95,12 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		c.logger.Error("early spawn slot reconciliation failed", "error", err)
 	}
 
+	// Start health monitor if configured (#2059)
+	if c.healthMonitor != nil {
+		go c.healthMonitor.Run(ctx)
+		c.logger.Info("health monitor started")
+	}
+
 	ticker := time.NewTicker(c.config.HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -100,11 +125,20 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 // tick executes one iteration of the coordinator main loop.
 func (c *Coordinator) tick(ctx context.Context, iteration int) {
+	start := time.Now()
 	c.logger.Debug("tick", "iteration", iteration)
+
+	// --- metrics: count this reconcile cycle (#2058) ---
+	if c.metrics != nil {
+		c.metrics.ReconcileTotal.Inc()
+	}
+
+	tickErr := false
 
 	// Every tick: heartbeat
 	if err := c.heartbeat(ctx); err != nil {
 		c.logger.Error("heartbeat failed", "error", err)
+		tickErr = true
 	}
 
 	// Every tick: touch liveness probe file (K8s exec probe compatibility)
@@ -113,12 +147,20 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 	// Every tick: cleanup stale assignments
 	if err := c.cleanupStaleAssignments(ctx); err != nil {
 		c.logger.Error("cleanup stale assignments failed", "error", err)
+		tickErr = true
+	}
+
+	// Every tick: dispatch next task to a waiting agent (#2057)
+	if err := c.dispatchNextTask(ctx); err != nil {
+		c.logger.Error("dispatch next task failed", "error", err)
+		tickErr = true
 	}
 
 	// Every 3 ticks: tally governance votes
 	if iteration%3 == 0 {
 		if err := c.tallyGovernanceVotes(ctx); err != nil {
 			c.logger.Error("governance vote tally failed", "error", err)
+			tickErr = true
 		}
 	}
 
@@ -126,9 +168,11 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 	if iteration%4 == 0 {
 		if err := c.reconcileSpawnSlots(ctx); err != nil {
 			c.logger.Error("spawn slot reconciliation failed", "error", err)
+			tickErr = true
 		}
 		if err := c.cleanupActiveAgents(ctx); err != nil {
 			c.logger.Error("cleanup active agents failed", "error", err)
+			tickErr = true
 		}
 	}
 
@@ -136,6 +180,7 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 	if iteration%5 == 0 {
 		if err := c.refreshTaskQueue(ctx); err != nil {
 			c.logger.Error("task queue refresh failed", "error", err)
+			tickErr = true
 		}
 	}
 
@@ -143,6 +188,7 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 	if iteration%10 == 0 {
 		if err := c.ensureStateFieldsInitialized(ctx); err != nil {
 			c.logger.Error("state field initialization failed", "error", err)
+			tickErr = true
 		}
 	}
 
@@ -151,6 +197,34 @@ func (c *Coordinator) tick(ctx context.Context, iteration int) {
 		if err := c.checkSpawnSlotAnomaly(ctx); err != nil {
 			c.logger.Error("spawn slot anomaly check failed", "error", err)
 		}
+	}
+
+	// --- metrics: record duration and error count (#2058) ---
+	if c.metrics != nil {
+		elapsed := time.Since(start).Seconds()
+		c.metrics.ReconcileDuration.Set(elapsed)
+		if tickErr {
+			c.metrics.ReconcileErrors.Inc()
+		}
+
+		// Snapshot kill switch state
+		if ks, _, err := c.IsKillSwitchActive(ctx); err == nil {
+			if ks {
+				c.metrics.KillSwitchActive.Set(1)
+			} else {
+				c.metrics.KillSwitchActive.Set(0)
+			}
+		}
+
+		// Snapshot spawn slots
+		if slotsStr, err := c.stateManager.GetField(ctx, "spawnSlots"); err == nil {
+			slots := float64(parseIntDefault(slotsStr, 0))
+			c.metrics.SpawnSlots.Set(slots)
+		}
+
+		// Snapshot circuit breaker limit
+		constitution := c.config.GetConstitution()
+		c.metrics.CircuitBreakerLimit.Set(float64(constitution.CircuitBreakerLimit))
 	}
 }
 
@@ -428,19 +502,6 @@ func (c *Coordinator) cleanupActiveAgents(ctx context.Context) error {
 		c.logger.Info("cleaned stale agents", "removed", removedCount)
 	}
 
-	return nil
-}
-
-// refreshTaskQueue is a placeholder for the full task queue refresh from GitHub.
-// The full implementation requires GitHub API integration (gh CLI or go-github),
-// which is outside the scope of the core coordinator framework. The bash
-// coordinator calls `gh api` to fetch open issues; this Go coordinator will
-// integrate with go-github in a future iteration.
-func (c *Coordinator) refreshTaskQueue(ctx context.Context) error {
-	c.logger.Info("task queue refresh check")
-	// TODO: Integrate with GitHub API to fetch open issues, score by labels,
-	// filter covered issues, and update taskQueue.
-	// For now, the existing taskQueue in the ConfigMap is preserved.
 	return nil
 }
 
