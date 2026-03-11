@@ -595,12 +595,18 @@ post_debate_response() {
   local stance="${3:-respond}"  # agree / disagree / synthesize / respond
   local confidence="${4:-7}"
 
+  # Normalize parent ConfigMap name: agents pass the ConfigMap name (ends in -thought).
+  # The thought-graph RGD creates ConfigMaps named "<cr-name>-thought".
+  # Strip trailing -thought suffix if present so we can re-add it exactly once (issue #1987).
+  local parent_cm_name="${parent_thought_name}"
+  [[ "$parent_cm_name" == *-thought ]] && parent_cm_name="${parent_cm_name%-thought}"
+
   # Read the parent thought to extract its topic
   local parent_topic
-  parent_topic=$(kubectl_with_timeout 10 get configmap "${parent_thought_name}-thought" -n "$NAMESPACE" \
+  parent_topic=$(kubectl_with_timeout 10 get configmap "${parent_cm_name}-thought" -n "$NAMESPACE" \
     -o jsonpath='{.data.topic}' 2>/dev/null || echo "")
   local parent_agent
-  parent_agent=$(kubectl_with_timeout 10 get configmap "${parent_thought_name}-thought" -n "$NAMESPACE" \
+  parent_agent=$(kubectl_with_timeout 10 get configmap "${parent_cm_name}-thought" -n "$NAMESPACE" \
     -o jsonpath='{.data.agentRef}' 2>/dev/null || echo "unknown")
 
   local content="DEBATE RESPONSE [${stance}] to ${parent_agent}:
@@ -1836,8 +1842,10 @@ proactive_consensus_scan() {
   unresolved=$(kubectl_with_timeout 10 get configmap coordinator-state -n "$NAMESPACE" \
     -o jsonpath='{.data.unresolvedDebates}' 2>/dev/null || echo "")
   
+  # Initialize count=0 outside the if block to avoid unbound variable (issue #1983).
+  # Under set -u, referencing $count after the if block crashes if unresolved is empty.
+  local count=0
   if [ -n "$unresolved" ]; then
-    local count
     count=$(echo "$unresolved" | tr ',' '\n' | wc -l)
     if [ "$count" -gt 10 ]; then
       log "Consensus scan: $count unresolved debates — filing issue for debate backlog..."
