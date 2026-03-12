@@ -15,6 +15,7 @@ import (
 	"github.com/pnz1990/agentex/internal/agent"
 	"github.com/pnz1990/agentex/internal/k8s"
 	"github.com/pnz1990/agentex/internal/roles"
+	agentexs3 "github.com/pnz1990/agentex/internal/s3"
 	roledefs "github.com/pnz1990/agentex/roles"
 )
 
@@ -122,6 +123,14 @@ func run(logger *slog.Logger) error {
 		// Best-effort: failures are logged but do not fail the agent.
 		behaviorCfg := agent.LoadFlightBehaviorConfig()
 		agent.RunFlightBehaviors(ctx, client, cfg, behaviorCfg, task)
+
+		// Post S3 civilizational signals (planning state, swarm memory, identity, chronicle).
+		// Best-effort: failures are logged but do not fail the agent.
+		s3Cfg := agent.LoadS3BehaviorConfig()
+		if s3Cfg.Enabled {
+			s3Client := agentexs3.NewClientFromEnv()
+			agent.RunS3Behaviors(ctx, s3Client, cfg, s3Cfg, task)
+		}
 	} else {
 		workdir := fmt.Sprintf("/workspace/issue-%d", task.IssueNumber)
 		logger.Info("executing opencode")

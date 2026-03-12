@@ -92,7 +92,7 @@ func (c *Cluster) CreateMockTaskCR(ctx context.Context, t *testing.T, name strin
 func (c *Cluster) CreateMockAgentJob(ctx context.Context, t *testing.T, agentName, taskCRName, role string, sleepSeconds int, fail bool) {
 	t.Helper()
 
-	image := envOrDefault("FLIGHT_TEST_IMAGE", "agentex/runner:latest")
+	image := envOrDefault("FLIGHT_TEST_IMAGE", "569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:e2e")
 	failStr := "false"
 	if fail {
 		failStr = "true"

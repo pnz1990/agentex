@@ -3,7 +3,9 @@
 package harness
 
 import (
+	"context"
 	"fmt"
+	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -66,5 +68,49 @@ func buildMockAgentJob(agentName, taskCRName, role, namespace, image string, sle
 				},
 			},
 		},
+	}
+}
+
+// BuildFlightJob constructs a Job with extra environment variables merged in.
+// It delegates to buildMockAgentJob for the base spec, then appends extraEnv.
+// Use this for scenario tests that need to set behavior flags like
+// FLIGHT_THOUGHT_COUNT, FLIGHT_DEBATE_ENABLED, FLIGHT_MESSAGE_ENABLED, etc.
+//
+// S3 isolation: the job automatically inherits E2E_S3_PREFIX, S3_BUCKET, and
+// AWS_REGION from the test environment (defaulting to "e2e/", "agentex-thoughts",
+// and "us-west-2") so the pod writes to the same prefixed path that the test
+// harness reads from.
+func (c *Cluster) BuildFlightJob(agentName, taskCRName, role string, sleepSeconds int, fail bool, extraEnv map[string]string) *batchv1.Job {
+	image := envOrDefault("FLIGHT_TEST_IMAGE", "569190534191.dkr.ecr.us-west-2.amazonaws.com/agentex/runner:e2e")
+	failStr := "false"
+	if fail {
+		failStr = "true"
+	}
+
+	job := buildMockAgentJob(agentName, taskCRName, role, c.Namespace, image, sleepSeconds, failStr)
+
+	// Inject S3 isolation env vars so the pod uses the same prefix as the harness.
+	container := &job.Spec.Template.Spec.Containers[0]
+	container.Env = append(container.Env,
+		corev1.EnvVar{Name: "E2E_S3_PREFIX", Value: envOrDefault("E2E_S3_PREFIX", "e2e/")},
+		corev1.EnvVar{Name: "S3_BUCKET", Value: envOrDefault("S3_BUCKET", "agentex-thoughts")},
+		corev1.EnvVar{Name: "AWS_REGION", Value: envOrDefault("AWS_REGION", "us-west-2")},
+	)
+
+	// Append caller-supplied extra env vars (may override the S3 defaults above).
+	for k, v := range extraEnv {
+		container.Env = append(container.Env, corev1.EnvVar{Name: k, Value: v})
+	}
+
+	return job
+}
+
+// CreateCustomJob creates a pre-built Job in the test namespace.
+// Use this with BuildFlightJob to create scenario jobs with extra env vars.
+func (c *Cluster) CreateCustomJob(ctx context.Context, t *testing.T, job *batchv1.Job) {
+	t.Helper()
+	_, err := c.Client.Clientset.BatchV1().Jobs(c.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create custom job %s: %v", job.Name, err)
 	}
 }

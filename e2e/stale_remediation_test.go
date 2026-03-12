@@ -53,12 +53,23 @@ func TestStaleRemediation_ActiveKept(t *testing.T) {
 	taskName := c.Name(fmt.Sprintf("task-active-%d", issueNum))
 
 	c.CreateMockTaskCR(ctx, t, taskName, issueNum, "stale remediation active kept test")
-	c.InjectActiveAssignment(ctx, t, agentName, issueNum)
+
+	// Create the Job BEFORE injecting the assignment so the coordinator's first
+	// stale-cleanup tick sees an active Job for this agent and doesn't release it.
 	c.CreateMockAgentJob(ctx, t, agentName, taskName, "worker", 20, false)
 	c.Logf(t, "created active agent %s with 20s sleep", agentName)
 
-	// Wait one tick (35s). Assignment should still be there.
-	time.Sleep(35 * time.Second)
+	// Wait for the Job to actually be active before we inject the assignment.
+	// This closes the race: coordinator tick fires → checks job → job not yet running
+	// → releases assignment as stale.
+	c.WaitForJobStatus(ctx, t, agentName, "active", 30*time.Second)
+
+	// Now inject the assignment — coordinator will see an active Job and keep it.
+	c.InjectActiveAssignment(ctx, t, agentName, issueNum)
+
+	// Wait one full coordinator tick interval (15s heartbeat + margin = 20s).
+	// The assignment should still be there because the Job is active.
+	time.Sleep(20 * time.Second)
 	c.AssertAssignmentCount(ctx, t, 1)
 	c.Logf(t, "after 35s: assignment still present (agent is active) — remediator correctly skipped it")
 
