@@ -41,6 +41,17 @@ type AgentConfig struct {
 	Namespace  string
 	Region     string
 	Model      string
+
+	// FlightTest enables mock mode: skips git clone, OpenCode, and PR detection.
+	// Set via AGENTEX_FLIGHT_TEST=true. Still posts a Report CR and respects
+	// the spawn-successor lifecycle so the full coordinator path is exercised.
+	FlightTest bool
+	// MockSleepSeconds is how long the mock agent sleeps to simulate work.
+	// Set via MOCK_AGENT_SLEEP_SECONDS (default 3).
+	MockSleepSeconds int
+	// MockFail causes the mock agent to report failure (exits 1).
+	// Set via MOCK_AGENT_FAIL=true.
+	MockFail bool
 }
 
 // LoadFromEnv populates AgentConfig from environment variables.
@@ -52,6 +63,16 @@ func (c *AgentConfig) LoadFromEnv() error {
 	c.Namespace = os.Getenv("NAMESPACE")
 	c.Region = os.Getenv("BEDROCK_REGION")
 	c.Model = os.Getenv("BEDROCK_MODEL")
+
+	// Flight test flags
+	c.FlightTest = os.Getenv("AGENTEX_FLIGHT_TEST") == "true"
+	c.MockFail = os.Getenv("MOCK_AGENT_FAIL") == "true"
+	c.MockSleepSeconds = 3
+	if s := os.Getenv("MOCK_AGENT_SLEEP_SECONDS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			c.MockSleepSeconds = n
+		}
+	}
 
 	if c.Name == "" {
 		return fmt.Errorf("AGENT_NAME is required")
@@ -75,6 +96,31 @@ func (c *AgentConfig) LoadFromEnv() error {
 		c.Model = "us.anthropic.claude-sonnet-4-6"
 	}
 	return nil
+}
+
+// ExecuteFlightTest simulates agent work in flight test / mock mode.
+// It sleeps for MockSleepSeconds (simulating LLM work) and returns a
+// success result, or a failure result if MockFail is set.
+func ExecuteFlightTest(cfg *AgentConfig) (*ExecutionResult, error) {
+	slog.Info("flight test mode: sleeping to simulate work",
+		"seconds", cfg.MockSleepSeconds,
+		"fail", cfg.MockFail,
+	)
+	time.Sleep(time.Duration(cfg.MockSleepSeconds) * time.Second)
+
+	if cfg.MockFail {
+		slog.Info("flight test mode: simulating failure (MOCK_AGENT_FAIL=true)")
+		return &ExecutionResult{
+			Phase: PhaseExecute,
+			Error: "mock agent failure (MOCK_AGENT_FAIL=true)",
+		}, nil
+	}
+
+	slog.Info("flight test mode: simulated work complete")
+	return &ExecutionResult{
+		Success: true,
+		Phase:   PhaseExecute,
+	}, nil
 }
 
 // TaskInfo holds the parsed assignment from a Task CR.
@@ -111,8 +157,15 @@ func ReadTask(ctx context.Context, client *k8s.Client, namespace, taskCRName str
 		Effort:      getString(spec, "effort"),
 	}
 
-	// Issue number can be int or string in the CR
-	switch v := spec["issueNumber"].(type) {
+	// Issue number: the RGD schema uses "githubIssue" (integer field).
+	// Fall back to "issueNumber" for Task CRs created before the schema migration.
+	issueKey := "githubIssue"
+	if _, hasGithubIssue := spec[issueKey]; !hasGithubIssue {
+		if _, hasIssueNumber := spec["issueNumber"]; hasIssueNumber {
+			issueKey = "issueNumber"
+		}
+	}
+	switch v := spec[issueKey].(type) {
 	case int64:
 		info.IssueNumber = int(v)
 	case float64:

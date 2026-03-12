@@ -1,0 +1,54 @@
+# agentex-e2e RBAC
+# Mirrors the agentex namespace agent RBAC exactly.
+# Apply after namespace.yaml: kubectl apply -f manifests/e2e/rbac.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentex-agent-sa
+  namespace: agentex-e2e
+  # NOTE: No eks.amazonaws.com/role-arn annotation here.
+  # EKS Pod Identity association is created separately via:
+  #   scripts/e2e-setup.sh  (or aws eks create-pod-identity-association)
+  # The annotation is NOT needed when using EKS Pod Identity (as opposed to IRSA).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentex-agent-role
+  namespace: agentex-e2e
+rules:
+- apiGroups: ["agentex.io", "kro.run"]
+  resources:
+  - agents
+  - tasks
+  - messages
+  - thoughts
+  - swarms
+  - reports
+  - coordinators
+  - plannerloops
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentex-agent-binding
+  namespace: agentex-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentex-agent-role
+subjects:
+- kind: ServiceAccount
+  name: agentex-agent-sa
+  namespace: agentex-e2e

@@ -31,6 +31,7 @@ That is the entire agent lifecycle. Everything else is supporting infrastructure
 - **Search for existing issues before filing new ones** — `gh issue list --repo "$REPO" --state open --search "<keyword>" --limit 10`
 - **Post a Thought CR** (type=insight) with what you learned before exiting
 - **Agent CRs MUST use `kro.run/v1alpha1`** — the legacy `agentex.io/v1alpha1` will NOT create Jobs
+- **Always pass `--context` on every `kubectl` command** — multiple clusters coexist in the kubeconfig. Use `arn:aws:eks:us-west-2:569190534191:cluster/agentex` for the agentex production cluster. Omitting `--context` silently executes against whichever cluster happens to be the current default — which may be someone else's cluster.
 
 ---
 
@@ -39,7 +40,7 @@ That is the entire agent lifecycle. Everything else is supporting infrastructure
 The `agentex-constitution` ConfigMap is god-owned. Agents READ it. Agents do NOT modify it.
 
 ```bash
-kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data}' | python3 -m json.tool
+kubectl get configmap agentex-constitution -n agentex --context arn:aws:eks:us-west-2:569190534191:cluster/agentex -o jsonpath='{.data}' | python3 -m json.tool
 ```
 
 **Key constants:**
@@ -375,6 +376,8 @@ All runtime values from `agentex-constitution` ConfigMap:
 
 ## For God — Resuming a Session
 
+**IMPORTANT:** Always pass `--context arn:aws:eks:us-west-2:569190534191:cluster/agentex` on every kubectl command. Multiple clusters share this kubeconfig.
+
 ```bash
 # 1. God chronicle
 aws s3 cp s3://agentex-thoughts/god-chronicle.json - | python3 -m json.tool
@@ -383,8 +386,8 @@ aws s3 cp s3://agentex-thoughts/god-chronicle.json - | python3 -m json.tool
 aws s3 cp s3://agentex-thoughts/chronicle.json - | python3 -m json.tool
 
 # 3. Cluster health
-kubectl get jobs -n agentex | grep Running | wc -l
-kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.circuitBreakerLimit}'
+kubectl get jobs -n agentex --context arn:aws:eks:us-west-2:569190534191:cluster/agentex | grep Running | wc -l
+kubectl get configmap agentex-constitution -n agentex --context arn:aws:eks:us-west-2:569190534191:cluster/agentex -o jsonpath='{.data.circuitBreakerLimit}'
 
 # 4. God reports
 gh issue view 62 --repo pnz1990/agentex --comments | tail -80
@@ -393,7 +396,7 @@ gh issue view 62 --repo pnz1990/agentex --comments | tail -80
 gh pr list --repo pnz1990/agentex --state open
 
 # 6. Current directive
-kubectl get configmap agentex-constitution -n agentex -o jsonpath='{.data.lastDirective}'
+kubectl get configmap agentex-constitution -n agentex --context arn:aws:eks:us-west-2:569190534191:cluster/agentex -o jsonpath='{.data.lastDirective}'
 ```
 
 **Critical facts:**

@@ -7,18 +7,18 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# Copy module files first for Docker layer caching
+# Copy module files and vendor directory (avoids network calls during build)
 COPY go.mod go.sum ./
-RUN go mod download
+COPY vendor/ vendor/
 
 # Copy Go source
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY roles/ roles/
 
-# Build both binaries — static, no CGO
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /build/bin/agentex-agent ./cmd/agent/
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /build/bin/agentex-coordinator ./cmd/coordinator/
+# Build both binaries — static, no CGO, using vendored deps
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -ldflags="-w -s" -o /build/bin/agentex-agent ./cmd/agent/
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -ldflags="-w -s" -o /build/bin/agentex-coordinator ./cmd/coordinator/
 
 # ============================================================================
 # Stage 1: Builder — Install Node.js with gnupg, then remove gnupg completely

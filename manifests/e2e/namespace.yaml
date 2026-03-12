@@ -1,0 +1,12 @@
+# agentex-e2e staging namespace setup
+# Mirrors the agentex namespace structure but fully isolated.
+# Apply once: kubectl apply -f manifests/e2e/namespace.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentex-e2e
+  labels:
+    kubernetes.io/metadata.name: agentex-e2e
+    agentex/env: staging
+    agentex/e2e: "true"
