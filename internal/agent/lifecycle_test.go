@@ -128,6 +128,98 @@ func TestReadTask_StringIssueNumber(t *testing.T) {
 	}
 }
 
+// TestReadTask_GithubIssueField verifies that ReadTask handles the real kro Task RGD
+// schema where the issue number field is "githubIssue" (not "issueNumber").
+// This was the root cause of e2e flight test failures: every agent pod exited with
+// "task CR task-X has no issueNumber" because the field is named githubIssue in kro.
+func TestReadTask_GithubIssueField(t *testing.T) {
+	taskCR := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": k8s.KroGroup + "/" + k8s.KroVersion,
+			"kind":       "Task",
+			"metadata": map[string]interface{}{
+				"name":      "task-kro-real",
+				"namespace": "agentex",
+			},
+			"spec": map[string]interface{}{
+				"githubIssue": int64(2073),
+				"title":       "Fix ReadTask schema",
+				"description": "Task CR uses githubIssue not issueNumber",
+				"effort":      "S",
+			},
+		},
+	}
+	client := newTestClient(t, taskCR)
+
+	info, err := ReadTask(context.Background(), client, "agentex", "task-kro-real")
+	if err != nil {
+		t.Fatalf("ReadTask with githubIssue field returned error: %v", err)
+	}
+	if info.IssueNumber != 2073 {
+		t.Errorf("IssueNumber = %d, want 2073", info.IssueNumber)
+	}
+	if info.Title != "Fix ReadTask schema" {
+		t.Errorf("Title = %q, want %q", info.Title, "Fix ReadTask schema")
+	}
+}
+
+// TestReadTask_GithubIssuePreferredOverIssueNumber ensures that when both fields
+// are present, githubIssue takes precedence (kro schema is authoritative).
+func TestReadTask_GithubIssuePreferredOverIssueNumber(t *testing.T) {
+	taskCR := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": k8s.KroGroup + "/" + k8s.KroVersion,
+			"kind":       "Task",
+			"metadata": map[string]interface{}{
+				"name":      "task-both-fields",
+				"namespace": "agentex",
+			},
+			"spec": map[string]interface{}{
+				"githubIssue": int64(500),
+				"issueNumber": int64(999), // should be ignored when githubIssue is present
+				"title":       "Dual field task",
+				"description": "Testing field precedence",
+				"effort":      "M",
+			},
+		},
+	}
+	client := newTestClient(t, taskCR)
+
+	info, err := ReadTask(context.Background(), client, "agentex", "task-both-fields")
+	if err != nil {
+		t.Fatalf("ReadTask returned error: %v", err)
+	}
+	if info.IssueNumber != 500 {
+		t.Errorf("IssueNumber = %d, want 500 (githubIssue should take precedence)", info.IssueNumber)
+	}
+}
+
+// TestReadTask_NoIssueField verifies that ReadTask returns a descriptive error
+// when neither githubIssue nor issueNumber is present.
+func TestReadTask_NoIssueField(t *testing.T) {
+	taskCR := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": k8s.KroGroup + "/" + k8s.KroVersion,
+			"kind":       "Task",
+			"metadata": map[string]interface{}{
+				"name":      "task-no-issue",
+				"namespace": "agentex",
+			},
+			"spec": map[string]interface{}{
+				"title":       "No issue field",
+				"description": "Missing both githubIssue and issueNumber",
+				"effort":      "S",
+			},
+		},
+	}
+	client := newTestClient(t, taskCR)
+
+	_, err := ReadTask(context.Background(), client, "agentex", "task-no-issue")
+	if err == nil {
+		t.Fatal("expected error when neither githubIssue nor issueNumber present, got nil")
+	}
+}
+
 // --- TestRenderAgentPrompt ---
 
 func TestRenderAgentPrompt_Operator(t *testing.T) {
