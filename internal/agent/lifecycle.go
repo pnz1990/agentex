@@ -111,8 +111,13 @@ func ReadTask(ctx context.Context, client *k8s.Client, namespace, taskCRName str
 		Effort:      getString(spec, "effort"),
 	}
 
-	// Issue number can be int or string in the CR
-	switch v := spec["issueNumber"].(type) {
+	// Issue number: kro Task RGD uses "githubIssue" (integer). Fall back to
+	// "issueNumber" for backward compatibility with older Task CRs.
+	issueKey := "githubIssue"
+	if _, ok := spec[issueKey]; !ok {
+		issueKey = "issueNumber"
+	}
+	switch v := spec[issueKey].(type) {
 	case int64:
 		info.IssueNumber = int(v)
 	case float64:
@@ -122,7 +127,7 @@ func ReadTask(ctx context.Context, client *k8s.Client, namespace, taskCRName str
 	}
 
 	if info.IssueNumber == 0 {
-		return nil, fmt.Errorf("task CR %s has no issueNumber", taskCRName)
+		return nil, fmt.Errorf("task CR %s has no githubIssue or issueNumber", taskCRName)
 	}
 
 	return info, nil
