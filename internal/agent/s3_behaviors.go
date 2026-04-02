@@ -4,7 +4,9 @@ package agent
 //
 // This file implements the S3 write behaviors that real agents perform via helpers.sh:
 //   - write_planning_state  → s3://<bucket>/<prefix>planning/<agent>.json
-//   - write_swarm_memory    → s3://<bucket>/<prefix>swarm/<name>-<ts>.json
+//   - write_swarm_memory    → s3://<bucket>/<prefix>swarm/<name>-<ts>.json  (per-agent)
+//     OR when FLIGHT_SWARM_NAME is set:
+//                           → s3://<bucket>/<prefix>swarm-memories/<swarmName>.json (shared, append)
 //   - update_identity_stats → s3://<bucket>/<prefix>identity/<agent>.json
 //   - post_chronicle_candidate → s3://<bucket>/<prefix>chronicle-candidates/<agent>-<ts>.json
 //
@@ -35,6 +37,12 @@ type S3BehaviorConfig struct {
 	// SwarmEnabled writes a swarm memory JSON to S3 (FLIGHT_SWARM_ENABLED).
 	SwarmEnabled bool
 
+	// SwarmName is the shared swarm name set by FLIGHT_SWARM_NAME.
+	// When non-empty each agent appends itself to
+	// "swarm-memories/<SwarmName>.json" (read-modify-write) rather than
+	// writing an isolated per-agent key under "swarm/".
+	SwarmName string
+
 	// IdentityEnabled writes an identity stats JSON to S3 (FLIGHT_IDENTITY_ENABLED).
 	IdentityEnabled bool
 
@@ -54,6 +62,11 @@ func LoadS3BehaviorConfig() *S3BehaviorConfig {
 		cfg.Enabled = true
 	}
 	if os.Getenv("FLIGHT_SWARM_ENABLED") == "true" {
+		cfg.SwarmEnabled = true
+		cfg.Enabled = true
+	}
+	if v := os.Getenv("FLIGHT_SWARM_NAME"); v != "" {
+		cfg.SwarmName = v
 		cfg.SwarmEnabled = true
 		cfg.Enabled = true
 	}
@@ -91,7 +104,7 @@ func RunS3Behaviors(ctx context.Context, s3Client *agentexs3.Client, agentCfg *A
 	}
 
 	if s3Cfg.SwarmEnabled {
-		if err := writeSwarmMemory(ctx, s3Client, agentCfg, task); err != nil {
+		if err := writeSwarmMemory(ctx, s3Client, agentCfg, s3Cfg, task); err != nil {
 			slog.Warn("s3 behaviors: failed to write swarm memory", "error", err)
 		}
 	}
@@ -133,8 +146,83 @@ func writePlanningState(ctx context.Context, s3Client *agentexs3.Client, cfg *Ag
 }
 
 // writeSwarmMemory writes a swarm memory entry to S3.
+//
+// When s3Cfg.SwarmName is set (FLIGHT_SWARM_NAME), the agent performs a
+// read-modify-write to append itself to the shared swarm memory object at
+// "swarm-memories/<SwarmName>.json". This lets TestSwarmMemory verify that
+// all 3 concurrent agents appear in the same S3 object's members array.
+//
+// When SwarmName is empty, the legacy per-agent write is used:
 // Key: swarm/<agentName>-<timestamp>.json
-func writeSwarmMemory(ctx context.Context, s3Client *agentexs3.Client, cfg *AgentConfig, task *TaskInfo) error {
+func writeSwarmMemory(ctx context.Context, s3Client *agentexs3.Client, cfg *AgentConfig, s3Cfg *S3BehaviorConfig, task *TaskInfo) error {
+	if s3Cfg.SwarmName != "" {
+		return writeSharedSwarmMemory(ctx, s3Client, cfg, s3Cfg.SwarmName, task)
+	}
+	return writePerAgentSwarmMemory(ctx, s3Client, cfg, task)
+}
+
+// writeSharedSwarmMemory appends this agent to a shared swarm memory object.
+// Key: swarm-memories/<swarmName>.json
+// It performs a read-modify-write with a simple retry to handle concurrent writes.
+func writeSharedSwarmMemory(ctx context.Context, s3Client *agentexs3.Client, cfg *AgentConfig, swarmName string, task *TaskInfo) error {
+	key := fmt.Sprintf("swarm-memories/%s.json", swarmName)
+
+	// Retry up to 5 times to handle concurrent writes from multiple agents.
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*200) * time.Millisecond)
+		}
+
+		// Try to read the existing shared memory.
+		var existing agentexs3.S3SwarmMemory
+		readErr := s3Client.GetJSON(ctx, key, &existing)
+
+		if readErr != nil {
+			// First writer: initialise the object.
+			existing = agentexs3.S3SwarmMemory{
+				SwarmName: swarmName,
+				Goal:      fmt.Sprintf("flight test swarm: %s", swarmName),
+				Members:   []string{},
+				Tasks:     []string{},
+				Decisions: []string{},
+				Origin:    cfg.Name,
+				Timestamp: time.Now().UTC(),
+			}
+		}
+
+		// Append this agent if not already present.
+		alreadyMember := false
+		for _, m := range existing.Members {
+			if m == cfg.Name {
+				alreadyMember = true
+				break
+			}
+		}
+		if !alreadyMember {
+			existing.Members = append(existing.Members, cfg.Name)
+			existing.Tasks = append(existing.Tasks, fmt.Sprintf("issue-%d", task.IssueNumber))
+			existing.Decisions = append(existing.Decisions,
+				fmt.Sprintf("%s (role=%s) joined swarm for issue #%d", cfg.Name, cfg.Role, task.IssueNumber))
+			existing.Timestamp = time.Now().UTC()
+		}
+
+		if err := s3Client.PutJSON(ctx, key, existing); err != nil {
+			if attempt < maxRetries-1 {
+				slog.Warn("s3: shared swarm write conflict, retrying", "attempt", attempt, "error", err)
+				continue
+			}
+			return fmt.Errorf("shared swarm memory %s: %w", key, err)
+		}
+		slog.Info("s3: wrote shared swarm memory", "key", key, "members", len(existing.Members))
+		return nil
+	}
+	return fmt.Errorf("shared swarm memory %s: exceeded max retries", key)
+}
+
+// writePerAgentSwarmMemory writes an individual swarm memory entry.
+// Key: swarm/<agentName>-<timestamp>.json
+func writePerAgentSwarmMemory(ctx context.Context, s3Client *agentexs3.Client, cfg *AgentConfig, task *TaskInfo) error {
 	ts := time.Now().UTC()
 	mem := agentexs3.S3SwarmMemory{
 		SwarmName: fmt.Sprintf("flight-test-swarm-%s", cfg.Name),
