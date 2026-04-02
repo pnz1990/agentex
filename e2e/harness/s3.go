@@ -99,6 +99,52 @@ func (c *Cluster) ListS3SwarmMemories(ctx context.Context, t *testing.T, agentNa
 	return keys
 }
 
+// GetS3SharedSwarmMemory reads the shared swarm memory object for the given swarm name.
+// The object is written to "swarm-memories/<swarmName>.json" by mock agents that
+// have FLIGHT_SWARM_NAME set. Multiple agents in the same swarm append themselves
+// to the same object via read-modify-write in s3_behaviors.go.
+func (c *Cluster) GetS3SharedSwarmMemory(ctx context.Context, t *testing.T, swarmName string) *agentexs3.S3SwarmMemory {
+	t.Helper()
+	s3c := c.S3Client()
+	key := fmt.Sprintf("swarm-memories/%s.json", swarmName)
+	var mem agentexs3.S3SwarmMemory
+	if err := s3c.GetJSON(ctx, key, &mem); err != nil {
+		t.Fatalf("get S3 shared swarm memory for swarm %s: %v", swarmName, err)
+	}
+	return &mem
+}
+
+// WaitForS3SharedSwarmMemberCount polls until the shared swarm memory for swarmName
+// has at least wantCount members, or timeout is reached.
+// This is needed because multiple agents write concurrently and there is no
+// guaranteed ordering — the test must wait for all 3 agents to finish writing.
+func (c *Cluster) WaitForS3SharedSwarmMemberCount(ctx context.Context, t *testing.T, swarmName string, wantCount int, timeout time.Duration) {
+	t.Helper()
+	s3c := c.S3Client()
+	key := fmt.Sprintf("swarm-memories/%s.json", swarmName)
+	c.WaitReady(ctx, t, fmt.Sprintf("swarm-memories/%s members >= %d", swarmName, wantCount), timeout, func() (bool, error) {
+		var mem agentexs3.S3SwarmMemory
+		if err := s3c.GetJSON(ctx, key, &mem); err != nil {
+			return false, nil // key may not exist yet — keep polling
+		}
+		return len(mem.Members) >= wantCount, nil
+	})
+}
+
+// CleanupS3SharedSwarmMemory deletes the shared swarm memory object for a swarm name.
+func (c *Cluster) CleanupS3SharedSwarmMemory(ctx context.Context, t *testing.T, swarmName string) {
+	t.Helper()
+	if os.Getenv("E2E_S3_CLEANUP") == "false" {
+		t.Logf("skipping S3 cleanup (E2E_S3_CLEANUP=false)")
+		return
+	}
+	s3c := c.S3Client()
+	key := fmt.Sprintf("swarm-memories/%s.json", swarmName)
+	if err := s3c.DeletePrefix(ctx, key); err != nil {
+		t.Logf("S3 cleanup swarm-memories/%s: %v", swarmName, err)
+	}
+}
+
 // ListS3ChronicleCandidates lists chronicle candidate keys for the given agent.
 func (c *Cluster) ListS3ChronicleCandidates(ctx context.Context, t *testing.T, agentName string) []string {
 	t.Helper()
